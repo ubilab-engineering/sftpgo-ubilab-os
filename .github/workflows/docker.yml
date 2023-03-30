@@ -20,17 +20,18 @@ jobs:
           - ubuntu-latest
         docker_pkg:
           - debian
-          - alpine
+          # - alpine
         optional_deps:
           - true
-          - false
+          # - false
         include:
-          - os: ubuntu-latest
-            docker_pkg: distroless
-            optional_deps: false
+          # - os: ubuntu-latest
+          #   docker_pkg: distroless
+          #   optional_deps: false
           - os: ubuntu-latest
             docker_pkg: debian-plugins
             optional_deps: true
+      max-parallel: 1
     steps:
       - name: Checkout
         uses: actions/checkout@v3

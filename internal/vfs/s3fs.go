@@ -287,7 +287,6 @@ func (fs *S3Fs) Create(name string, flag int) (File, *PipeWriter, func(), error)
 	return nil, p, cancelFn, nil
 }
 
-// a function named insertPrefix that takes a string and a datetime and returns a string
 func insertPrefix(name string, t time.Time, timeFormat string) string {
 	// split string into parts on the forward slash
 	parts := strings.Split(name, "/")
