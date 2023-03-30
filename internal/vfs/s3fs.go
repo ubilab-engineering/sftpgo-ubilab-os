@@ -243,6 +243,7 @@ func (fs *S3Fs) Open(name string, offset int64) (File, *pipeat.PipeReaderAt, fun
 
 // Create creates or opens the named file for writing
 func (fs *S3Fs) Create(name string, flag int) (File, *PipeWriter, func(), error) {
+	key := name
 	r, w, err := pipeat.PipeInDir(fs.localTempDir)
 	if err != nil {
 		return nil, nil, nil, err
@@ -267,10 +268,11 @@ func (fs *S3Fs) Create(name string, flag int) (File, *PipeWriter, func(), error)
 			contentType = s3DirMimeType
 		} else {
 			contentType = mime.TypeByExtension(path.Ext(name))
+			key = insertPrefix(name, time.Now(), "2006/01/02/15/04/05")
 		}
 		_, err := uploader.Upload(ctx, &s3.PutObjectInput{
 			Bucket:       aws.String(fs.config.Bucket),
-			Key:          aws.String(name),
+			Key:          aws.String(key),
 			Body:         r,
 			ACL:          types.ObjectCannedACL(fs.config.ACL),
 			StorageClass: types.StorageClass(fs.config.StorageClass),
@@ -278,11 +280,20 @@ func (fs *S3Fs) Create(name string, flag int) (File, *PipeWriter, func(), error)
 		})
 		r.CloseWithError(err) //nolint:errcheck
 		p.Done(err)
-		fsLog(fs, logger.LevelDebug, "upload completed, path: %q, acl: %q, readed bytes: %v, err: %+v",
-			name, fs.config.ACL, r.GetReadedBytes(), err)
+		fsLog(fs, logger.LevelDebug, "upload completed, received path `%q`, stored at path: `%q`, acl: %q, read bytes: %v, err: %+v",
+			name, key, fs.config.ACL, r.GetReadedBytes(), err)
 		metric.S3TransferCompleted(r.GetReadedBytes(), 0, err)
 	}()
 	return nil, p, cancelFn, nil
+}
+
+// a function named insertPrefix that takes a string and a datetime and returns a string
+func insertPrefix(name string, t time.Time, timeFormat string) string {
+	// split string into parts on the forward slash
+	parts := strings.Split(name, "/")
+	last := parts[len(parts)-1]
+	parts[len(parts)-1] = t.Format(timeFormat) + "/" + last
+	return strings.Join(parts, "/")
 }
 
 // Rename renames (moves) source to target.
