@@ -170,7 +170,8 @@ jobs:
           builder: ${{ steps.builder.outputs.name }}
           file: ./${{ steps.info.outputs.dockerfile }}
           platforms: linux/amd64
-          push: ${{ github.event_name != 'pull_request' }}
+          push: true
+          # push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.info.outputs.tags }}
           build-args: |
             COMMIT_SHA=${{ steps.info.outputs.sha }}
