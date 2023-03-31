@@ -77,7 +77,7 @@ jobs:
           elif [[ $DOCKER_PKG == debian ]]; then
             FEATURES="${FEATURES},unixcrypt"
           fi
-          DOCKER_IMAGES=("drakkan/sftpgo" "ghcr.io/drakkan/sftpgo")
+          DOCKER_IMAGES=("ubilab-engineering/sftpgo-ubilab-os" "ghcr.io/ubilab-engineering/sftpgo-ubilab-os")
           TAGS="${DOCKER_IMAGES[0]}:${VERSION}"
           TAGS_SLIM="${DOCKER_IMAGES[0]}:${VERSION_SLIM}"
 
