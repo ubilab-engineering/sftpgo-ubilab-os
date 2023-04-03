@@ -28,6 +28,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -243,6 +244,17 @@ func (fs *S3Fs) Open(name string, offset int64) (File, *pipeat.PipeReaderAt, fun
 
 // Create creates or opens the named file for writing
 func (fs *S3Fs) Create(name string, flag int) (File, *PipeWriter, func(), error) {
+	// log stack trace
+	// if fs.config.Debug {
+	bufOne := make([]byte, 1<<16)
+	runtime.Stack(bufOne, false)
+	bufAll := make([]byte, 1<<16)
+	runtime.Stack(bufAll, false)
+
+	fsLog(fs, logger.LevelDebug, "create, name: %v, flag: %v, stackOne: %v", name, flag, string(bufOne))
+	fsLog(fs, logger.LevelDebug, "create, name: %v, flag: %v, stackAll: %v", name, flag, string(bufAll))
+	// }
+
 	key := name
 	r, w, err := pipeat.PipeInDir(fs.localTempDir)
 	if err != nil {
