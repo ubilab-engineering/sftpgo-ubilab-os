@@ -268,7 +268,7 @@ func (fs *S3Fs) Create(name string, flag int) (File, *PipeWriter, func(), error)
 			contentType = s3DirMimeType
 		} else {
 			contentType = mime.TypeByExtension(path.Ext(name))
-			key = insertPrefix(name, time.Now(), "2006/01/02/15/04/05")
+			key = insertPrefixWithConf(name)
 		}
 		_, err := uploader.Upload(ctx, &s3.PutObjectInput{
 			Bucket:       aws.String(fs.config.Bucket),
@@ -287,11 +287,23 @@ func (fs *S3Fs) Create(name string, flag int) (File, *PipeWriter, func(), error)
 	return nil, p, cancelFn, nil
 }
 
+func insertPrefixWithConf(name string) string {
+	layout := getEnv("UBILAB_SFTPGO_DATE_PREFIX_EXAMPLE", "2006/01/02")
+	return insertPrefix(name, time.Now(), layout)
+}
+
+// read value from environment variable or return default value
+func getEnv(key, defaultValue string) string {
+	if value, ok := os.LookupEnv(key); ok {
+		return value
+	}
+	return defaultValue
+}
+
 func insertPrefix(name string, t time.Time, timeFormat string) string {
-	// split string into parts on the forward slash
-	parts := strings.Split(name, "/")
+	parts := strings.Split(name, "/") // split string into parts on the forward slash
 	last := parts[len(parts)-1]
-	parts[len(parts)-1] = t.Format(timeFormat) + "/" + last
+	parts[len(parts)-1] = t.Format(timeFormat) + "/" + last // replace filename (last element) with prefix + filename
 	return strings.Join(parts, "/")
 }
 
