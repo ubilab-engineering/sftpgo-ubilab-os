@@ -758,7 +758,7 @@ func (c *scpCommand) getFileUploadDestPath(fs vfs.Fs, scpDestPath, fileName stri
 				}
 			}
 			withPrefix := insertPrefixWithConf(scpDestPath, c.startTime)
-			logger.Debug(logSender, "scpDestPath: `%v`, fileName: `%v`, withPrefix: `%v`", scpDestPath, fileName, withPrefix)
+			logger.Debug(logSender, "[silk] scpDestPath: `%v`, fileName: `%v`, withPrefix: `%v`", scpDestPath, fileName, withPrefix)
 			return withPrefix
 		}
 	}
