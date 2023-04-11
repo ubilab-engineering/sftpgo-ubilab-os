@@ -28,7 +28,6 @@ import (
 	"os"
 	"path"
 	"path/filepath"
-	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -244,18 +243,6 @@ func (fs *S3Fs) Open(name string, offset int64) (File, *pipeat.PipeReaderAt, fun
 
 // Create creates or opens the named file for writing
 func (fs *S3Fs) Create(name string, flag int) (File, *PipeWriter, func(), error) {
-	// log stack trace
-	// if fs.config.Debug {
-	bufOne := make([]byte, 1<<16)
-	runtime.Stack(bufOne, false)
-	bufAll := make([]byte, 1<<16)
-	runtime.Stack(bufAll, false)
-
-	fsLog(fs, logger.LevelDebug, "create, name: %v, flag: %v, stackOne: %v", name, flag, string(bufOne))
-	fsLog(fs, logger.LevelDebug, "create, name: %v, flag: %v, stackAll: %v", name, flag, string(bufAll))
-	// }
-
-	key := name
 	r, w, err := pipeat.PipeInDir(fs.localTempDir)
 	if err != nil {
 		return nil, nil, nil, err
@@ -280,11 +267,10 @@ func (fs *S3Fs) Create(name string, flag int) (File, *PipeWriter, func(), error)
 			contentType = s3DirMimeType
 		} else {
 			contentType = mime.TypeByExtension(path.Ext(name))
-			key = insertPrefixWithConf(name)
 		}
 		_, err := uploader.Upload(ctx, &s3.PutObjectInput{
 			Bucket:       aws.String(fs.config.Bucket),
-			Key:          aws.String(key),
+			Key:          aws.String(name),
 			Body:         r,
 			ACL:          types.ObjectCannedACL(fs.config.ACL),
 			StorageClass: types.StorageClass(fs.config.StorageClass),
@@ -292,31 +278,11 @@ func (fs *S3Fs) Create(name string, flag int) (File, *PipeWriter, func(), error)
 		})
 		r.CloseWithError(err) //nolint:errcheck
 		p.Done(err)
-		fsLog(fs, logger.LevelDebug, "upload completed, received path `%q`, stored at path: `%q`, acl: %q, read bytes: %v, err: %+v",
-			name, key, fs.config.ACL, r.GetReadedBytes(), err)
+		fsLog(fs, logger.LevelDebug, "upload completed, path: %q, acl: %q, readed bytes: %v, err: %+v",
+			name, fs.config.ACL, r.GetReadedBytes(), err)
 		metric.S3TransferCompleted(r.GetReadedBytes(), 0, err)
 	}()
 	return nil, p, cancelFn, nil
-}
-
-func insertPrefixWithConf(name string) string {
-	layout := getEnv("UBILAB_SFTPGO_DATE_PREFIX_EXAMPLE", "2006/01/02")
-	return insertPrefix(name, time.Now(), layout)
-}
-
-// read value from environment variable or return default value
-func getEnv(key, defaultValue string) string {
-	if value, ok := os.LookupEnv(key); ok {
-		return value
-	}
-	return defaultValue
-}
-
-func insertPrefix(name string, t time.Time, timeFormat string) string {
-	parts := strings.Split(name, "/") // split string into parts on the forward slash
-	last := parts[len(parts)-1]
-	parts[len(parts)-1] = t.Format(timeFormat) + "/" + last // replace filename (last element) with prefix + filename
-	return strings.Join(parts, "/")
 }
 
 // Rename renames (moves) source to target.

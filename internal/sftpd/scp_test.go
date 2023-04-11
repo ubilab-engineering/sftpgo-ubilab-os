@@ -1,7 +1,7 @@
 //go:build !nos3
 // +build !nos3
 
-package vfs
+package sftpd
 
 import (
 	"fmt"
