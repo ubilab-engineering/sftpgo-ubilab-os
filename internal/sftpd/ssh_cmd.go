@@ -113,6 +113,7 @@ func processSSHCommand(payload []byte, connection *Connection, enabledSSHCommand
 					startTime:  time.Now(),
 					args:       args,
 				}
+				println("[silk] ssh")
 				go sshCommand.handle() //nolint:errcheck
 				return true
 			}
