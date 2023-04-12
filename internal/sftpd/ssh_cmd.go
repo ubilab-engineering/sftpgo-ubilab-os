@@ -126,7 +126,7 @@ func processSSHCommand(payload []byte, connection *Connection, enabledSSHCommand
 }
 
 func (c *sshCommand) handle() (err error) {
-	logger.Debug(logSender, "", "[silk] ssh command: %v", c)
+	logger.Warn(logSender, "", "[silk] ssh command: %v", c)
 	defer func() {
 		if r := recover(); r != nil {
 			logger.Error(logSender, "", "panic in handle ssh command: %q stack trace: %v", r, string(debug.Stack()))
