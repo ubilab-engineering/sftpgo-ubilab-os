@@ -126,6 +126,7 @@ func processSSHCommand(payload []byte, connection *Connection, enabledSSHCommand
 }
 
 func (c *sshCommand) handle() (err error) {
+	logger.Debug(logSender, "", "[silk] ssh command: %v", c)
 	defer func() {
 		if r := recover(); r != nil {
 			logger.Error(logSender, "", "panic in handle ssh command: %q stack trace: %v", r, string(debug.Stack()))
@@ -455,7 +456,9 @@ func (c *sshCommand) getSystemCommand() (systemCommand, error) {
 }
 
 // for the supported commands, the destination path, if any, is the last argument
-func (c *sshCommand) getDestPath() string {
+func (c *sshCommand) getDestPath() string { // here ?
+	logger.Debug(logSender, "", "[silk] ssh command `%q`, with args: `%+v` sshCommand `%v`",
+		c.command, c.args, c)
 	if len(c.args) == 0 {
 		return ""
 	}
