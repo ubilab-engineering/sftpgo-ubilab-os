@@ -738,7 +738,6 @@ func (c *scpCommand) parseUploadMessage(fs vfs.Fs, command string) (int64, strin
 }
 
 func (c *scpCommand) getFileUploadDestPath(fs vfs.Fs, scpDestPath, fileName string) string {
-	// here modify path by inserting prefix
 	if !c.isRecursive() {
 		// if the upload is not recursive and the destination path does not end with "/"
 		// then scpDestPath is the wanted filename, for example:
@@ -756,9 +755,7 @@ func (c *scpCommand) getFileUploadDestPath(fs vfs.Fs, scpDestPath, fileName stri
 					}
 				}
 			}
-			withPrefix := insertPrefixWithConf(scpDestPath, c.startTime)
-			logger.Debug(logSender, "[silk] scpDestPath: `%v`, fileName: `%v`, withPrefix: `%v`", scpDestPath, fileName, withPrefix)
-			return withPrefix
+			return scpDestPath
 		}
 	}
 	// if the upload is recursive or scpDestPath has the "/" suffix then the destination
