@@ -135,6 +135,11 @@ func (c *Connection) handleFilewrite(request *sftp.Request) (sftp.WriterAtReader
 	}
 
 	filePath := p
+	// log filePath and request.Filepath to help debugging
+	c.Log(logger.LevelDebug, "[silk] file write request for "+
+		"file `%q`, resolved path: `%v`, p `%v`, flags: `%v`, context: `%v`",
+		request.Filepath, filePath, p, request.Pflags(), request.Context())
+
 	if common.Config.IsAtomicUploadEnabled() && fs.IsAtomicUploadSupported() {
 		filePath = fs.GetAtomicUploadPath(p)
 	}
