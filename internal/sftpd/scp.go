@@ -45,7 +45,7 @@ type scpCommand struct {
 }
 
 func (c *scpCommand) handle() (err error) {
-	logger.Warn(logSender, "", "[silk] scp command: %v", c)
+	logger.Debug(logSender, "", "[silk] scp command: %v", c)
 	defer func() {
 		if r := recover(); r != nil {
 			logger.Error(logSender, "", "panic in handle scp command: %q stack trace: %v", r, string(debug.Stack()))
