@@ -708,7 +708,7 @@ func (c *Configuration) AcceptInboundConnection(conn net.Conn, config *ssh.Serve
 }
 
 func (c *Configuration) handleSftpConnection(channel ssh.Channel, connection *Connection) {
-	logger.Debug(logSender, connection.GetID(), "[silk] handleSftpConnection command `%v`, folderPrefix `%v`", connection.command, connection.folderPrefix)
+	logger.Debug(logSender, connection.GetID(), "[silk] handleSftpConnection : `%v`", connection)
 	defer func() {
 		if r := recover(); r != nil {
 			logger.Error(logSender, "", "panic in handleSftpConnection: %q stack trace: %v", r, string(debug.Stack()))
