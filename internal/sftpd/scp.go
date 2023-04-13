@@ -45,7 +45,6 @@ type scpCommand struct {
 }
 
 func (c *scpCommand) handle() (err error) {
-	logger.Debug(logSender, "", "[silk] scp command: %v", c)
 	defer func() {
 		if r := recover(); r != nil {
 			logger.Error(logSender, "", "panic in handle scp command: %q stack trace: %v", r, string(debug.Stack()))
@@ -740,8 +739,6 @@ func (c *scpCommand) parseUploadMessage(fs vfs.Fs, command string) (int64, strin
 }
 
 func (c *scpCommand) getFileUploadDestPath(fs vfs.Fs, scpDestPath, fileName string) string {
-	logger.Debug(logSender, "", "[silk] scp command `%q`, with args: `%+v` scpCommand `%v`",
-		c.command, c.args, c)
 	// here modify path by inserting prefix
 	if !c.isRecursive() {
 		// if the upload is not recursive and the destination path does not end with "/"
