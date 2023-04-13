@@ -25,7 +25,6 @@ import (
 	"runtime/debug"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/drakkan/sftpgo/v2/internal/common"
 	"github.com/drakkan/sftpgo/v2/internal/dataprovider"
@@ -765,26 +764,6 @@ func (c *scpCommand) getFileUploadDestPath(fs vfs.Fs, scpDestPath, fileName stri
 	// if the upload is recursive or scpDestPath has the "/" suffix then the destination
 	// file is relative to scpDestPath
 	return path.Join(scpDestPath, fileName)
-}
-
-func insertPrefixWithConf(name string, t time.Time) string {
-	layout := getEnv("UBILAB_SFTPGO_DATE_PREFIX_EXAMPLE", "2006/01/02")
-	return insertPrefix(name, t, layout)
-}
-
-// read value from environment variable or return default value
-func getEnv(key, defaultValue string) string {
-	if value, ok := os.LookupEnv(key); ok {
-		return value
-	}
-	return defaultValue
-}
-
-func insertPrefix(name string, t time.Time, timeFormat string) string {
-	parts := strings.Split(name, "/") // split string into parts on the forward slash
-	last := parts[len(parts)-1]
-	parts[len(parts)-1] = t.Format(timeFormat) + "/" + last // replace filename (last element) with prefix + filename
-	return strings.Join(parts, "/")
 }
 
 func getFileModeAsString(fileMode os.FileMode, isDir bool) string {

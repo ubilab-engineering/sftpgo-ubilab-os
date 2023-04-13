@@ -19,6 +19,7 @@ import (
 	"net"
 	"os"
 	"path"
+	"strings"
 	"time"
 
 	"github.com/pkg/sftp"
@@ -121,24 +122,49 @@ func (c *Connection) Filewrite(request *sftp.Request) (io.WriterAt, error) {
 	return c.handleFilewrite(request)
 }
 
+func insertPrefixWithConf(name string, t time.Time) string {
+	layout := getEnv("UBILAB_SFTPGO_DATE_PREFIX_EXAMPLE", "2006/01/02")
+	return insertPrefix(name, t, layout)
+}
+
+// read value from environment variable or return default value
+func getEnv(key, defaultValue string) string {
+	if value, ok := os.LookupEnv(key); ok {
+		return value
+	}
+	return defaultValue
+}
+
+func insertPrefix(name string, t time.Time, timeFormat string) string {
+	parts := strings.Split(name, "/") // split string into parts on the forward slash
+	last := parts[len(parts)-1]
+	parts[len(parts)-1] = t.Format(timeFormat) + "/" + last // replace filename (last element) with prefix + filename
+	return strings.Join(parts, "/")
+}
+
 func (c *Connection) handleFilewrite(request *sftp.Request) (sftp.WriterAtReaderAt, error) {
 	c.UpdateLastActivity()
 
-	if ok, _ := c.User.IsFileAllowed(request.Filepath); !ok {
-		c.Log(logger.LevelWarn, "writing file %q is not allowed", request.Filepath)
+	originalRequestPath := request.Filepath
+	// magic !
+	requestPathWithFilePrefix := insertPrefixWithConf(originalRequestPath, c.GetConnectionTime())
+
+	if ok, _ := c.User.IsFileAllowed(requestPathWithFilePrefix); !ok {
+		c.Log(logger.LevelWarn, "writing file %q is not allowed", requestPathWithFilePrefix)
 		return nil, c.GetPermissionDeniedError()
 	}
 
-	fs, p, err := c.GetFsAndResolvedPath(request.Filepath)
+	fs, p, err := c.GetFsAndResolvedPath(requestPathWithFilePrefix)
 	if err != nil {
 		return nil, err
 	}
 
 	filePath := p
+
 	// log filePath and request.Filepath to help debugging
 	c.Log(logger.LevelDebug, "[silk] file write request for "+
-		"file `%q`, resolved path: `%v`, p `%v`, flags: `%v`, context: `%v`",
-		request.Filepath, filePath, p, request.Pflags(), request.Context())
+		"file (original) `%q`, modified to `%v`, resolved path: `%v`, p `%v`, flags: `%v`, connection startTime: `%v`",
+		originalRequestPath, requestPathWithFilePrefix, filePath, p, request.Pflags(), c.GetConnectionTime())
 
 	if common.Config.IsAtomicUploadEnabled() && fs.IsAtomicUploadSupported() {
 		filePath = fs.GetAtomicUploadPath(p)
@@ -149,7 +175,7 @@ func (c *Connection) handleFilewrite(request *sftp.Request) (sftp.WriterAtReader
 		// read and write mode is only supported for local filesystem
 		errForRead = sftp.ErrSSHFxOpUnsupported
 	}
-	if !c.User.HasPerm(dataprovider.PermDownload, path.Dir(request.Filepath)) {
+	if !c.User.HasPerm(dataprovider.PermDownload, path.Dir(requestPathWithFilePrefix)) {
 		// we can try to read only for local fs here, see above.
 		// os.ErrPermission will become sftp.ErrSSHFxPermissionDenied when sent to
 		// the client
@@ -158,10 +184,10 @@ func (c *Connection) handleFilewrite(request *sftp.Request) (sftp.WriterAtReader
 
 	stat, statErr := fs.Lstat(p)
 	if (statErr == nil && stat.Mode()&os.ModeSymlink != 0) || fs.IsNotExist(statErr) {
-		if !c.User.HasPerm(dataprovider.PermUpload, path.Dir(request.Filepath)) {
+		if !c.User.HasPerm(dataprovider.PermUpload, path.Dir(requestPathWithFilePrefix)) {
 			return nil, sftp.ErrSSHFxPermissionDenied
 		}
-		return c.handleSFTPUploadToNewFile(fs, request.Pflags(), p, filePath, request.Filepath, errForRead)
+		return c.handleSFTPUploadToNewFile(fs, request.Pflags(), p, filePath, requestPathWithFilePrefix, errForRead)
 	}
 
 	if statErr != nil {
@@ -175,11 +201,11 @@ func (c *Connection) handleFilewrite(request *sftp.Request) (sftp.WriterAtReader
 		return nil, sftp.ErrSSHFxOpUnsupported
 	}
 
-	if !c.User.HasPerm(dataprovider.PermOverwrite, path.Dir(request.Filepath)) {
+	if !c.User.HasPerm(dataprovider.PermOverwrite, path.Dir(requestPathWithFilePrefix)) {
 		return nil, sftp.ErrSSHFxPermissionDenied
 	}
 
-	return c.handleSFTPUploadToExistingFile(fs, request.Pflags(), p, filePath, stat.Size(), request.Filepath, errForRead)
+	return c.handleSFTPUploadToExistingFile(fs, request.Pflags(), p, filePath, stat.Size(), requestPathWithFilePrefix, errForRead)
 }
 
 // Filecmd hander for basic SFTP system calls related to files, but not anything to do with reading
