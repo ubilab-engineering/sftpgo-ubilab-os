@@ -5,10 +5,10 @@ on:
   #schedule:
   #  - cron: '0 4 * * *' # everyday at 4:00 AM UTC
   push:
-    branches:
-      - 2.6.x
-    tags:
-      - v*
+#    branches:
+#      - 2.6.x
+#    tags:
+#      - v*
   pull_request:
 
 jobs:
