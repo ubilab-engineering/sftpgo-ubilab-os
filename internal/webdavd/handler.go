@@ -1,4 +1,4 @@
-// Copyright (C) 2019-2023 Nicola Murino
+// Copyright (C) 2019 Nicola Murino
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published
@@ -145,6 +145,11 @@ func (c *Connection) RemoveAll(_ context.Context, name string) error {
 func (c *Connection) OpenFile(_ context.Context, name string, flag int, _ os.FileMode) (webdav.File, error) {
 	c.UpdateLastActivity()
 
+	if err := common.Connections.IsNewTransferAllowed(c.User.Username); err != nil {
+		c.Log(logger.LevelInfo, "denying transfer due to count limits")
+		return nil, c.GetPermissionDeniedError()
+	}
+
 	name = util.CleanPath(name)
 	fs, p, err := c.GetFsAndResolvedPath(name)
 	if err != nil {
@@ -215,7 +220,7 @@ func (c *Connection) handleUploadToNewFile(fs vfs.Fs, resolvedPath, filePath, re
 		c.Log(logger.LevelDebug, "upload for file %q denied by pre action: %v", requestPath, err)
 		return nil, c.GetPermissionDeniedError()
 	}
-	file, w, cancelFn, err := fs.Create(filePath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC)
+	file, w, cancelFn, err := fs.Create(filePath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, c.GetCreateChecks(requestPath, true, false))
 	if err != nil {
 		c.Log(logger.LevelError, "error creating file %q: %+v", resolvedPath, err)
 		return nil, c.GetFsError(fs, err)
@@ -254,7 +259,7 @@ func (c *Connection) handleUploadToExistingFile(fs vfs.Fs, resolvedPath, filePat
 	maxWriteSize, _ := c.GetMaxWriteSize(diskQuota, false, fileSize, fs.IsUploadResumeSupported())
 
 	if common.Config.IsAtomicUploadEnabled() && fs.IsAtomicUploadSupported() {
-		_, _, err = fs.Rename(resolvedPath, filePath)
+		_, _, err = fs.Rename(resolvedPath, filePath, 0)
 		if err != nil {
 			c.Log(logger.LevelError, "error renaming existing file for atomic upload, source: %q, dest: %q, err: %+v",
 				resolvedPath, filePath, err)
@@ -262,7 +267,7 @@ func (c *Connection) handleUploadToExistingFile(fs vfs.Fs, resolvedPath, filePat
 		}
 	}
 
-	file, w, cancelFn, err := fs.Create(filePath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC)
+	file, w, cancelFn, err := fs.Create(filePath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, c.GetCreateChecks(requestPath, false, false))
 	if err != nil {
 		c.Log(logger.LevelError, "error creating file %q: %+v", resolvedPath, err)
 		return nil, c.GetFsError(fs, err)
@@ -272,10 +277,7 @@ func (c *Connection) handleUploadToExistingFile(fs vfs.Fs, resolvedPath, filePat
 	if vfs.HasTruncateSupport(fs) {
 		vfolder, err := c.User.GetVirtualFolderForPath(path.Dir(requestPath))
 		if err == nil {
-			dataprovider.UpdateVirtualFolderQuota(&vfolder.BaseVirtualFolder, 0, -fileSize, false) //nolint:errcheck
-			if vfolder.IsIncludedInUserQuota() {
-				dataprovider.UpdateUserQuota(&c.User, 0, -fileSize, false) //nolint:errcheck
-			}
+			dataprovider.UpdateUserFolderQuota(&vfolder, &c.User, 0, -fileSize, false)
 		} else {
 			dataprovider.UpdateUserQuota(&c.User, 0, -fileSize, false) //nolint:errcheck
 		}

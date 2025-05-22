@@ -1,4 +1,4 @@
-// Copyright (C) 2019-2023 Nicola Murino
+// Copyright (C) 2019 Nicola Murino
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published
@@ -23,7 +23,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"strings"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -39,6 +39,7 @@ import (
 	"github.com/drakkan/sftpgo/v2/internal/kms"
 	"github.com/drakkan/sftpgo/v2/internal/plugin"
 	"github.com/drakkan/sftpgo/v2/internal/util"
+	"github.com/drakkan/sftpgo/v2/internal/version"
 	"github.com/drakkan/sftpgo/v2/internal/vfs"
 )
 
@@ -63,7 +64,7 @@ func (c *fakeConnection) AddUser(user dataprovider.User) error {
 	if err != nil {
 		return err
 	}
-	c.BaseConnection.User = user
+	c.User = user
 	return nil
 }
 
@@ -214,6 +215,33 @@ func TestConnections(t *testing.T) {
 	assert.Len(t, Connections.connections, 0)
 	assert.Len(t, Connections.mapping, 0)
 	Connections.RUnlock()
+}
+
+func TestEventManagerCommandsInitialization(t *testing.T) {
+	configCopy := Config
+
+	c := Configuration{
+		EventManager: EventManagerConfig{
+			EnabledCommands: []string{"ls"}, // not an absolute path
+		},
+	}
+	err := Initialize(c, 0)
+	assert.ErrorContains(t, err, "invalid command")
+
+	var commands []string
+	if runtime.GOOS == osWindows {
+		commands = []string{"C:\\command"}
+	} else {
+		commands = []string{"/bin/ls"}
+	}
+
+	c.EventManager.EnabledCommands = commands
+	err = Initialize(c, 0)
+	assert.NoError(t, err)
+	assert.Equal(t, commands, dataprovider.EnabledActionCommands)
+
+	dataprovider.EnabledActionCommands = configCopy.EventManager.EnabledCommands
+	Config = configCopy
 }
 
 func TestInitializationProxyErrors(t *testing.T) {
@@ -419,6 +447,9 @@ func TestDefenderIntegration(t *testing.T) {
 		ObservationTime:  15,
 		EntriesSoftLimit: 100,
 		EntriesHardLimit: 150,
+		LoginDelay: LoginDelay{
+			PasswordFailed: 200,
+		},
 	}
 	err = Initialize(Config, 0)
 	// ScoreInvalid cannot be greater than threshold
@@ -476,6 +507,16 @@ func TestDefenderIntegration(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Nil(t, banTime)
 	assert.False(t, DeleteDefenderHost(ip))
+
+	startTime := time.Now()
+	DelayLogin(nil)
+	elapsed := time.Since(startTime)
+	assert.Less(t, elapsed, time.Millisecond*50)
+
+	startTime = time.Now()
+	DelayLogin(ErrInternalFailure)
+	elapsed = time.Since(startTime)
+	assert.Greater(t, elapsed, time.Millisecond*150)
 
 	Config = configCopy
 }
@@ -612,11 +653,17 @@ func TestMaxConnections(t *testing.T) {
 
 	ipAddr := "192.168.7.8"
 	assert.NoError(t, Connections.IsNewConnectionAllowed(ipAddr, ProtocolFTP))
+	assert.NoError(t, Connections.IsNewTransferAllowed(userTestUsername))
 
 	Config.MaxTotalConnections = 1
 	Config.MaxPerHostConnections = perHost
 
 	assert.NoError(t, Connections.IsNewConnectionAllowed(ipAddr, ProtocolHTTP))
+	assert.NoError(t, Connections.IsNewTransferAllowed(userTestUsername))
+	isShuttingDown.Store(true)
+	assert.ErrorIs(t, Connections.IsNewTransferAllowed(userTestUsername), ErrShuttingDown)
+	isShuttingDown.Store(false)
+
 	c := NewBaseConnection("id", ProtocolSFTP, "", "", dataprovider.User{})
 	fakeConn := &fakeConnection{
 		BaseConnection: c,
@@ -625,6 +672,10 @@ func TestMaxConnections(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Len(t, Connections.GetStats(""), 1)
 	assert.Error(t, Connections.IsNewConnectionAllowed(ipAddr, ProtocolSSH))
+	Connections.transfers.add(userTestUsername)
+	assert.Error(t, Connections.IsNewTransferAllowed(userTestUsername))
+	Connections.transfers.remove(userTestUsername)
+	assert.Equal(t, int32(0), Connections.GetTotalTransfers())
 
 	res := Connections.Close(fakeConn.GetID(), "")
 	assert.True(t, res)
@@ -636,6 +687,9 @@ func TestMaxConnections(t *testing.T) {
 	assert.Error(t, Connections.IsNewConnectionAllowed(ipAddr, ProtocolSSH))
 	Connections.RemoveClientConnection(ipAddr)
 	assert.NoError(t, Connections.IsNewConnectionAllowed(ipAddr, ProtocolWebDAV))
+	Connections.transfers.add(userTestUsername)
+	assert.Error(t, Connections.IsNewConnectionAllowed(ipAddr, ProtocolSSH))
+	Connections.transfers.remove(userTestUsername)
 	Connections.RemoveClientConnection(ipAddr)
 
 	Config.MaxTotalConnections = oldValue
@@ -669,9 +723,26 @@ func TestConnectionRoles(t *testing.T) {
 }
 
 func TestMaxConnectionPerHost(t *testing.T) {
-	oldValue := Config.MaxPerHostConnections
+	defender, err := newInMemoryDefender(&DefenderConfig{
+		Enabled:            true,
+		Driver:             DefenderDriverMemory,
+		BanTime:            30,
+		BanTimeIncrement:   50,
+		Threshold:          15,
+		ScoreInvalid:       2,
+		ScoreValid:         1,
+		ScoreLimitExceeded: 3,
+		ObservationTime:    30,
+		EntriesSoftLimit:   100,
+		EntriesHardLimit:   150,
+	})
+	require.NoError(t, err)
+
+	oldMaxPerHostConn := Config.MaxPerHostConnections
+	oldDefender := Config.defender
 
 	Config.MaxPerHostConnections = 2
+	Config.defender = defender
 
 	ipAddr := "192.168.9.9"
 	Connections.AddClientConnection(ipAddr)
@@ -683,14 +754,30 @@ func TestMaxConnectionPerHost(t *testing.T) {
 	Connections.AddClientConnection(ipAddr)
 	assert.Error(t, Connections.IsNewConnectionAllowed(ipAddr, ProtocolFTP))
 	assert.Equal(t, int32(3), Connections.GetClientConnections())
+	// Add the IP to the defender safe list
+	entry := dataprovider.IPListEntry{
+		IPOrNet: ipAddr,
+		Type:    dataprovider.IPListTypeDefender,
+		Mode:    dataprovider.ListModeAllow,
+	}
+	err = dataprovider.AddIPListEntry(&entry, "", "", "")
+	assert.NoError(t, err)
 
+	Connections.AddClientConnection(ipAddr)
+	assert.NoError(t, Connections.IsNewConnectionAllowed(ipAddr, ProtocolSSH))
+
+	err = dataprovider.DeleteIPListEntry(entry.IPOrNet, dataprovider.IPListTypeDefender, "", "", "")
+	assert.NoError(t, err)
+
+	Connections.RemoveClientConnection(ipAddr)
 	Connections.RemoveClientConnection(ipAddr)
 	Connections.RemoveClientConnection(ipAddr)
 	Connections.RemoveClientConnection(ipAddr)
 
 	assert.Equal(t, int32(0), Connections.GetClientConnections())
 
-	Config.MaxPerHostConnections = oldValue
+	Config.MaxPerHostConnections = oldMaxPerHostConn
+	Config.defender = oldDefender
 }
 
 func TestIdleConnections(t *testing.T) {
@@ -716,6 +803,7 @@ func TestIdleConnections(t *testing.T) {
 	user := dataprovider.User{
 		BaseUser: sdk.BaseUser{
 			Username: username,
+			Status:   1,
 		},
 	}
 	c := NewBaseConnection(sshConn1.id+"_1", ProtocolSFTP, "", "", user)
@@ -740,15 +828,34 @@ func TestIdleConnections(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, Connections.GetActiveSessions(username), 2)
 
-	cFTP := NewBaseConnection("id2", ProtocolFTP, "", "", dataprovider.User{})
+	cFTP := NewBaseConnection("id2", ProtocolFTP, "", "", dataprovider.User{
+		BaseUser: sdk.BaseUser{
+			Status: 1,
+		},
+	})
 	cFTP.lastActivity.Store(time.Now().UnixNano())
 	fakeConn = &fakeConnection{
 		BaseConnection: cFTP,
 	}
 	err = Connections.Add(fakeConn)
 	assert.NoError(t, err)
-	assert.Equal(t, Connections.GetActiveSessions(username), 2)
-	assert.Len(t, Connections.GetStats(""), 3)
+	// the user is expired, this connection will be removed
+	cDAV := NewBaseConnection("id3", ProtocolWebDAV, "", "", dataprovider.User{
+		BaseUser: sdk.BaseUser{
+			Username:       username + "_2",
+			Status:         1,
+			ExpirationDate: util.GetTimeAsMsSinceEpoch(time.Now().Add(-24 * time.Hour)),
+		},
+	})
+	cDAV.lastActivity.Store(time.Now().UnixNano())
+	fakeConn = &fakeConnection{
+		BaseConnection: cDAV,
+	}
+	err = Connections.Add(fakeConn)
+	assert.NoError(t, err)
+
+	assert.Equal(t, 2, Connections.GetActiveSessions(username))
+	assert.Len(t, Connections.GetStats(""), 4)
 	Connections.RLock()
 	assert.Len(t, Connections.sshConnections, 2)
 	Connections.RUnlock()
@@ -861,7 +968,7 @@ func TestConnectionStatus(t *testing.T) {
 			Username: username,
 		},
 	}
-	fs := vfs.NewOsFs("", os.TempDir(), "")
+	fs := vfs.NewOsFs("", os.TempDir(), "", nil)
 	c1 := NewBaseConnection("id1", ProtocolSFTP, "", "", user)
 	fakeConn1 := &fakeConnection{
 		BaseConnection: c1,
@@ -892,23 +999,11 @@ func TestConnectionStatus(t *testing.T) {
 	assert.Len(t, stats, 3)
 	for _, stat := range stats {
 		assert.Equal(t, stat.Username, username)
-		assert.True(t, strings.HasPrefix(stat.GetConnectionInfo(), stat.Protocol))
-		assert.True(t, strings.HasPrefix(stat.GetConnectionDuration(), "00:"))
-		if stat.ConnectionID == "SFTP_id1" {
+		switch stat.ConnectionID {
+		case "SFTP_id1":
 			assert.Len(t, stat.Transfers, 2)
-			assert.Greater(t, len(stat.GetTransfersAsString()), 0)
-			for _, tr := range stat.Transfers {
-				if tr.OperationType == operationDownload {
-					assert.True(t, strings.HasPrefix(tr.getConnectionTransferAsString(), "DL"))
-				} else if tr.OperationType == operationUpload {
-					assert.True(t, strings.HasPrefix(tr.getConnectionTransferAsString(), "UL"))
-				}
-			}
-		} else if stat.ConnectionID == "DAV_id3" {
+		case "DAV_id3":
 			assert.Len(t, stat.Transfers, 1)
-			assert.Greater(t, len(stat.GetTransfersAsString()), 0)
-		} else {
-			assert.Equal(t, 0, len(stat.GetTransfersAsString()))
 		}
 	}
 
@@ -988,9 +1083,13 @@ func TestQuotaScansRole(t *testing.T) {
 
 func TestProxyPolicy(t *testing.T) {
 	addr := net.TCPAddr{}
+	downstream := net.TCPAddr{IP: net.ParseIP("1.1.1.1")}
 	p := getProxyPolicy(nil, nil, proxyproto.IGNORE)
-	policy, err := p(&addr)
-	assert.Error(t, err)
+	policy, err := p(proxyproto.ConnPolicyOptions{
+		Upstream:   &addr,
+		Downstream: &downstream,
+	})
+	assert.ErrorIs(t, err, proxyproto.ErrInvalidUpstream)
 	assert.Equal(t, proxyproto.REJECT, policy)
 	ip1 := net.ParseIP("10.8.1.1")
 	ip2 := net.ParseIP("10.8.1.2")
@@ -1000,18 +1099,55 @@ func TestProxyPolicy(t *testing.T) {
 	skipped, err := util.ParseAllowedIPAndRanges([]string{ip2.String(), ip3.String()})
 	assert.NoError(t, err)
 	p = getProxyPolicy(allowed, skipped, proxyproto.IGNORE)
-	policy, err = p(&net.TCPAddr{IP: ip1})
+	policy, err = p(proxyproto.ConnPolicyOptions{
+		Upstream:   &net.TCPAddr{IP: ip1},
+		Downstream: &downstream,
+	})
 	assert.NoError(t, err)
 	assert.Equal(t, proxyproto.USE, policy)
-	policy, err = p(&net.TCPAddr{IP: ip2})
+	policy, err = p(proxyproto.ConnPolicyOptions{
+		Upstream:   &net.TCPAddr{IP: ip2},
+		Downstream: &downstream,
+	})
 	assert.NoError(t, err)
 	assert.Equal(t, proxyproto.SKIP, policy)
-	policy, err = p(&net.TCPAddr{IP: ip3})
+	policy, err = p(proxyproto.ConnPolicyOptions{
+		Upstream:   &net.TCPAddr{IP: ip3},
+		Downstream: &downstream,
+	})
 	assert.NoError(t, err)
 	assert.Equal(t, proxyproto.SKIP, policy)
-	policy, err = p(&net.TCPAddr{IP: net.ParseIP("10.8.1.4")})
+	policy, err = p(proxyproto.ConnPolicyOptions{
+		Upstream:   &net.TCPAddr{IP: net.ParseIP("10.8.1.4")},
+		Downstream: &downstream,
+	})
 	assert.NoError(t, err)
 	assert.Equal(t, proxyproto.IGNORE, policy)
+	p = getProxyPolicy(allowed, skipped, proxyproto.REQUIRE)
+	policy, err = p(proxyproto.ConnPolicyOptions{
+		Upstream:   &net.TCPAddr{IP: ip1},
+		Downstream: &downstream,
+	})
+	assert.NoError(t, err)
+	assert.Equal(t, proxyproto.REQUIRE, policy)
+	policy, err = p(proxyproto.ConnPolicyOptions{
+		Upstream:   &net.TCPAddr{IP: ip2},
+		Downstream: &downstream,
+	})
+	assert.NoError(t, err)
+	assert.Equal(t, proxyproto.SKIP, policy)
+	policy, err = p(proxyproto.ConnPolicyOptions{
+		Upstream:   &net.TCPAddr{IP: ip3},
+		Downstream: &downstream,
+	})
+	assert.NoError(t, err)
+	assert.Equal(t, proxyproto.SKIP, policy)
+	policy, err = p(proxyproto.ConnPolicyOptions{
+		Upstream:   &net.TCPAddr{IP: net.ParseIP("10.8.1.5")},
+		Downstream: &downstream,
+	})
+	assert.ErrorIs(t, err, proxyproto.ErrInvalidUpstream)
+	assert.Equal(t, proxyproto.REJECT, policy)
 }
 
 func TestProxyProtocolVersion(t *testing.T) {
@@ -1023,14 +1159,18 @@ func TestProxyProtocolVersion(t *testing.T) {
 		assert.Contains(t, err.Error(), "proxy protocol not configured")
 	}
 	c.ProxyProtocol = 1
-	proxyListener, err := c.GetProxyListener(nil)
+	listener, err := c.GetProxyListener(nil)
 	assert.NoError(t, err)
-	assert.NotNil(t, proxyListener.Policy)
+	proxyListener, ok := listener.(*proxyproto.Listener)
+	require.True(t, ok)
+	assert.NotNil(t, proxyListener.ConnPolicy)
 
 	c.ProxyProtocol = 2
-	proxyListener, err = c.GetProxyListener(nil)
+	listener, err = c.GetProxyListener(nil)
 	assert.NoError(t, err)
-	assert.NotNil(t, proxyListener.Policy)
+	proxyListener, ok = listener.(*proxyproto.Listener)
+	require.True(t, ok)
+	assert.NotNil(t, proxyListener.ConnPolicy)
 }
 
 func TestStartupHook(t *testing.T) {
@@ -1160,8 +1300,8 @@ func TestFolderCopy(t *testing.T) {
 	folder.ID = 2
 	folder.Users = []string{"user3"}
 	require.Len(t, folderCopy.Users, 2)
-	require.True(t, util.Contains(folderCopy.Users, "user1"))
-	require.True(t, util.Contains(folderCopy.Users, "user2"))
+	require.True(t, slices.Contains(folderCopy.Users, "user1"))
+	require.True(t, slices.Contains(folderCopy.Users, "user2"))
 	require.Equal(t, int64(1), folderCopy.ID)
 	require.Equal(t, folder.Name, folderCopy.Name)
 	require.Equal(t, folder.MappedPath, folderCopy.MappedPath)
@@ -1177,7 +1317,7 @@ func TestFolderCopy(t *testing.T) {
 	folderCopy = folder.GetACopy()
 	folder.FsConfig.CryptConfig.Passphrase = kms.NewEmptySecret()
 	require.Len(t, folderCopy.Users, 1)
-	require.True(t, util.Contains(folderCopy.Users, "user3"))
+	require.True(t, slices.Contains(folderCopy.Users, "user3"))
 	require.Equal(t, int64(2), folderCopy.ID)
 	require.Equal(t, folder.Name, folderCopy.Name)
 	require.Equal(t, folder.MappedPath, folderCopy.MappedPath)
@@ -1487,38 +1627,6 @@ func TestUpdateTransferTimestamps(t *testing.T) {
 	assert.NoError(t, err)
 }
 
-func TestMetadataAPI(t *testing.T) {
-	username := "metadatauser"
-	require.False(t, ActiveMetadataChecks.Remove(username))
-	require.True(t, ActiveMetadataChecks.Add(username, ""))
-	require.False(t, ActiveMetadataChecks.Add(username, ""))
-	checks := ActiveMetadataChecks.Get("")
-	require.Len(t, checks, 1)
-	checks[0].Username = username + "a"
-	checks = ActiveMetadataChecks.Get("")
-	require.Len(t, checks, 1)
-	require.Equal(t, username, checks[0].Username)
-	require.True(t, ActiveMetadataChecks.Remove(username))
-	require.Len(t, ActiveMetadataChecks.Get(""), 0)
-}
-
-func TestMetadataAPIRole(t *testing.T) {
-	username := "muser"
-	role1 := "r1"
-	role2 := "r2"
-	require.True(t, ActiveMetadataChecks.Add(username, role2))
-	require.False(t, ActiveMetadataChecks.Add(username, ""))
-	checks := ActiveMetadataChecks.Get("")
-	require.Len(t, checks, 1)
-	assert.Empty(t, checks[0].Role)
-	checks = ActiveMetadataChecks.Get(role1)
-	require.Len(t, checks, 0)
-	checks = ActiveMetadataChecks.Get(role2)
-	require.Len(t, checks, 1)
-	require.True(t, ActiveMetadataChecks.Remove(username))
-	require.Len(t, ActiveMetadataChecks.Get(""), 0)
-}
-
 func TestIPList(t *testing.T) {
 	type test struct {
 		ip            string
@@ -1629,6 +1737,138 @@ func TestIPList(t *testing.T) {
 		err := dataprovider.DeleteIPListEntry(e.IPOrNet, e.Type, "", "", "")
 		assert.NoError(t, err)
 	}
+}
+
+func TestSQLPlaceholderLimits(t *testing.T) {
+	numGroups := 120
+	numUsers := 120
+	var groupMapping []sdk.GroupMapping
+
+	folder := vfs.BaseVirtualFolder{
+		Name:       "testfolder",
+		MappedPath: filepath.Join(os.TempDir(), "folder"),
+	}
+	err := dataprovider.AddFolder(&folder, "", "", "")
+	assert.NoError(t, err)
+
+	for i := 0; i < numGroups; i++ {
+		group := dataprovider.Group{
+			BaseGroup: sdk.BaseGroup{
+				Name: fmt.Sprintf("testgroup%d", i),
+			},
+			UserSettings: dataprovider.GroupUserSettings{
+				BaseGroupUserSettings: sdk.BaseGroupUserSettings{
+					Permissions: map[string][]string{
+						fmt.Sprintf("/dir%d", i): {dataprovider.PermAny},
+					},
+				},
+			},
+		}
+		group.VirtualFolders = append(group.VirtualFolders, vfs.VirtualFolder{
+			BaseVirtualFolder: folder,
+			VirtualPath:       "/vdir",
+		})
+		err := dataprovider.AddGroup(&group, "", "", "")
+		assert.NoError(t, err)
+
+		groupMapping = append(groupMapping, sdk.GroupMapping{
+			Name: group.Name,
+			Type: sdk.GroupTypeSecondary,
+		})
+	}
+
+	user := dataprovider.User{
+		BaseUser: sdk.BaseUser{
+			Username: "testusername",
+			HomeDir:  filepath.Join(os.TempDir(), "testhome"),
+			Status:   1,
+			Permissions: map[string][]string{
+				"/": {dataprovider.PermAny},
+			},
+		},
+		Groups: groupMapping,
+	}
+	err = dataprovider.AddUser(&user, "", "", "")
+	assert.NoError(t, err)
+
+	users, err := dataprovider.GetUsersForQuotaCheck(map[string]bool{user.Username: true})
+	assert.NoError(t, err)
+	if assert.Len(t, users, 1) {
+		for i := 0; i < numGroups; i++ {
+			_, ok := users[0].Permissions[fmt.Sprintf("/dir%d", i)]
+			assert.True(t, ok)
+		}
+	}
+
+	err = dataprovider.DeleteUser(user.Username, "", "", "")
+	assert.NoError(t, err)
+
+	for i := 0; i < numUsers; i++ {
+		user := dataprovider.User{
+			BaseUser: sdk.BaseUser{
+				Username: fmt.Sprintf("testusername%d", i),
+				HomeDir:  filepath.Join(os.TempDir()),
+				Status:   1,
+				Permissions: map[string][]string{
+					"/": {dataprovider.PermAny},
+				},
+			},
+			Groups: []sdk.GroupMapping{
+				{
+					Name: "testgroup0",
+					Type: sdk.GroupTypePrimary,
+				},
+			},
+		}
+		err := dataprovider.AddUser(&user, "", "", "")
+		assert.NoError(t, err)
+	}
+
+	time.Sleep(100 * time.Millisecond)
+
+	err = dataprovider.DeleteFolder(folder.Name, "", "", "")
+	assert.NoError(t, err)
+
+	for i := 0; i < numUsers; i++ {
+		username := fmt.Sprintf("testusername%d", i)
+		user, err := dataprovider.UserExists(username, "")
+		assert.NoError(t, err)
+		assert.Greater(t, user.UpdatedAt, user.CreatedAt)
+		err = dataprovider.DeleteUser(username, "", "", "")
+		assert.NoError(t, err)
+	}
+
+	for i := 0; i < numGroups; i++ {
+		groupName := fmt.Sprintf("testgroup%d", i)
+		err = dataprovider.DeleteGroup(groupName, "", "", "")
+		assert.NoError(t, err)
+	}
+}
+
+func TestALPNProtocols(t *testing.T) {
+	protocols := util.GetALPNProtocols(nil)
+	assert.Equal(t, []string{"http/1.1", "h2"}, protocols)
+	protocols = util.GetALPNProtocols([]string{"invalid1", "invalid2"})
+	assert.Equal(t, []string{"http/1.1", "h2"}, protocols)
+	protocols = util.GetALPNProtocols([]string{"invalid1", "h2", "invalid2"})
+	assert.Equal(t, []string{"h2"}, protocols)
+	protocols = util.GetALPNProtocols([]string{"h2", "http/1.1"})
+	assert.Equal(t, []string{"h2", "http/1.1"}, protocols)
+}
+
+func TestServerVersion(t *testing.T) {
+	appName := "SFTPGo"
+	version.SetConfig("")
+	v := version.GetServerVersion("_", false)
+	assert.Equal(t, fmt.Sprintf("%s_%s", appName, version.Get().Version), v)
+	v = version.GetServerVersion("-", true)
+	assert.Equal(t, fmt.Sprintf("%s-%s-", appName, version.Get().Version), v)
+	version.SetConfig("short")
+	v = version.GetServerVersion("_", false)
+	assert.Equal(t, appName, v)
+	v = version.GetServerVersion("_", true)
+	assert.Equal(t, appName+"_", v)
+	version.SetConfig("")
 }
 
 func BenchmarkBcryptHashing(b *testing.B) {

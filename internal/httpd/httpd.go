@@ -1,4 +1,4 @@
-// Copyright (C) 2019-2023 Nicola Murino
+// Copyright (C) 2019 Nicola Murino
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published
@@ -32,8 +32,6 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/go-chi/jwtauth/v5"
-	"github.com/lestrrat-go/jwx/v2/jwa"
 
 	"github.com/drakkan/sftpgo/v2/internal/acme"
 	"github.com/drakkan/sftpgo/v2/internal/common"
@@ -87,17 +85,15 @@ const (
 	userSharesPath                        = "/api/v2/user/shares"
 	retentionBasePath                     = "/api/v2/retention/users"
 	retentionChecksPath                   = "/api/v2/retention/users/checks"
-	metadataBasePath                      = "/api/v2/metadata/users"
-	metadataChecksPath                    = "/api/v2/metadata/users/checks"
 	fsEventsPath                          = "/api/v2/events/fs"
 	providerEventsPath                    = "/api/v2/events/provider"
+	logEventsPath                         = "/api/v2/events/logs"
 	sharesPath                            = "/api/v2/shares"
 	eventActionsPath                      = "/api/v2/eventactions"
 	eventRulesPath                        = "/api/v2/eventrules"
 	rolesPath                             = "/api/v2/roles"
 	ipListsPath                           = "/api/v2/iplists"
 	healthzPath                           = "/healthz"
-	robotsTxtPath                         = "/robots.txt"
 	webRootPathDefault                    = "/"
 	webBasePathDefault                    = "/web"
 	webBasePathAdminDefault               = "/web/admin"
@@ -106,6 +102,8 @@ const (
 	webAdminLoginPathDefault              = "/web/admin/login"
 	webAdminOIDCLoginPathDefault          = "/web/admin/oidclogin"
 	webOIDCRedirectPathDefault            = "/web/oidc/redirect"
+	webOAuth2RedirectPathDefault          = "/web/oauth2/redirect"
+	webOAuth2TokenPathDefault             = "/web/admin/oauth2/token"
 	webAdminTwoFactorPathDefault          = "/web/admin/twofactor"
 	webAdminTwoFactorRecoveryPathDefault  = "/web/admin/twofactor-recovery"
 	webLogoutPathDefault                  = "/web/admin/logout"
@@ -148,6 +146,7 @@ const (
 	webEventsPathDefault                  = "/web/admin/events"
 	webEventsFsSearchPathDefault          = "/web/admin/events/fs"
 	webEventsProviderSearchPathDefault    = "/web/admin/events/provider"
+	webEventsLogSearchPathDefault         = "/web/admin/events/logs"
 	webConfigsPathDefault                 = "/web/admin/configs"
 	webClientLoginPathDefault             = "/web/client/login"
 	webClientOIDCLoginPathDefault         = "/web/client/oidclogin"
@@ -162,6 +161,7 @@ const (
 	webClientDirsPathDefault              = "/web/client/dirs"
 	webClientDownloadZipPathDefault       = "/web/client/downloadzip"
 	webClientProfilePathDefault           = "/web/client/profile"
+	webClientPingPathDefault              = "/web/client/ping"
 	webClientMFAPathDefault               = "/web/client/mfa"
 	webClientTOTPGeneratePathDefault      = "/web/client/totp/generate"
 	webClientTOTPValidatePathDefault      = "/web/client/totp/validate"
@@ -174,13 +174,15 @@ const (
 	webClientResetPwdPathDefault          = "/web/client/reset-password"
 	webClientViewPDFPathDefault           = "/web/client/viewpdf"
 	webClientGetPDFPathDefault            = "/web/client/getpdf"
+	webClientExistPathDefault             = "/web/client/exist"
+	webClientTasksPathDefault             = "/web/client/tasks"
 	webStaticFilesPathDefault             = "/static"
 	webOpenAPIPathDefault                 = "/openapi"
 	// MaxRestoreSize defines the max size for the loaddata input file
 	MaxRestoreSize       = 20 * 1048576 // 20 MB
 	maxRequestSize       = 1048576      // 1MB
 	maxLoginBodySize     = 262144       // 256 KB
-	httpdMaxEditFileSize = 1048576      // 1 MB
+	httpdMaxEditFileSize = 2 * 1048576  // 2 MB
 	maxMultipartMem      = 10 * 1048576 // 10 MB
 	osWindows            = "windows"
 	otpHeaderCode        = "X-SFTPGO-OTP"
@@ -192,13 +194,14 @@ var (
 	certMgr                        *common.CertManager
 	cleanupTicker                  *time.Ticker
 	cleanupDone                    chan bool
-	invalidatedJWTTokens           sync.Map
-	csrfTokenAuth                  *jwtauth.JWTAuth
+	invalidatedJWTTokens           tokenManager
 	webRootPath                    string
 	webBasePath                    string
 	webBaseAdminPath               string
 	webBaseClientPath              string
 	webOIDCRedirectPath            string
+	webOAuth2RedirectPath          string
+	webOAuth2TokenPath             string
 	webAdminSetupPath              string
 	webAdminOIDCLoginPath          string
 	webAdminLoginPath              string
@@ -243,6 +246,7 @@ var (
 	webEventsPath                  string
 	webEventsFsSearchPath          string
 	webEventsProviderSearchPath    string
+	webEventsLogSearchPath         string
 	webConfigsPath                 string
 	webDefenderHostsPath           string
 	webClientLoginPath             string
@@ -258,6 +262,7 @@ var (
 	webClientDirsPath              string
 	webClientDownloadZipPath       string
 	webClientProfilePath           string
+	webClientPingPath              string
 	webChangeClientPwdPath         string
 	webClientMFAPath               string
 	webClientTOTPGeneratePath      string
@@ -270,6 +275,8 @@ var (
 	webClientResetPwdPath          string
 	webClientViewPDFPath           string
 	webClientGetPDFPath            string
+	webClientExistPath             string
+	webClientTasksPath             string
 	webStaticFilesPath             string
 	webOpenAPIPath                 string
 	// max upload size for http clients, 1GB by default
@@ -279,12 +286,88 @@ var (
 	installationCodeHint       string
 	fnInstallationCodeResolver FnInstallationCodeResolver
 	configurationDir           string
+	dbBrandingConfig           brandingCache
 )
 
 func init() {
 	updateWebAdminURLs("")
 	updateWebClientURLs("")
 	acme.SetReloadHTTPDCertsFn(ReloadCertificateMgr)
+	common.SetUpdateBrandingFn(dbBrandingConfig.Set)
+}
+
+type brandingCache struct {
+	mu      sync.RWMutex
+	configs *dataprovider.BrandingConfigs
+}
+
+func (b *brandingCache) Set(configs *dataprovider.BrandingConfigs) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	b.configs = configs
+}
+
+func (b *brandingCache) getWebAdminLogo() []byte {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+
+	return b.configs.WebAdmin.Logo
+}
+
+func (b *brandingCache) getWebAdminFavicon() []byte {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+
+	return b.configs.WebAdmin.Favicon
+}
+
+func (b *brandingCache) getWebClientLogo() []byte {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+
+	return b.configs.WebClient.Logo
+}
+
+func (b *brandingCache) getWebClientFavicon() []byte {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+
+	return b.configs.WebClient.Favicon
+}
+
+func (b *brandingCache) mergeBrandingConfig(branding UIBranding, isWebClient bool) UIBranding {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+
+	var urlPrefix string
+	var cfg dataprovider.BrandingConfig
+	if isWebClient {
+		cfg = b.configs.WebClient
+		urlPrefix = "webclient"
+	} else {
+		cfg = b.configs.WebAdmin
+		urlPrefix = "webadmin"
+	}
+	if cfg.Name != "" {
+		branding.Name = cfg.Name
+	}
+	if cfg.ShortName != "" {
+		branding.ShortName = cfg.ShortName
+	}
+	if cfg.DisclaimerName != "" {
+		branding.DisclaimerName = cfg.DisclaimerName
+	}
+	if cfg.DisclaimerURL != "" {
+		branding.DisclaimerPath = cfg.DisclaimerURL
+	}
+	if len(cfg.Logo) > 0 {
+		branding.LogoPath = path.Join("/", "branding", urlPrefix, "logo.png")
+	}
+	if len(cfg.Favicon) > 0 {
+		branding.FaviconPath = path.Join("/", "branding", urlPrefix, "favicon.png")
+	}
+	return branding
 }
 
 // FnInstallationCodeResolver defines a method to get the installation code.
@@ -331,10 +414,16 @@ type SecurityConf struct {
 	ContentSecurityPolicy string `json:"content_security_policy" mapstructure:"content_security_policy"`
 	// PermissionsPolicy allows to set the Permissions-Policy header value. Default is "".
 	PermissionsPolicy string `json:"permissions_policy" mapstructure:"permissions_policy"`
-	// CrossOriginOpenerPolicy allows to set the `Cross-Origin-Opener-Policy` header value. Default is "".
+	// CrossOriginOpenerPolicy allows to set the Cross-Origin-Opener-Policy header value. Default is "".
 	CrossOriginOpenerPolicy string `json:"cross_origin_opener_policy" mapstructure:"cross_origin_opener_policy"`
-	// ExpectCTHeader allows to set the Expect-CT header value. Default is "".
-	ExpectCTHeader string `json:"expect_ct_header" mapstructure:"expect_ct_header"`
+	// CrossOriginResourcePolicy allows to set the Cross-Origin-Resource-Policy header value. Default is "".
+	CrossOriginResourcePolicy string `json:"cross_origin_resource_policy" mapstructure:"cross_origin_resource_policy"`
+	// CrossOriginEmbedderPolicy allows to set the Cross-Origin-Embedder-Policy header value. Default is "".
+	CrossOriginEmbedderPolicy string `json:"cross_origin_embedder_policy" mapstructure:"cross_origin_embedder_policy"`
+	// CacheControl allows to set the Cache-Control header value.
+	CacheControl string `json:"cache_control" mapstructure:"cache_control"`
+	// ReferrerPolicy allows to set the Referrer-Policy header values.
+	ReferrerPolicy string `json:"referrer_policy" mapstructure:"referrer_policy"`
 	proxyHeaders   []string
 }
 
@@ -391,45 +480,49 @@ type UIBranding struct {
 	// For example, if you create a directory named "branding" inside the static dir and
 	// put the "mylogo.png" file in it, you must set "/branding/mylogo.png" as logo path.
 	LogoPath string `json:"logo_path" mapstructure:"logo_path"`
-	// Path to the image to show on the login screen relative to "static_files_path"
-	LoginImagePath string `json:"login_image_path" mapstructure:"login_image_path"`
 	// Path to your favicon relative to "static_files_path"
 	FaviconPath string `json:"favicon_path" mapstructure:"favicon_path"`
 	// DisclaimerName defines the name for the link to your optional disclaimer
 	DisclaimerName string `json:"disclaimer_name" mapstructure:"disclaimer_name"`
-	// Path to the HTML page for your disclaimer relative to "static_files_path".
+	// Path to the HTML page for your disclaimer relative to "static_files_path"
+	// or an absolute http/https URL.
 	DisclaimerPath string `json:"disclaimer_path" mapstructure:"disclaimer_path"`
-	// Path to a custom CSS file, relative to "static_files_path", which replaces
-	// the SB Admin2 default CSS. This is useful, for example, if you rebuild
-	// SB Admin2 CSS to use custom colors
-	DefaultCSS string `json:"default_css" mapstructure:"default_css"`
+	// Path to custom CSS files, relative to "static_files_path", which replaces
+	// the default CSS files
+	DefaultCSS []string `json:"default_css" mapstructure:"default_css"`
 	// Additional CSS file paths, relative to "static_files_path", to include
-	ExtraCSS []string `json:"extra_css" mapstructure:"extra_css"`
+	ExtraCSS           []string `json:"extra_css" mapstructure:"extra_css"`
+	DefaultLogoPath    string   `json:"-" mapstructure:"-"`
+	DefaultFaviconPath string   `json:"-" mapstructure:"-"`
 }
 
 func (b *UIBranding) check() {
+	b.DefaultLogoPath = "/img/logo.png"
+	b.DefaultFaviconPath = "/favicon.png"
 	if b.LogoPath != "" {
 		b.LogoPath = util.CleanPath(b.LogoPath)
 	} else {
-		b.LogoPath = "/img/logo.png"
-	}
-	if b.LoginImagePath != "" {
-		b.LoginImagePath = util.CleanPath(b.LoginImagePath)
-	} else {
-		b.LoginImagePath = "/img/login_image.png"
+		b.LogoPath = b.DefaultLogoPath
 	}
 	if b.FaviconPath != "" {
 		b.FaviconPath = util.CleanPath(b.FaviconPath)
 	} else {
-		b.FaviconPath = "/favicon.ico"
+		b.FaviconPath = b.DefaultFaviconPath
 	}
 	if b.DisclaimerPath != "" {
-		b.DisclaimerPath = util.CleanPath(b.DisclaimerPath)
+		if !strings.HasPrefix(b.DisclaimerPath, "https://") && !strings.HasPrefix(b.DisclaimerPath, "http://") {
+			b.DisclaimerPath = path.Join(webStaticFilesPath, util.CleanPath(b.DisclaimerPath))
+		}
 	}
-	if b.DefaultCSS != "" {
-		b.DefaultCSS = util.CleanPath(b.DefaultCSS)
+	if len(b.DefaultCSS) > 0 {
+		for idx := range b.DefaultCSS {
+			b.DefaultCSS[idx] = util.CleanPath(b.DefaultCSS[idx])
+		}
 	} else {
-		b.DefaultCSS = "/css/sb-admin-2.min.css"
+		b.DefaultCSS = []string{
+			"/assets/plugins/global/plugins.bundle.css",
+			"/assets/css/style.bundle.css",
+		}
 	}
 	for idx := range b.ExtraCSS {
 		b.ExtraCSS[idx] = util.CleanPath(b.ExtraCSS[idx])
@@ -474,7 +567,21 @@ type Binding struct {
 	//
 	// You can combine the values. For example 3 means that you can only login using OIDC on
 	// both WebClient and WebAdmin UI.
+	// Deprecated because it is not extensible, use DisabledLoginMethods
 	EnabledLoginMethods int `json:"enabled_login_methods" mapstructure:"enabled_login_methods"`
+	// Defines the login methods disabled for the WebAdmin and WebClient UIs:
+	//
+	// - 1 means OIDC for the WebAdmin UI
+	// - 2 means OIDC for the WebClient UI
+	// - 4 means login form for the WebAdmin UI
+	// - 8 means login form for the WebClient UI
+	// - 16 means basic auth for admin REST API
+	// - 32 means basic auth for user REST API
+	// - 64 means API key auth for admins
+	// - 128 means API key auth for users
+	// You can combine the values. For example 12 means that you can only login using OIDC on
+	// both WebClient and WebAdmin UI.
+	DisabledLoginMethods int `json:"disabled_login_methods" mapstructure:"disabled_login_methods"`
 	// you also need to provide a certificate for enabling HTTPS
 	EnableHTTPS bool `json:"enable_https" mapstructure:"enable_https"`
 	// Certificate and matching private key for this specific binding, if empty the global
@@ -492,11 +599,16 @@ type Binding struct {
 	// Note that TLS 1.3 ciphersuites are not configurable.
 	// The supported ciphersuites names are defined here:
 	//
-	// https://github.com/golang/go/blob/master/src/crypto/tls/cipher_suites.go#L52
+	// https://github.com/golang/go/blob/master/src/crypto/tls/cipher_suites.go#L53
 	//
 	// any invalid name will be silently ignored.
 	// The order matters, the ciphers listed first will be the preferred ones.
 	TLSCipherSuites []string `json:"tls_cipher_suites" mapstructure:"tls_cipher_suites"`
+	// HTTP protocols in preference order. Supported values: http/1.1, h2
+	Protocols []string `json:"tls_protocols" mapstructure:"tls_protocols"`
+	// Defines whether to use the common proxy protocol configuration or the
+	// binding-specific proxy header configuration.
+	ProxyMode int `json:"proxy_mode" mapstructure:"proxy_mode"`
 	// List of IP addresses and IP ranges allowed to set client IP proxy headers and
 	// X-Forwarded-Proto header.
 	ProxyAllowed []string `json:"proxy_allowed" mapstructure:"proxy_allowed"`
@@ -516,9 +628,8 @@ type Binding struct {
 	HideLoginURL int `json:"hide_login_url" mapstructure:"hide_login_url"`
 	// Enable the built-in OpenAPI renderer
 	RenderOpenAPI bool `json:"render_openapi" mapstructure:"render_openapi"`
-	// Enabling web client integrations you can render or modify the files with the specified
-	// extensions using an external tool.
-	WebClientIntegrations []WebClientIntegration `json:"web_client_integrations" mapstructure:"web_client_integrations"`
+	// Languages defines the list of enabled translations for the WebAdmin and WebClient UI.
+	Languages []string `json:"languages" mapstructure:"languages"`
 	// Defining an OIDC configuration the web admin and web client UI will use OpenID to authenticate users.
 	OIDC OIDC `json:"oidc" mapstructure:"oidc"`
 	// Security defines security headers to add to HTTP responses and allows to restrict allowed hosts
@@ -526,16 +637,6 @@ type Binding struct {
 	// Branding defines customizations to suit your brand
 	Branding         Branding `json:"branding" mapstructure:"branding"`
 	allowHeadersFrom []func(net.IP) bool
-}
-
-func (b *Binding) checkWebClientIntegrations() {
-	var integrations []WebClientIntegration
-	for _, integration := range b.WebClientIntegrations {
-		if integration.URL != "" && len(integration.FileExtensions) > 0 {
-			integrations = append(integrations, integration)
-		}
-	}
-	b.WebClientIntegrations = integrations
 }
 
 func (b *Binding) checkBranding() {
@@ -555,10 +656,22 @@ func (b *Binding) checkBranding() {
 	}
 }
 
+func (b *Binding) webAdminBranding() UIBranding {
+	return dbBrandingConfig.mergeBrandingConfig(b.Branding.WebAdmin, false)
+}
+
+func (b *Binding) webClientBranding() UIBranding {
+	return dbBrandingConfig.mergeBrandingConfig(b.Branding.WebClient, true)
+}
+
+func (b *Binding) languages() []string {
+	return b.Languages
+}
+
 func (b *Binding) parseAllowedProxy() error {
 	if filepath.IsAbs(b.Address) && len(b.ProxyAllowed) > 0 {
 		// unix domain socket
-		b.allowHeadersFrom = []func(net.IP) bool{func(ip net.IP) bool { return true }}
+		b.allowHeadersFrom = []func(net.IP) bool{func(_ net.IP) bool { return true }}
 		return nil
 	}
 	allowedFuncs, err := util.ParseAllowedIPAndRanges(b.ProxyAllowed)
@@ -590,45 +703,76 @@ func (b *Binding) IsValid() bool {
 
 func (b *Binding) isWebAdminOIDCLoginDisabled() bool {
 	if b.EnableWebAdmin {
-		if b.EnabledLoginMethods == 0 {
-			return false
-		}
-		return b.EnabledLoginMethods&1 == 0
+		return b.DisabledLoginMethods&1 != 0
 	}
 	return false
 }
 
 func (b *Binding) isWebClientOIDCLoginDisabled() bool {
 	if b.EnableWebClient {
-		if b.EnabledLoginMethods == 0 {
-			return false
-		}
-		return b.EnabledLoginMethods&2 == 0
+		return b.DisabledLoginMethods&2 != 0
 	}
 	return false
 }
 
 func (b *Binding) isWebAdminLoginFormDisabled() bool {
 	if b.EnableWebAdmin {
-		if b.EnabledLoginMethods == 0 {
-			return false
-		}
-		return b.EnabledLoginMethods&4 == 0
+		return b.DisabledLoginMethods&4 != 0
 	}
 	return false
 }
 
 func (b *Binding) isWebClientLoginFormDisabled() bool {
 	if b.EnableWebClient {
-		if b.EnabledLoginMethods == 0 {
-			return false
-		}
-		return b.EnabledLoginMethods&8 == 0
+		return b.DisabledLoginMethods&8 != 0
 	}
 	return false
 }
 
+func (b *Binding) isAdminTokenEndpointDisabled() bool {
+	return b.DisabledLoginMethods&16 != 0
+}
+
+func (b *Binding) isUserTokenEndpointDisabled() bool {
+	return b.DisabledLoginMethods&32 != 0
+}
+
+func (b *Binding) isAdminAPIKeyAuthDisabled() bool {
+	return b.DisabledLoginMethods&64 != 0
+}
+
+func (b *Binding) isUserAPIKeyAuthDisabled() bool {
+	return b.DisabledLoginMethods&128 != 0
+}
+
+func (b *Binding) hasLoginForAPI() bool {
+	return !b.isAdminTokenEndpointDisabled() || !b.isUserTokenEndpointDisabled() ||
+		!b.isAdminAPIKeyAuthDisabled() || !b.isUserAPIKeyAuthDisabled()
+}
+
+// convertLoginMethods checks if the deprecated EnabledLoginMethods is set and
+// convert the value to DisabledLoginMethods.
+func (b *Binding) convertLoginMethods() {
+	if b.DisabledLoginMethods > 0 || b.EnabledLoginMethods == 0 {
+		// DisabledLoginMethods already in use or EnabledLoginMethods not set.
+		return
+	}
+	if b.EnabledLoginMethods&1 == 0 {
+		b.DisabledLoginMethods++
+	}
+	if b.EnabledLoginMethods&2 == 0 {
+		b.DisabledLoginMethods += 2
+	}
+	if b.EnabledLoginMethods&4 == 0 {
+		b.DisabledLoginMethods += 4
+	}
+	if b.EnabledLoginMethods&8 == 0 {
+		b.DisabledLoginMethods += 8
+	}
+}
+
 func (b *Binding) checkLoginMethods() error {
+	b.convertLoginMethods()
 	if b.isWebAdminLoginFormDisabled() && b.isWebAdminOIDCLoginDisabled() {
 		return errors.New("no login method available for WebAdmin UI")
 	}
@@ -644,6 +788,9 @@ func (b *Binding) checkLoginMethods() error {
 		if b.isWebClientLoginFormDisabled() && !b.OIDC.isEnabled() {
 			return errors.New("no login method available for WebClient UI")
 		}
+	}
+	if b.EnableRESTAPI && !b.hasLoginForAPI() {
+		return errors.New("no login method available for REST API")
 	}
 	return nil
 }
@@ -666,6 +813,17 @@ func (b *Binding) showClientLoginURL() bool {
 		return false
 	}
 	return true
+}
+
+func (b *Binding) isMutualTLSEnabled() bool {
+	return b.ClientAuthType == 1
+}
+
+func (b *Binding) listenerWrapper() func(net.Listener) (net.Listener, error) {
+	if b.ProxyMode == 1 {
+		return common.Config.GetProxyListener
+	}
+	return nil
 }
 
 type defenderStatus struct {
@@ -755,11 +913,18 @@ type Conf struct {
 	// SigningPassphrase defines the passphrase to use to derive the signing key for JWT and CSRF tokens.
 	// If empty a random signing key will be generated each time SFTPGo starts. If you set a
 	// signing passphrase you should consider rotating it periodically for added security
-	SigningPassphrase string `json:"signing_passphrase" mapstructure:"signing_passphrase"`
+	SigningPassphrase     string `json:"signing_passphrase" mapstructure:"signing_passphrase"`
+	SigningPassphraseFile string `json:"signing_passphrase_file" mapstructure:"signing_passphrase_file"`
 	// TokenValidation allows to define how to validate JWT tokens, cookies and CSRF tokens.
 	// By default all the available security checks are enabled. Set to 1 to disable the requirement
 	// that a token must be used by the same IP for which it was issued.
 	TokenValidation int `json:"token_validation" mapstructure:"token_validation"`
+	// CookieLifetime defines the duration of cookies for WebAdmin and WebClient
+	CookieLifetime int `json:"cookie_lifetime" mapstructure:"cookie_lifetime"`
+	// ShareCookieLifetime defines the duration of cookies for public shares
+	ShareCookieLifetime int `json:"share_cookie_lifetime" mapstructure:"share_cookie_lifetime"`
+	// JWTLifetime defines the duration of JWT tokens used in REST API
+	JWTLifetime int `json:"jwt_lifetime" mapstructure:"jwt_lifetime"`
 	// MaxUploadFileSize Defines the maximum request body size, in bytes, for Web Client/API HTTP upload requests.
 	// 0 means no limit
 	MaxUploadFileSize int64 `json:"max_upload_file_size" mapstructure:"max_upload_file_size"`
@@ -868,11 +1033,7 @@ func (c *Conf) getKeyPairs(configDir string) []common.TLSKeyPair {
 }
 
 func (c *Conf) setTokenValidationMode() {
-	if c.TokenValidation == 1 {
-		tokenValidationMode = tokenValidationNoIPMatch
-	} else {
-		tokenValidationMode = tokenValidationFull
-	}
+	tokenValidationMode = c.TokenValidation
 }
 
 func (c *Conf) loadFromProvider() error {
@@ -881,6 +1042,7 @@ func (c *Conf) loadFromProvider() error {
 		return fmt.Errorf("unable to load config from provider: %w", err)
 	}
 	configs.SetNilsToEmpty()
+	dbBrandingConfig.Set(configs.Branding)
 	if configs.ACME.Domain == "" || !configs.ACME.HasProtocol(common.ProtocolHTTP) {
 		return nil
 	}
@@ -907,21 +1069,7 @@ func (c *Conf) loadFromProvider() error {
 	return nil
 }
 
-// Initialize configures and starts the HTTP server
-func (c *Conf) Initialize(configDir string, isShared int) error {
-	if err := c.loadFromProvider(); err != nil {
-		return err
-	}
-	logger.Info(logSender, "", "initializing HTTP server with config %+v", c.getRedacted())
-	configurationDir = configDir
-	resetCodesMgr = newResetCodeManager(isShared)
-	oidcMgr = newOIDCManager(isShared)
-	staticFilesPath := util.FindSharedDataPath(c.StaticFilesPath, configDir)
-	templatesPath := util.FindSharedDataPath(c.TemplatesPath, configDir)
-	openAPIPath := util.FindSharedDataPath(c.OpenAPIPath, configDir)
-	if err := c.checkRequiredDirs(staticFilesPath, templatesPath); err != nil {
-		return err
-	}
+func (c *Conf) loadTemplates(templatesPath string) {
 	if c.isWebAdminEnabled() {
 		updateWebAdminURLs(c.WebRoot)
 		loadAdminTemplates(templatesPath)
@@ -934,6 +1082,27 @@ func (c *Conf) Initialize(configDir string, isShared int) error {
 	} else {
 		logger.Info(logSender, "", "built-in web client interface disabled")
 	}
+}
+
+// Initialize configures and starts the HTTP server
+func (c *Conf) Initialize(configDir string, isShared int) error {
+	if err := c.loadFromProvider(); err != nil {
+		return err
+	}
+	logger.Info(logSender, "", "initializing HTTP server with config %+v", c.getRedacted())
+	configurationDir = configDir
+	invalidatedJWTTokens = newTokenManager(isShared)
+	resetCodesMgr = newResetCodeManager(isShared)
+	oidcMgr = newOIDCManager(isShared)
+	oauth2Mgr = newOAuth2Manager(isShared)
+	webTaskMgr = newWebTaskManager(isShared)
+	staticFilesPath := util.FindSharedDataPath(c.StaticFilesPath, configDir)
+	templatesPath := util.FindSharedDataPath(c.TemplatesPath, configDir)
+	openAPIPath := util.FindSharedDataPath(c.OpenAPIPath, configDir)
+	if err := c.checkRequiredDirs(staticFilesPath, templatesPath); err != nil {
+		return err
+	}
+	c.loadTemplates(templatesPath)
 	keyPairs := c.getKeyPairs(configDir)
 	if len(keyPairs) > 0 {
 		mgr, err := common.NewCertManager(keyPairs, configDir, logSender)
@@ -951,7 +1120,14 @@ func (c *Conf) Initialize(configDir string, isShared int) error {
 		certMgr = mgr
 	}
 
-	csrfTokenAuth = jwtauth.New(jwa.HS256.String(), getSigningKey(c.SigningPassphrase), nil)
+	if c.SigningPassphraseFile != "" {
+		passphrase, err := util.ReadConfigFromFile(c.SigningPassphraseFile, configDir)
+		if err != nil {
+			return err
+		}
+		c.SigningPassphrase = passphrase
+	}
+
 	hideSupportLink = c.HideSupportLink
 
 	exitChannel := make(chan error, 1)
@@ -963,7 +1139,6 @@ func (c *Conf) Initialize(configDir string, isShared int) error {
 		if err := binding.parseAllowedProxy(); err != nil {
 			return err
 		}
-		binding.checkWebClientIntegrations()
 		binding.checkBranding()
 		binding.Security.updateProxyHeaders()
 
@@ -986,7 +1161,8 @@ func (c *Conf) Initialize(configDir string, isShared int) error {
 	maxUploadFileSize = c.MaxUploadFileSize
 	installationCode = c.Setup.InstallationCode
 	installationCodeHint = c.Setup.InstallationCodeHint
-	startCleanupTicker(tokenDuration / 2)
+	updateTokensDuration(c.JWTLifetime, c.CookieLifetime, c.ShareCookieLifetime)
+	startCleanupTicker(10 * time.Minute)
 	c.setTokenValidationMode()
 	return <-exitChannel
 }
@@ -1039,7 +1215,7 @@ func getServicesStatus() *ServicesStatus {
 	return status
 }
 
-func fileServer(r chi.Router, path string, root http.FileSystem) {
+func fileServer(r chi.Router, path string, root http.FileSystem, disableDirectoryIndex bool) {
 	if path != "/" && path[len(path)-1] != '/' {
 		r.Get(path, http.RedirectHandler(path+"/", http.StatusMovedPermanently).ServeHTTP)
 		path += "/"
@@ -1049,6 +1225,9 @@ func fileServer(r chi.Router, path string, root http.FileSystem) {
 	r.Get(path, func(w http.ResponseWriter, r *http.Request) {
 		rctx := chi.RouteContext(r.Context())
 		pathPrefix := strings.TrimSuffix(rctx.RoutePattern(), "/*")
+		if disableDirectoryIndex {
+			root = neuteredFileSystem{root}
+		}
 		fs := http.StripPrefix(pathPrefix, http.FileServer(root))
 		fs.ServeHTTP(w, r)
 	})
@@ -1076,6 +1255,7 @@ func updateWebClientURLs(baseURL string) {
 	webClientDirsPath = path.Join(baseURL, webClientDirsPathDefault)
 	webClientDownloadZipPath = path.Join(baseURL, webClientDownloadZipPathDefault)
 	webClientProfilePath = path.Join(baseURL, webClientProfilePathDefault)
+	webClientPingPath = path.Join(baseURL, webClientPingPathDefault)
 	webChangeClientPwdPath = path.Join(baseURL, webChangeClientPwdPathDefault)
 	webClientLogoutPath = path.Join(baseURL, webClientLogoutPathDefault)
 	webClientMFAPath = path.Join(baseURL, webClientMFAPathDefault)
@@ -1087,6 +1267,10 @@ func updateWebClientURLs(baseURL string) {
 	webClientResetPwdPath = path.Join(baseURL, webClientResetPwdPathDefault)
 	webClientViewPDFPath = path.Join(baseURL, webClientViewPDFPathDefault)
 	webClientGetPDFPath = path.Join(baseURL, webClientGetPDFPathDefault)
+	webClientExistPath = path.Join(baseURL, webClientExistPathDefault)
+	webClientTasksPath = path.Join(baseURL, webClientTasksPathDefault)
+	webStaticFilesPath = path.Join(baseURL, webStaticFilesPathDefault)
+	webOpenAPIPath = path.Join(baseURL, webOpenAPIPathDefault)
 }
 
 func updateWebAdminURLs(baseURL string) {
@@ -1097,6 +1281,8 @@ func updateWebAdminURLs(baseURL string) {
 	webBasePath = path.Join(baseURL, webBasePathDefault)
 	webBaseAdminPath = path.Join(baseURL, webBasePathAdminDefault)
 	webOIDCRedirectPath = path.Join(baseURL, webOIDCRedirectPathDefault)
+	webOAuth2RedirectPath = path.Join(baseURL, webOAuth2RedirectPathDefault)
+	webOAuth2TokenPath = path.Join(baseURL, webOAuth2TokenPathDefault)
 	webAdminSetupPath = path.Join(baseURL, webAdminSetupPathDefault)
 	webAdminLoginPath = path.Join(baseURL, webAdminLoginPathDefault)
 	webAdminOIDCLoginPath = path.Join(baseURL, webAdminOIDCLoginPathDefault)
@@ -1142,6 +1328,7 @@ func updateWebAdminURLs(baseURL string) {
 	webEventsPath = path.Join(baseURL, webEventsPathDefault)
 	webEventsFsSearchPath = path.Join(baseURL, webEventsFsSearchPathDefault)
 	webEventsProviderSearchPath = path.Join(baseURL, webEventsProviderSearchPathDefault)
+	webEventsLogSearchPath = path.Join(baseURL, webEventsLogSearchPathDefault)
 	webConfigsPath = path.Join(baseURL, webConfigsPathDefault)
 	webStaticFilesPath = path.Join(baseURL, webStaticFilesPathDefault)
 	webOpenAPIPath = path.Join(baseURL, webOpenAPIPathDefault)
@@ -1168,10 +1355,12 @@ func startCleanupTicker(duration time.Duration) {
 				return
 			case <-cleanupTicker.C:
 				counter++
-				cleanupExpiredJWTTokens()
+				invalidatedJWTTokens.Cleanup()
 				resetCodesMgr.Cleanup()
+				webTaskMgr.Cleanup()
 				if counter%2 == 0 {
 					oidcMgr.cleanup()
+					oauth2Mgr.cleanup()
 				}
 			}
 		}
@@ -1186,22 +1375,15 @@ func stopCleanupTicker() {
 	}
 }
 
-func cleanupExpiredJWTTokens() {
-	invalidatedJWTTokens.Range(func(key, value any) bool {
-		exp, ok := value.(time.Time)
-		if !ok || exp.Before(time.Now().UTC()) {
-			invalidatedJWTTokens.Delete(key)
-		}
-		return true
-	})
-}
-
 func getSigningKey(signingPassphrase string) []byte {
+	var key []byte
 	if signingPassphrase != "" {
-		sk := sha256.Sum256([]byte(signingPassphrase))
-		return sk[:]
+		key = []byte(signingPassphrase)
+	} else {
+		key = util.GenerateRandomBytes(32)
 	}
-	return util.GenerateRandomBytes(32)
+	sk := sha256.Sum256(key)
+	return sk[:]
 }
 
 // SetInstallationCodeResolver sets a function to call to resolve the installation code
@@ -1214,4 +1396,31 @@ func resolveInstallationCode() string {
 		return fnInstallationCodeResolver(installationCode)
 	}
 	return installationCode
+}
+
+type neuteredFileSystem struct {
+	fs http.FileSystem
+}
+
+func (nfs neuteredFileSystem) Open(name string) (http.File, error) {
+	f, err := nfs.fs.Open(name)
+	if err != nil {
+		return nil, err
+	}
+
+	s, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+
+	if s.IsDir() {
+		index := path.Join(name, "index.html")
+		if _, err := nfs.fs.Open(index); err != nil {
+			defer f.Close()
+
+			return nil, err
+		}
+	}
+
+	return f, nil
 }

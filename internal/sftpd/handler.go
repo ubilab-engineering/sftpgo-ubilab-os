@@ -1,4 +1,4 @@
-// Copyright (C) 2019-2023 Nicola Murino
+// Copyright (C) 2019 Nicola Murino
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published
@@ -37,11 +37,10 @@ type Connection struct {
 	// client's version string
 	ClientVersion string
 	// Remote address for this connection
-	RemoteAddr   net.Addr
-	LocalAddr    net.Addr
-	channel      io.ReadWriteCloser
-	command      string
-	folderPrefix string
+	RemoteAddr net.Addr
+	LocalAddr  net.Addr
+	channel    io.ReadWriteCloser
+	command    string
 }
 
 // GetClientVersion returns the connected client's version
@@ -76,6 +75,10 @@ func (c *Connection) Fileread(request *sftp.Request) (io.ReaderAt, error) {
 
 	if !c.User.HasPerm(dataprovider.PermDownload, path.Dir(request.Filepath)) {
 		return nil, sftp.ErrSSHFxPermissionDenied
+	}
+	if err := common.Connections.IsNewTransferAllowed(c.User.Username); err != nil {
+		c.Log(logger.LevelInfo, "denying file read due to transfer count limits")
+		return nil, c.GetPermissionDeniedError()
 	}
 	transferQuota := c.GetTransferQuota()
 	if !transferQuota.HasDownloadSpace() {
@@ -121,8 +124,13 @@ func (c *Connection) Filewrite(request *sftp.Request) (io.WriterAt, error) {
 	return c.handleFilewrite(request)
 }
 
-func (c *Connection) handleFilewrite(request *sftp.Request) (sftp.WriterAtReaderAt, error) {
+func (c *Connection) handleFilewrite(request *sftp.Request) (sftp.WriterAtReaderAt, error) { //nolint:gocyclo
 	c.UpdateLastActivity()
+
+	if err := common.Connections.IsNewTransferAllowed(c.User.Username); err != nil {
+		c.Log(logger.LevelInfo, "denying file write due to transfer count limits")
+		return nil, c.GetPermissionDeniedError()
+	}
 
 	if ok, _ := c.User.IsFileAllowed(request.Filepath); !ok {
 		c.Log(logger.LevelWarn, "writing file %q is not allowed", request.Filepath)
@@ -216,16 +224,16 @@ func (c *Connection) Filelist(request *sftp.Request) (sftp.ListerAt, error) {
 
 	switch request.Method {
 	case "List":
-		files, err := c.ListDir(request.Filepath)
+		lister, err := c.ListDir(request.Filepath)
 		if err != nil {
 			return nil, err
 		}
 		modTime := time.Unix(0, 0)
-		if request.Filepath != "/" || c.folderPrefix != "" {
-			files = util.PrependFileInfo(files, vfs.NewFileInfo("..", true, 0, modTime, false))
+		if request.Filepath != "/" {
+			lister.Prepend(vfs.NewFileInfo("..", true, 0, modTime, false))
 		}
-		files = util.PrependFileInfo(files, vfs.NewFileInfo(".", true, 0, modTime, false))
-		return listerAt(files), nil
+		lister.Prepend(vfs.NewFileInfo(".", true, 0, modTime, false))
+		return lister, nil
 	case "Stat":
 		if !c.User.HasPerm(dataprovider.PermListItems, path.Dir(request.Filepath)) {
 			return nil, sftp.ErrSSHFxPermissionDenied
@@ -353,23 +361,25 @@ func (c *Connection) handleSFTPSetstat(request *sftp.Request) error {
 	attrs := common.StatAttributes{
 		Flags: 0,
 	}
-	if request.AttrFlags().Permissions {
-		attrs.Flags |= common.StatAttrPerms
-		attrs.Mode = request.Attributes().FileMode()
-	}
-	if request.AttrFlags().UidGid {
-		attrs.Flags |= common.StatAttrUIDGID
-		attrs.UID = int(request.Attributes().UID)
-		attrs.GID = int(request.Attributes().GID)
-	}
-	if request.AttrFlags().Acmodtime {
-		attrs.Flags |= common.StatAttrTimes
-		attrs.Atime = time.Unix(int64(request.Attributes().Atime), 0)
-		attrs.Mtime = time.Unix(int64(request.Attributes().Mtime), 0)
-	}
-	if request.AttrFlags().Size {
-		attrs.Flags |= common.StatAttrSize
-		attrs.Size = int64(request.Attributes().Size)
+	if request.Attributes() != nil {
+		if request.AttrFlags().Permissions {
+			attrs.Flags |= common.StatAttrPerms
+			attrs.Mode = request.Attributes().FileMode()
+		}
+		if request.AttrFlags().UidGid {
+			attrs.Flags |= common.StatAttrUIDGID
+			attrs.UID = int(request.Attributes().UID)
+			attrs.GID = int(request.Attributes().GID)
+		}
+		if request.AttrFlags().Acmodtime {
+			attrs.Flags |= common.StatAttrTimes
+			attrs.Atime = time.Unix(int64(request.Attributes().Atime), 0)
+			attrs.Mtime = time.Unix(int64(request.Attributes().Mtime), 0)
+		}
+		if request.AttrFlags().Size {
+			attrs.Flags |= common.StatAttrSize
+			attrs.Size = int64(request.Attributes().Size)
+		}
 	}
 
 	return c.SetStat(request.Filepath, &attrs)
@@ -407,7 +417,7 @@ func (c *Connection) handleSFTPUploadToNewFile(fs vfs.Fs, pflags sftp.FileOpenFl
 	}
 
 	osFlags := getOSOpenFlags(pflags)
-	file, w, cancelFn, err := fs.Create(filePath, osFlags)
+	file, w, cancelFn, err := fs.Create(filePath, osFlags, c.GetCreateChecks(requestPath, true, false))
 	if err != nil {
 		c.Log(logger.LevelError, "error creating file %q, os flags %d, pflags %+v: %+v", resolvedPath, osFlags, pflags, err)
 		return nil, c.GetFsError(fs, err)
@@ -443,9 +453,10 @@ func (c *Connection) handleSFTPUploadToExistingFile(fs vfs.Fs, pflags sftp.FileO
 	// if there is a size limit the remaining size cannot be 0 here, since quotaResult.HasSpace
 	// will return false in this case and we deny the upload before.
 	// For Cloud FS GetMaxWriteSize will return unsupported operation
-	maxWriteSize, err := c.GetMaxWriteSize(diskQuota, isResume, fileSize, fs.IsUploadResumeSupported())
+	maxWriteSize, err := c.GetMaxWriteSize(diskQuota, isResume, fileSize, vfs.IsUploadResumeSupported(fs, fileSize))
 	if err != nil {
-		c.Log(logger.LevelDebug, "unable to get max write size: %v", err)
+		c.Log(logger.LevelDebug, "unable to get max write size for file %q is resume? %t: %v",
+			requestPath, isResume, err)
 		return nil, err
 	}
 
@@ -455,7 +466,7 @@ func (c *Connection) handleSFTPUploadToExistingFile(fs vfs.Fs, pflags sftp.FileO
 	}
 
 	if common.Config.IsAtomicUploadEnabled() && fs.IsAtomicUploadSupported() {
-		_, _, err = fs.Rename(resolvedPath, filePath)
+		_, _, err = fs.Rename(resolvedPath, filePath, 0)
 		if err != nil {
 			c.Log(logger.LevelError, "error renaming existing file for atomic upload, source: %q, dest: %q, err: %+v",
 				resolvedPath, filePath, err)
@@ -463,7 +474,7 @@ func (c *Connection) handleSFTPUploadToExistingFile(fs vfs.Fs, pflags sftp.FileO
 		}
 	}
 
-	file, w, cancelFn, err := fs.Create(filePath, osFlags)
+	file, w, cancelFn, err := fs.Create(filePath, osFlags, c.GetCreateChecks(requestPath, false, isResume))
 	if err != nil {
 		c.Log(logger.LevelError, "error opening existing file, os flags %v, pflags: %+v, source: %q, err: %+v",
 			osFlags, pflags, filePath, err)
@@ -475,22 +486,15 @@ func (c *Connection) handleSFTPUploadToExistingFile(fs vfs.Fs, pflags sftp.FileO
 	if isResume {
 		c.Log(logger.LevelDebug, "resuming upload requested, file path %q initial size: %d, has append flag %t",
 			filePath, fileSize, pflags.Append)
-		// enforce min write offset only if the client passed the APPEND flag
-		if pflags.Append {
+		// enforce min write offset only if the client passed the APPEND flag or the filesystem
+		// supports emulated resume
+		if pflags.Append || !fs.IsUploadResumeSupported() {
 			minWriteOffset = fileSize
 		}
 		initialSize = fileSize
 	} else {
 		if isTruncate && vfs.HasTruncateSupport(fs) {
-			vfolder, err := c.User.GetVirtualFolderForPath(path.Dir(requestPath))
-			if err == nil {
-				dataprovider.UpdateVirtualFolderQuota(&vfolder.BaseVirtualFolder, 0, -fileSize, false) //nolint:errcheck
-				if vfolder.IsIncludedInUserQuota() {
-					dataprovider.UpdateUserQuota(&c.User, 0, -fileSize, false) //nolint:errcheck
-				}
-			} else {
-				dataprovider.UpdateUserQuota(&c.User, 0, -fileSize, false) //nolint:errcheck
-			}
+			c.updateQuotaAfterTruncate(requestPath, fileSize)
 		} else {
 			initialSize = fileSize
 			truncatedSize = fileSize
@@ -559,6 +563,15 @@ func (c *Connection) getStatVFSFromQuotaResult(fs vfs.Fs, name string, quotaResu
 		Favail:  ffree,
 		Namemax: 255,
 	}, nil
+}
+
+func (c *Connection) updateQuotaAfterTruncate(requestPath string, fileSize int64) {
+	vfolder, err := c.User.GetVirtualFolderForPath(path.Dir(requestPath))
+	if err == nil {
+		dataprovider.UpdateUserFolderQuota(&vfolder, &c.User, 0, -fileSize, false)
+		return
+	}
+	dataprovider.UpdateUserQuota(&c.User, 0, -fileSize, false) //nolint:errcheck
 }
 
 func getOSOpenFlags(requestFlags sftp.FileOpenFlags) (flags int) {

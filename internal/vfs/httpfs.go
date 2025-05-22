@@ -1,4 +1,4 @@
-// Copyright (C) 2019-2023 Nicola Murino
+// Copyright (C) 2019 Nicola Murino
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published
@@ -32,7 +32,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/eikenb/pipeat"
 	"github.com/pkg/sftp"
 	"github.com/sftpgo/sdk"
 
@@ -44,7 +43,8 @@ import (
 
 const (
 	// httpFsName is the name for the HTTP Fs implementation
-	httpFsName = "httpfs"
+	httpFsName            = "httpfs"
+	maxHTTPFsResponseSize = 1048576
 )
 
 var (
@@ -121,20 +121,26 @@ func (c *HTTPFsConfig) isSameResource(other HTTPFsConfig) bool {
 func (c *HTTPFsConfig) validate() error {
 	c.setEmptyCredentialsIfNil()
 	if c.Endpoint == "" {
-		return errors.New("httpfs: endpoint cannot be empty")
+		return util.NewI18nError(errors.New("httpfs: endpoint cannot be empty"), util.I18nErrorEndpointRequired)
 	}
 	c.Endpoint = strings.TrimRight(c.Endpoint, "/")
 	endpointURL, err := url.Parse(c.Endpoint)
 	if err != nil {
-		return fmt.Errorf("httpfs: invalid endpoint: %w", err)
+		return util.NewI18nError(fmt.Errorf("httpfs: invalid endpoint: %w", err), util.I18nErrorEndpointInvalid)
 	}
 	if !util.IsStringPrefixInSlice(c.Endpoint, supportedEndpointSchema) {
-		return errors.New("httpfs: invalid endpoint schema: http and https are supported")
+		return util.NewI18nError(
+			errors.New("httpfs: invalid endpoint schema: http and https are supported"),
+			util.I18nErrorEndpointInvalid,
+		)
 	}
 	if endpointURL.Host == "unix" {
 		socketPath := endpointURL.Query().Get("socket_path")
 		if !filepath.IsAbs(socketPath) {
-			return fmt.Errorf("httpfs: invalid unix domain socket path: %q", socketPath)
+			return util.NewI18nError(
+				fmt.Errorf("httpfs: invalid unix domain socket path: %q", socketPath),
+				util.I18nErrorEndpointInvalid,
+			)
 		}
 	}
 	if !isEqualityCheckModeValid(c.EqualityCheckMode) {
@@ -157,19 +163,31 @@ func (c *HTTPFsConfig) validate() error {
 
 // ValidateAndEncryptCredentials validates the config and encrypts credentials if they are in plain text
 func (c *HTTPFsConfig) ValidateAndEncryptCredentials(additionalData string) error {
-	if err := c.validate(); err != nil {
-		return util.NewValidationError(fmt.Sprintf("could not validate HTTP fs config: %v", err))
+	err := c.validate()
+	if err != nil {
+		var errI18n *util.I18nError
+		errValidation := util.NewValidationError(fmt.Sprintf("could not validate HTTP fs config: %v", err))
+		if errors.As(err, &errI18n) {
+			return util.NewI18nError(errValidation, errI18n.Message)
+		}
+		return util.NewI18nError(errValidation, util.I18nErrorFsValidation)
 	}
 	if c.Password.IsPlain() {
 		c.Password.SetAdditionalData(additionalData)
 		if err := c.Password.Encrypt(); err != nil {
-			return util.NewValidationError(fmt.Sprintf("could not encrypt HTTP fs password: %v", err))
+			return util.NewI18nError(
+				util.NewValidationError(fmt.Sprintf("could not encrypt HTTP fs password: %v", err)),
+				util.I18nErrorFsValidation,
+			)
 		}
 	}
 	if c.APIKey.IsPlain() {
 		c.APIKey.SetAdditionalData(additionalData)
 		if err := c.APIKey.Encrypt(); err != nil {
-			return util.NewValidationError(fmt.Sprintf("could not encrypt HTTP fs API key: %v", err))
+			return util.NewI18nError(
+				util.NewValidationError(fmt.Sprintf("could not encrypt HTTP fs API key: %v", err)),
+				util.I18nErrorFsValidation,
+			)
 		}
 	}
 	return nil
@@ -189,11 +207,7 @@ type HTTPFs struct {
 // NewHTTPFs returns an HTTPFs object that allows to interact with SFTPGo HTTP filesystem backends
 func NewHTTPFs(connectionID, localTempDir, mountPath string, config HTTPFsConfig) (Fs, error) {
 	if localTempDir == "" {
-		if tempPath != "" {
-			localTempDir = tempPath
-		} else {
-			localTempDir = filepath.Clean(os.TempDir())
-		}
+		localTempDir = getLocalTempDir()
 	}
 	config.setEmptyCredentialsIfNil()
 	if !config.Password.IsEmpty() {
@@ -283,8 +297,12 @@ func (fs *HTTPFs) Stat(name string) (os.FileInfo, error) {
 	}
 	defer resp.Body.Close()
 
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxHTTPFsResponseSize))
+	if err != nil {
+		return nil, err
+	}
 	var response statResponse
-	err = json.NewDecoder(resp.Body).Decode(&response)
+	err = json.Unmarshal(respBody, &response)
 	if err != nil {
 		return nil, err
 	}
@@ -297,11 +315,12 @@ func (fs *HTTPFs) Lstat(name string) (os.FileInfo, error) {
 }
 
 // Open opens the named file for reading
-func (fs *HTTPFs) Open(name string, offset int64) (File, *pipeat.PipeReaderAt, func(), error) {
-	r, w, err := pipeat.PipeInDir(fs.localTempDir)
+func (fs *HTTPFs) Open(name string, offset int64) (File, PipeReader, func(), error) {
+	r, w, err := createPipeFn(fs.localTempDir, 0)
 	if err != nil {
 		return nil, nil, nil, err
 	}
+	p := NewPipeReader(r)
 	ctx, cancelFn := context.WithCancel(context.Background())
 
 	var queryString string
@@ -326,27 +345,23 @@ func (fs *HTTPFs) Open(name string, offset int64) (File, *pipeat.PipeReaderAt, f
 		metric.HTTPFsTransferCompleted(n, 1, err)
 	}()
 
-	return nil, r, cancelFn, nil
+	return nil, p, cancelFn, nil
 }
 
 // Create creates or opens the named file for writing
-func (fs *HTTPFs) Create(name string, flag int) (File, *PipeWriter, func(), error) {
-	r, w, err := pipeat.PipeInDir(fs.localTempDir)
+func (fs *HTTPFs) Create(name string, flag, checks int) (File, PipeWriter, func(), error) {
+	r, w, err := createPipeFn(fs.localTempDir, 0)
 	if err != nil {
 		return nil, nil, nil, err
 	}
 	p := NewPipeWriter(w)
 	ctx, cancelFn := context.WithCancel(context.Background())
 
-	var queryString string
-	if flag > 0 {
-		queryString = fmt.Sprintf("?flags=%d", flag)
-	}
-
 	go func() {
 		defer cancelFn()
 
 		contentType := mime.TypeByExtension(path.Ext(name))
+		queryString := fmt.Sprintf("?flags=%d&checks=%d", flag, checks)
 		resp, err := fs.sendHTTPRequest(ctx, http.MethodPost, "create", name, queryString, contentType,
 			&wrapReader{reader: r})
 		if err != nil {
@@ -368,7 +383,7 @@ func (fs *HTTPFs) Create(name string, flag int) (File, *PipeWriter, func(), erro
 }
 
 // Rename renames (moves) source to target.
-func (fs *HTTPFs) Rename(source, target string) (int, int64, error) {
+func (fs *HTTPFs) Rename(source, target string, checks int) (int, int64, error) {
 	if source == target {
 		return -1, -1, nil
 	}
@@ -381,6 +396,9 @@ func (fs *HTTPFs) Rename(source, target string) (int, int64, error) {
 		return -1, -1, err
 	}
 	defer resp.Body.Close()
+	if checks&CheckUpdateModTime != 0 {
+		fs.Chtimes(target, time.Now(), time.Now(), false) //nolint:errcheck
+	}
 	return -1, -1, nil
 }
 
@@ -472,7 +490,7 @@ func (fs *HTTPFs) Truncate(name string, size int64) error {
 
 // ReadDir reads the directory named by dirname and returns
 // a list of directory entries.
-func (fs *HTTPFs) ReadDir(dirname string) ([]os.FileInfo, error) {
+func (fs *HTTPFs) ReadDir(dirname string) (DirLister, error) {
 	ctx, cancelFn := context.WithDeadline(context.Background(), time.Now().Add(fs.ctxTimeout))
 	defer cancelFn()
 
@@ -482,8 +500,12 @@ func (fs *HTTPFs) ReadDir(dirname string) ([]os.FileInfo, error) {
 	}
 	defer resp.Body.Close()
 
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxHTTPFsResponseSize*10))
+	if err != nil {
+		return nil, err
+	}
 	var response []statResponse
-	err = json.NewDecoder(resp.Body).Decode(&response)
+	err = json.Unmarshal(respBody, &response)
 	if err != nil {
 		return nil, err
 	}
@@ -491,11 +513,17 @@ func (fs *HTTPFs) ReadDir(dirname string) ([]os.FileInfo, error) {
 	for _, stat := range response {
 		result = append(result, stat.getFileInfo())
 	}
-	return result, nil
+	return &baseDirLister{result}, nil
 }
 
 // IsUploadResumeSupported returns true if resuming uploads is supported.
 func (*HTTPFs) IsUploadResumeSupported() bool {
+	return false
+}
+
+// IsConditionalUploadResumeSupported returns if resuming uploads is supported
+// for the specified size
+func (*HTTPFs) IsConditionalUploadResumeSupported(_ int64) bool {
 	return false
 }
 
@@ -527,7 +555,7 @@ func (*HTTPFs) IsNotSupported(err error) bool {
 // CheckRootPath creates the specified local root directory if it does not exists
 func (fs *HTTPFs) CheckRootPath(username string, uid int, gid int) bool {
 	// we need a local directory for temporary files
-	osFs := NewOsFs(fs.ConnectionID(), fs.localTempDir, "")
+	osFs := NewOsFs(fs.ConnectionID(), fs.localTempDir, "", nil)
 	return osFs.CheckRootPath(username, uid, gid)
 }
 
@@ -553,8 +581,13 @@ func (fs *HTTPFs) GetDirSize(dirname string) (int, int64, error) {
 	}
 	defer resp.Body.Close()
 
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxHTTPFsResponseSize))
+	if err != nil {
+		return 0, 0, err
+	}
+
 	var response dirSizeResponse
-	err = json.NewDecoder(resp.Body).Decode(&response)
+	err = json.Unmarshal(respBody, &response)
 	if err != nil {
 		return 0, 0, err
 	}
@@ -624,8 +657,13 @@ func (fs *HTTPFs) GetMimeType(name string) (string, error) {
 	}
 	defer resp.Body.Close()
 
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxHTTPFsResponseSize))
+	if err != nil {
+		return "", err
+	}
+
 	var response mimeTypeResponse
-	err = json.NewDecoder(resp.Body).Decode(&response)
+	err = json.Unmarshal(respBody, &response)
 	if err != nil {
 		return "", err
 	}
@@ -649,8 +687,13 @@ func (fs *HTTPFs) GetAvailableDiskSize(dirName string) (*sftp.StatVFS, error) {
 	}
 	defer resp.Body.Close()
 
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxHTTPFsResponseSize))
+	if err != nil {
+		return nil, err
+	}
+
 	var response statVFSResponse
-	err = json.NewDecoder(resp.Body).Decode(&response)
+	err = json.Unmarshal(respBody, &response)
 	if err != nil {
 		return nil, err
 	}
@@ -690,19 +733,33 @@ func (fs *HTTPFs) walk(filePath string, info fs.FileInfo, walkFn filepath.WalkFu
 	if !info.IsDir() {
 		return walkFn(filePath, info, nil)
 	}
-	files, err := fs.ReadDir(filePath)
+	lister, err := fs.ReadDir(filePath)
 	err1 := walkFn(filePath, info, err)
 	if err != nil || err1 != nil {
+		if err == nil {
+			lister.Close()
+		}
 		return err1
 	}
-	for _, fi := range files {
-		objName := path.Join(filePath, fi.Name())
-		err = fs.walk(objName, fi, walkFn)
-		if err != nil {
+	defer lister.Close()
+
+	for {
+		files, err := lister.Next(ListerBatchSize)
+		finished := errors.Is(err, io.EOF)
+		if err != nil && !finished {
 			return err
 		}
+		for _, fi := range files {
+			objName := path.Join(filePath, fi.Name())
+			err = fs.walk(objName, fi, walkFn)
+			if err != nil {
+				return err
+			}
+		}
+		if finished {
+			return nil
+		}
 	}
-	return nil
 }
 
 func getErrorFromResponseCode(code int) error {
@@ -722,7 +779,6 @@ func getErrorFromResponseCode(code int) error {
 
 func getInsecureTLSConfig() *tls.Config {
 	return &tls.Config{
-		NextProtos:         []string{"h2", "http/1.1"},
 		InsecureSkipVerify: true,
 	}
 }

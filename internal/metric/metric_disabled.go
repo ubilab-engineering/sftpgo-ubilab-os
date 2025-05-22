@@ -1,5 +1,18 @@
+// Copyright (C) 2019 Nicola Murino
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published
+// by the Free Software Foundation, version 3.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program. If not, see <https://www.gnu.org/licenses/>.
+
 //go:build nometrics
-// +build nometrics
 
 package metric
 
@@ -64,9 +77,9 @@ func AddLoginAttempt(_ string) {}
 // AddLoginResult increments the metrics for login results
 func AddLoginResult(_ string, _ error) {}
 
-// AddNoAuthTryed increments the metric for clients disconnected
+// AddNoAuthTried increments the metric for clients disconnected
 // for inactivity before trying to login
-func AddNoAuthTryed() {}
+func AddNoAuthTried() {}
 
 // HTTPRequestServed increments the metrics for HTTP requests
 func HTTPRequestServed(_ int) {}

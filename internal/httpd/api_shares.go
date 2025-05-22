@@ -1,4 +1,4 @@
-// Copyright (C) 2019-2023 Nicola Murino
+// Copyright (C) 2019 Nicola Murino
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published
@@ -22,6 +22,7 @@ import (
 	"net/url"
 	"os"
 	"path"
+	"slices"
 	"strings"
 	"time"
 
@@ -95,6 +96,10 @@ func addShare(w http.ResponseWriter, r *http.Request) {
 		sendAPIResponse(w, r, err, "", http.StatusBadRequest)
 		return
 	}
+	if err := user.CheckMaxShareExpiration(util.GetTimeFromMsecSinceEpoch(share.ExpiresAt)); err != nil {
+		sendAPIResponse(w, r, err, "", getRespStatus(err))
+		return
+	}
 	share.ID = 0
 	share.ShareID = util.GenerateUniqueID()
 	share.LastUseAt = 0
@@ -103,7 +108,7 @@ func addShare(w http.ResponseWriter, r *http.Request) {
 		share.Name = share.ShareID
 	}
 	if share.Password == "" {
-		if util.Contains(claims.Permissions, sdk.WebClientShareNoPasswordDisabled) {
+		if slices.Contains(claims.Permissions, sdk.WebClientShareNoPasswordDisabled) {
 			sendAPIResponse(w, r, nil, "You are not authorized to share files/folders without a password",
 				http.StatusForbidden)
 			return
@@ -126,6 +131,11 @@ func updateShare(w http.ResponseWriter, r *http.Request) {
 		sendAPIResponse(w, r, err, "Invalid token claims", http.StatusBadRequest)
 		return
 	}
+	user, err := dataprovider.GetUserWithGroupSettings(claims.Username, "")
+	if err != nil {
+		sendAPIResponse(w, r, err, "Unable to retrieve your user", getRespStatus(err))
+		return
+	}
 	shareID := getURLParam(r, "id")
 	share, err := dataprovider.ShareExists(shareID, claims.Username)
 	if err != nil {
@@ -146,11 +156,15 @@ func updateShare(w http.ResponseWriter, r *http.Request) {
 		updatedShare.Password = share.Password
 	}
 	if updatedShare.Password == "" {
-		if util.Contains(claims.Permissions, sdk.WebClientShareNoPasswordDisabled) {
+		if slices.Contains(claims.Permissions, sdk.WebClientShareNoPasswordDisabled) {
 			sendAPIResponse(w, r, nil, "You are not authorized to share files/folders without a password",
 				http.StatusForbidden)
 			return
 		}
+	}
+	if err := user.CheckMaxShareExpiration(util.GetTimeFromMsecSinceEpoch(updatedShare.ExpiresAt)); err != nil {
+		sendAPIResponse(w, r, err, "", getRespStatus(err))
+		return
 	}
 	err = dataprovider.UpdateShare(&updatedShare, claims.Username, util.GetIPFromRemoteAddress(r.RemoteAddr), claims.Role)
 	if err != nil {
@@ -188,7 +202,7 @@ func (s *httpdServer) readBrowsableShareContents(w http.ResponseWriter, r *http.
 		sendAPIResponse(w, r, err, "", getRespStatus(err))
 		return
 	}
-	name, err := getBrowsableSharedPath(share, r)
+	name, err := getBrowsableSharedPath(share.Paths[0], r)
 	if err != nil {
 		sendAPIResponse(w, r, err, "", getRespStatus(err))
 		return
@@ -200,12 +214,12 @@ func (s *httpdServer) readBrowsableShareContents(w http.ResponseWriter, r *http.
 	}
 	defer common.Connections.Remove(connection.GetID())
 
-	contents, err := connection.ReadDir(name)
+	lister, err := connection.ReadDir(name)
 	if err != nil {
-		sendAPIResponse(w, r, err, "Unable to get directory contents", getMappedStatusCode(err))
+		sendAPIResponse(w, r, err, "Unable to get directory lister", getMappedStatusCode(err))
 		return
 	}
-	renderAPIDirContents(w, r, contents, true)
+	renderAPIDirContents(w, lister, true)
 }
 
 func (s *httpdServer) downloadBrowsableSharedFile(w http.ResponseWriter, r *http.Request) {
@@ -219,7 +233,7 @@ func (s *httpdServer) downloadBrowsableSharedFile(w http.ResponseWriter, r *http
 		sendAPIResponse(w, r, err, "", getRespStatus(err))
 		return
 	}
-	name, err := getBrowsableSharedPath(share, r)
+	name, err := getBrowsableSharedPath(share.Paths[0], r)
 	if err != nil {
 		sendAPIResponse(w, r, err, "", getRespStatus(err))
 		return
@@ -344,6 +358,14 @@ func (s *httpdServer) uploadFileToShare(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	defer common.Connections.Remove(connection.GetID())
+
+	connection.User.CheckFsRoot(connection.ID) //nolint:errcheck
+	if getBoolQueryParam(r, "mkdir_parents") {
+		if err = connection.CheckParentDirs(path.Dir(filePath)); err != nil {
+			sendAPIResponse(w, r, err, "Error checking parent directories", getMappedStatusCode(err))
+			return
+		}
+	}
 	if err := doUploadFile(w, r, connection, filePath); err != nil {
 		dataprovider.UpdateShareLastUse(&share, -1) //nolint:errcheck
 	}
@@ -356,6 +378,12 @@ func (s *httpdServer) uploadFilesToShare(w http.ResponseWriter, r *http.Request)
 	validScopes := []dataprovider.ShareScope{dataprovider.ShareScopeWrite, dataprovider.ShareScopeReadWrite}
 	share, connection, err := s.checkPublicShare(w, r, validScopes)
 	if err != nil {
+		return
+	}
+	if err := common.Connections.IsNewTransferAllowed(connection.User.Username); err != nil {
+		connection.Log(logger.LevelInfo, "denying file write due to number of transfer limits")
+		sendAPIResponse(w, r, err, "Denying file write due to transfer count limits",
+			http.StatusConflict)
 		return
 	}
 
@@ -397,10 +425,38 @@ func (s *httpdServer) uploadFilesToShare(w http.ResponseWriter, r *http.Request)
 	}
 	dataprovider.UpdateShareLastUse(&share, len(files)) //nolint:errcheck
 
+	connection.User.CheckFsRoot(connection.ID) //nolint:errcheck
 	numUploads := doUploadFiles(w, r, connection, share.Paths[0], files)
 	if numUploads != len(files) {
 		dataprovider.UpdateShareLastUse(&share, numUploads-len(files)) //nolint:errcheck
 	}
+}
+
+func (s *httpdServer) getShareClaims(r *http.Request, shareID string) (context.Context, *jwtTokenClaims, error) {
+	token, err := jwtauth.VerifyRequest(s.tokenAuth, r, jwtauth.TokenFromCookie)
+	if err != nil || token == nil {
+		return nil, nil, errInvalidToken
+	}
+	tokenString := jwtauth.TokenFromCookie(r)
+	if tokenString == "" || invalidatedJWTTokens.Get(tokenString) {
+		return nil, nil, errInvalidToken
+	}
+	if !slices.Contains(token.Audience(), tokenAudienceWebShare) {
+		logger.Debug(logSender, "", "invalid token audience for share %q", shareID)
+		return nil, nil, errInvalidToken
+	}
+	ipAddr := util.GetIPFromRemoteAddress(r.RemoteAddr)
+	if err := validateIPForToken(token, ipAddr); err != nil {
+		logger.Debug(logSender, "", "token for share %q is not valid for the ip address %q", shareID, ipAddr)
+		return nil, nil, err
+	}
+	ctx := jwtauth.NewContext(r.Context(), token, nil)
+	claims, err := getTokenClaims(r.WithContext(ctx))
+	if err != nil || claims.Username != shareID {
+		logger.Debug(logSender, "", "token not valid for share %q", shareID)
+		return nil, nil, errInvalidToken
+	}
+	return ctx, &claims, nil
 }
 
 func (s *httpdServer) checkWebClientShareCredentials(w http.ResponseWriter, r *http.Request, share *dataprovider.Share) error {
@@ -409,30 +465,9 @@ func (s *httpdServer) checkWebClientShareCredentials(w http.ResponseWriter, r *h
 		http.Redirect(w, r, redirectURL, http.StatusFound)
 	}
 
-	token, err := jwtauth.VerifyRequest(s.tokenAuth, r, jwtauth.TokenFromCookie)
-	if err != nil || token == nil {
+	if _, _, err := s.getShareClaims(r, share.ShareID); err != nil {
 		doRedirect()
-		return errInvalidToken
-	}
-	if !util.Contains(token.Audience(), tokenAudienceWebShare) {
-		logger.Debug(logSender, "", "invalid token audience for share %q", share.ShareID)
-		doRedirect()
-		return errInvalidToken
-	}
-	if tokenValidationMode != tokenValidationNoIPMatch {
-		ipAddr := util.GetIPFromRemoteAddress(r.RemoteAddr)
-		if !util.Contains(token.Audience(), ipAddr) {
-			logger.Debug(logSender, "", "token for share %q is not valid for the ip address %q", share.ShareID, ipAddr)
-			doRedirect()
-			return errInvalidToken
-		}
-	}
-	ctx := jwtauth.NewContext(r.Context(), token, nil)
-	claims, err := getTokenClaims(r.WithContext(ctx))
-	if err != nil || claims.Username != share.ShareID {
-		logger.Debug(logSender, "", "token not valid for share %q", share.ShareID)
-		doRedirect()
-		return errInvalidToken
+		return err
 	}
 	return nil
 }
@@ -442,7 +477,7 @@ func (s *httpdServer) checkPublicShare(w http.ResponseWriter, r *http.Request, v
 	isWebClient := isWebClientRequest(r)
 	renderError := func(err error, message string, statusCode int) {
 		if isWebClient {
-			s.renderClientMessagePage(w, r, "Unable to access the share", message, statusCode, err, "")
+			s.renderClientMessagePage(w, r, util.I18nShareAccessErrorTitle, statusCode, err, message)
 		} else {
 			sendAPIResponse(w, r, err, message, statusCode)
 		}
@@ -453,14 +488,15 @@ func (s *httpdServer) checkPublicShare(w http.ResponseWriter, r *http.Request, v
 	if err != nil {
 		statusCode := getRespStatus(err)
 		if statusCode == http.StatusNotFound {
-			err = errors.New("share does not exist")
+			err = util.NewI18nError(errors.New("share does not exist"), util.I18nError404Message)
 		}
 		renderError(err, "", statusCode)
 		return share, nil, err
 	}
-	if !util.Contains(validScopes, share.Scope) {
-		renderError(nil, "Invalid share scope", http.StatusForbidden)
-		return share, nil, errors.New("invalid share scope")
+	if !slices.Contains(validScopes, share.Scope) {
+		err := errors.New("invalid share scope")
+		renderError(util.NewI18nError(err, util.I18nErrorShareScope), "", http.StatusForbidden)
+		return share, nil, err
 	}
 	ipAddr := util.GetIPFromRemoteAddress(r.RemoteAddr)
 	ok, err := share.IsUsable(ipAddr)
@@ -471,7 +507,6 @@ func (s *httpdServer) checkPublicShare(w http.ResponseWriter, r *http.Request, v
 	if share.Password != "" {
 		if isWebClient {
 			if err := s.checkWebClientShareCredentials(w, r, &share); err != nil {
-				handleDefenderEventLoginFailed(ipAddr, err) //nolint:errcheck
 				return share, nil, dataprovider.ErrInvalidCredentials
 			}
 		} else {
@@ -489,6 +524,7 @@ func (s *httpdServer) checkPublicShare(w http.ResponseWriter, r *http.Request, v
 				return share, nil, dataprovider.ErrInvalidCredentials
 			}
 		}
+		common.DelayLogin(nil)
 	}
 	user, err := getUserForShare(share)
 	if err != nil {
@@ -511,39 +547,58 @@ func getUserForShare(share dataprovider.Share) (dataprovider.User, error) {
 		return user, err
 	}
 	if !user.CanManageShares() {
-		return user, util.NewRecordNotFoundError("this share does not exist")
+		return user, util.NewI18nError(util.NewRecordNotFoundError("this share does not exist"), util.I18nError404Message)
 	}
-	if share.Password == "" && util.Contains(user.Filters.WebClient, sdk.WebClientShareNoPasswordDisabled) {
-		return user, fmt.Errorf("sharing without a password was disabled: %w", os.ErrPermission)
+	if share.Password == "" && slices.Contains(user.Filters.WebClient, sdk.WebClientShareNoPasswordDisabled) {
+		return user, util.NewI18nError(
+			fmt.Errorf("sharing without a password was disabled: %w", os.ErrPermission),
+			util.I18nError403Message,
+		)
 	}
 	if user.MustSetSecondFactorForProtocol(common.ProtocolHTTP) {
-		return user, util.NewMethodDisabledError("two-factor authentication requirements not met")
+		return user, util.NewI18nError(
+			util.NewMethodDisabledError("two-factor authentication requirements not met"),
+			util.I18nError403Message,
+		)
 	}
 	return user, nil
 }
 
 func validateBrowsableShare(share dataprovider.Share, connection *Connection) error {
 	if len(share.Paths) != 1 {
-		return util.NewValidationError("a share with multiple paths is not browsable")
+		return util.NewI18nError(
+			util.NewValidationError("a share with multiple paths is not browsable"),
+			util.I18nErrorShareBrowsePaths,
+		)
 	}
 	basePath := share.Paths[0]
 	info, err := connection.Stat(basePath, 0)
 	if err != nil {
-		return fmt.Errorf("unable to check the share directory: %w", err)
+		connection.CloseFS() //nolint:errcheck
+		return util.NewI18nError(
+			fmt.Errorf("unable to check the share directory: %w", err),
+			util.I18nErrorShareInvalidPath,
+		)
 	}
 	if !info.IsDir() {
-		return util.NewValidationError("the shared object is not a directory and so it is not browsable")
+		return util.NewI18nError(
+			util.NewValidationError("the shared object is not a directory and so it is not browsable"),
+			util.I18nErrorShareBrowseNoDir,
+		)
 	}
 	return nil
 }
 
-func getBrowsableSharedPath(share dataprovider.Share, r *http.Request) (string, error) {
-	name := util.CleanPath(path.Join(share.Paths[0], r.URL.Query().Get("path")))
-	if share.Paths[0] == "/" {
+func getBrowsableSharedPath(shareBasePath string, r *http.Request) (string, error) {
+	name := util.CleanPath(path.Join(shareBasePath, r.URL.Query().Get("path")))
+	if shareBasePath == "/" {
 		return name, nil
 	}
-	if name != share.Paths[0] && !strings.HasPrefix(name, share.Paths[0]+"/") {
-		return "", util.NewValidationError(fmt.Sprintf("Invalid path %q", r.URL.Query().Get("path")))
+	if name != shareBasePath && !strings.HasPrefix(name, shareBasePath+"/") {
+		return "", util.NewI18nError(
+			util.NewValidationError(fmt.Sprintf("Invalid path %q", r.URL.Query().Get("path"))),
+			util.I18nErrorPathInvalid,
+		)
 	}
 	return name, nil
 }

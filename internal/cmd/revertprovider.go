@@ -1,4 +1,4 @@
-// Copyright (C) 2019-2023 Nicola Murino
+// Copyright (C) 2019 Nicola Murino
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published
@@ -24,6 +24,7 @@ import (
 	"github.com/drakkan/sftpgo/v2/internal/config"
 	"github.com/drakkan/sftpgo/v2/internal/dataprovider"
 	"github.com/drakkan/sftpgo/v2/internal/logger"
+	"github.com/drakkan/sftpgo/v2/internal/plugin"
 	"github.com/drakkan/sftpgo/v2/internal/util"
 )
 
@@ -40,8 +41,8 @@ Please take a look at the usage below to customize the options.`,
 		Run: func(_ *cobra.Command, _ []string) {
 			logger.DisableLogger()
 			logger.EnableConsoleLogger(zerolog.DebugLevel)
-			if revertProviderTargetVersion != 23 {
-				logger.WarnToConsole("Unsupported target version, 23 is the only supported one")
+			if revertProviderTargetVersion != 29 {
+				logger.WarnToConsole("Unsupported target version, 29 is the only supported one")
 				os.Exit(1)
 			}
 			configDir = util.CleanDirInput(configDir)
@@ -54,6 +55,21 @@ Please take a look at the usage below to customize the options.`,
 			err = kmsConfig.Initialize()
 			if err != nil {
 				logger.ErrorToConsole("unable to initialize KMS: %v", err)
+				os.Exit(1)
+			}
+			if config.HasKMSPlugin() {
+				if err := plugin.Initialize(config.GetPluginsConfig(), "debug"); err != nil {
+					logger.ErrorToConsole("unable to initialize plugin system: %v", err)
+					os.Exit(1)
+				}
+				registerSignals()
+				defer plugin.Handler.Cleanup()
+			}
+
+			mfaConfig := config.GetMFAConfig()
+			err = mfaConfig.Initialize()
+			if err != nil {
+				logger.ErrorToConsole("Unable to initialize MFA: %v", err)
 				os.Exit(1)
 			}
 			providerConf := config.GetProviderConf()
@@ -71,7 +87,7 @@ Please take a look at the usage below to customize the options.`,
 
 func init() {
 	addConfigFlags(revertProviderCmd)
-	revertProviderCmd.Flags().IntVar(&revertProviderTargetVersion, "to-version", 23, `23 means the version supported in v2.4.x`)
+	revertProviderCmd.Flags().IntVar(&revertProviderTargetVersion, "to-version", 29, `29 means the version supported in v2.6.x`)
 
 	rootCmd.AddCommand(revertProviderCmd)
 }

@@ -1,4 +1,4 @@
-// Copyright (C) 2019-2023 Nicola Murino
+// Copyright (C) 2019 Nicola Murino
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published
@@ -100,6 +100,9 @@ func checkDataprovider() {
 func checkCacheUpdates() {
 	checkUserCache()
 	checkIPListEntryCache()
+	cachedUserPasswords.cleanup()
+	cachedAdminPasswords.cleanup()
+	cachedAPIKeys.cleanup()
 }
 
 func checkUserCache() {
@@ -124,11 +127,11 @@ func checkUserCache() {
 				go provider.deleteUser(user, false) //nolint:errcheck
 			}
 			webDAVUsersCache.remove(user.Username)
+			cachedUserPasswords.Remove(user.Username)
 			delayedQuotaUpdater.resetUserQuota(user.Username)
 		} else {
-			webDAVUsersCache.swap(&user)
+			webDAVUsersCache.swap(&user, "")
 		}
-		cachedPasswords.Remove(user.Username)
 	}
 	lastUserCacheUpdate.Store(checkTime)
 	providerLog(logger.LevelDebug, "end user cache check, new update time %v", util.GetTimeFromMsecSinceEpoch(lastUserCacheUpdate.Load()))

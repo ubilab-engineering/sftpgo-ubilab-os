@@ -1,4 +1,4 @@
-// Copyright (C) 2019-2023 Nicola Murino
+// Copyright (C) 2019 Nicola Murino
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published
@@ -50,12 +50,13 @@ If the SMTP configuration is correct you should receive this email.`,
 				os.Exit(1)
 			}
 			smtpConfig := config.GetSMTPConfig()
+			smtpConfig.Debug = 1
 			err = smtpConfig.Initialize(configDir, false)
 			if err != nil {
 				logger.ErrorToConsole("unable to initialize SMTP configuration: %v", err)
 				os.Exit(1)
 			}
-			err = smtp.SendEmail([]string{smtpTestRecipient}, "SFTPGo - Testing Email Settings", "It appears your SFTPGo email is setup correctly!",
+			err = smtp.SendEmail([]string{smtpTestRecipient}, nil, "SFTPGo - Testing Email Settings", "It appears your SFTPGo email is setup correctly!",
 				smtp.EmailContentTypeTextPlain)
 			if err != nil {
 				logger.WarnToConsole("Error sending email: %v", err)

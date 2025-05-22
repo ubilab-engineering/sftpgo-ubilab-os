@@ -1,4 +1,4 @@
-// Copyright (C) 2019-2023 Nicola Murino
+// Copyright (C) 2019 Nicola Murino
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published
@@ -19,17 +19,18 @@ import (
 	"time"
 
 	"github.com/drakkan/sftpgo/v2/internal/dataprovider"
+	"github.com/drakkan/sftpgo/v2/internal/logger"
 )
 
 // HostEvent is the enumerable for the supported host events
-type HostEvent int
+type HostEvent string
 
 // Supported host events
 const (
-	HostEventLoginFailed HostEvent = iota
-	HostEventUserNotFound
-	HostEventNoLoginTried
-	HostEventLimitExceeded
+	HostEventLoginFailed   HostEvent = "LoginFailed"
+	HostEventUserNotFound  HostEvent = "UserNotFound"
+	HostEventNoLoginTried  HostEvent = "NoLoginTried"
+	HostEventLimitExceeded HostEvent = "LimitExceeded"
 )
 
 // Supported defender drivers
@@ -46,12 +47,13 @@ var (
 type Defender interface {
 	GetHosts() ([]dataprovider.DefenderEntry, error)
 	GetHost(ip string) (dataprovider.DefenderEntry, error)
-	AddEvent(ip, protocol string, event HostEvent)
+	AddEvent(ip, protocol string, event HostEvent) bool
 	IsBanned(ip, protocol string) bool
 	IsSafe(ip, protocol string) bool
 	GetBanTime(ip string) (*time.Time, error)
 	GetScore(ip string) (int, error)
 	DeleteHost(ip string) bool
+	DelayLogin(err error)
 }
 
 // DefenderConfig defines the "defender" configuration
@@ -89,6 +91,16 @@ type DefenderConfig struct {
 	// to return when you request for the entire host list from the defender
 	EntriesSoftLimit int `json:"entries_soft_limit" mapstructure:"entries_soft_limit"`
 	EntriesHardLimit int `json:"entries_hard_limit" mapstructure:"entries_hard_limit"`
+	// Configuration to impose a delay between login attempts
+	LoginDelay LoginDelay `json:"login_delay" mapstructure:"login_delay"`
+}
+
+// LoginDelay defines the delays to impose between login attempts.
+type LoginDelay struct {
+	// The number of milliseconds to pause prior to allowing a successful login
+	Success int `json:"success" mapstructure:"success"`
+	// The number of milliseconds to pause prior to reporting a failed login
+	PasswordFailed int `json:"password_failed" mapstructure:"password_failed"`
 }
 
 type baseDefender struct {
@@ -130,6 +142,49 @@ func (d *baseDefender) getScore(event HostEvent) int {
 		score = d.config.ScoreNoAuth
 	}
 	return score
+}
+
+// logEvent logs a defender event that changes a host's score
+func (d *baseDefender) logEvent(ip, protocol string, event HostEvent, totalScore int) {
+	// ignore events which do not change the host score
+	eventScore := d.getScore(event)
+	if eventScore == 0 {
+		return
+	}
+
+	logger.GetLogger().Debug().
+		Timestamp().
+		Str("sender", "defender").
+		Str("client_ip", ip).
+		Str("protocol", protocol).
+		Str("event", string(event)).
+		Int("increase_score_by", eventScore).
+		Int("score", totalScore).
+		Send()
+}
+
+// logBan logs a host's ban due to a too high host score
+func (d *baseDefender) logBan(ip, protocol string) {
+	logger.GetLogger().Info().
+		Timestamp().
+		Str("sender", "defender").
+		Str("client_ip", ip).
+		Str("protocol", protocol).
+		Str("event", "banned").
+		Send()
+}
+
+// DelayLogin applies the configured login delay.
+func (d *baseDefender) DelayLogin(err error) {
+	if err == nil {
+		if d.config.LoginDelay.Success > 0 {
+			time.Sleep(time.Duration(d.config.LoginDelay.Success) * time.Millisecond)
+		}
+		return
+	}
+	if d.config.LoginDelay.PasswordFailed > 0 {
+		time.Sleep(time.Duration(d.config.LoginDelay.PasswordFailed) * time.Millisecond)
+	}
 }
 
 type hostEvent struct {

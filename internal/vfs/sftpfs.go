@@ -1,4 +1,4 @@
-// Copyright (C) 2019-2023 Nicola Murino
+// Copyright (C) 2019 Nicola Murino
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published
@@ -17,9 +17,11 @@ package vfs
 import (
 	"bufio"
 	"bytes"
+	"crypto/rsa"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
-	"hash/fnv"
 	"io"
 	"io/fs"
 	"net"
@@ -27,13 +29,13 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	"github.com/eikenb/pipeat"
 	"github.com/pkg/sftp"
 	"github.com/robfig/cron/v3"
 	"github.com/rs/xid"
@@ -66,6 +68,17 @@ type SFTPFsConfig struct {
 	PrivateKey             *kms.Secret `json:"private_key,omitempty"`
 	KeyPassphrase          *kms.Secret `json:"key_passphrase,omitempty"`
 	forbiddenSelfUsernames []string    `json:"-"`
+}
+
+func (c *SFTPFsConfig) getKeySigner() (ssh.Signer, error) {
+	privPayload := c.PrivateKey.GetPayload()
+	if privPayload == "" {
+		return nil, nil
+	}
+	if key := c.KeyPassphrase.GetPayload(); key != "" {
+		return ssh.ParsePrivateKeyWithPassphrase([]byte(privPayload), []byte(key))
+	}
+	return ssh.ParsePrivateKey([]byte(privPayload))
 }
 
 // HideConfidentialData hides confidential data
@@ -113,7 +126,7 @@ func (c *SFTPFsConfig) isEqual(other SFTPFsConfig) bool {
 		return false
 	}
 	for _, fp := range c.Fingerprints {
-		if !util.Contains(other.Fingerprints, fp) {
+		if !slices.Contains(other.Fingerprints, fp) {
 			return false
 		}
 	}
@@ -153,17 +166,17 @@ func (c *SFTPFsConfig) isSameResource(other SFTPFsConfig) bool {
 func (c *SFTPFsConfig) validate() error {
 	c.setEmptyCredentialsIfNil()
 	if c.Endpoint == "" {
-		return errors.New("endpoint cannot be empty")
+		return util.NewI18nError(errors.New("endpoint cannot be empty"), util.I18nErrorEndpointRequired)
 	}
 	if !strings.Contains(c.Endpoint, ":") {
 		c.Endpoint += ":22"
 	}
 	_, _, err := net.SplitHostPort(c.Endpoint)
 	if err != nil {
-		return fmt.Errorf("invalid endpoint: %v", err)
+		return util.NewI18nError(fmt.Errorf("invalid endpoint: %v", err), util.I18nErrorEndpointInvalid)
 	}
 	if c.Username == "" {
-		return errors.New("username cannot be empty")
+		return util.NewI18nError(errors.New("username cannot be empty"), util.I18nErrorFsUsernameRequired)
 	}
 	if c.BufferSize < 0 || c.BufferSize > 16 {
 		return errors.New("invalid buffer_size, valid range is 0-16")
@@ -179,12 +192,35 @@ func (c *SFTPFsConfig) validate() error {
 	} else {
 		c.Prefix = "/"
 	}
+	return c.validatePrivateKey()
+}
+
+func (c *SFTPFsConfig) validatePrivateKey() error {
+	if c.PrivateKey.IsPlain() {
+		signer, err := c.getKeySigner()
+		if err != nil {
+			return util.NewI18nError(fmt.Errorf("invalid private key: %w", err), util.I18nErrorPrivKeyInvalid)
+		}
+		if signer != nil {
+			if key, ok := signer.PublicKey().(ssh.CryptoPublicKey); ok {
+				cryptoKey := key.CryptoPublicKey()
+				if rsaKey, ok := cryptoKey.(*rsa.PublicKey); ok {
+					if size := rsaKey.N.BitLen(); size < 2048 {
+						return util.NewI18nError(
+							fmt.Errorf("rsa key with size %d not accepted, minimum 2048", size),
+							util.I18nErrorKeySizeInvalid,
+						)
+					}
+				}
+			}
+		}
+	}
 	return nil
 }
 
 func (c *SFTPFsConfig) validateCredentials() error {
 	if c.Password.IsEmpty() && c.PrivateKey.IsEmpty() {
-		return errors.New("credentials cannot be empty")
+		return util.NewI18nError(errors.New("credentials cannot be empty"), util.I18nErrorFsCredentialsRequired)
 	}
 	if c.Password.IsEncrypted() && !c.Password.IsValid() {
 		return errors.New("invalid encrypted password")
@@ -210,32 +246,46 @@ func (c *SFTPFsConfig) validateCredentials() error {
 // ValidateAndEncryptCredentials validates the config and encrypts credentials if they are in plain text
 func (c *SFTPFsConfig) ValidateAndEncryptCredentials(additionalData string) error {
 	if err := c.validate(); err != nil {
-		return util.NewValidationError(fmt.Sprintf("could not validate SFTP fs config: %v", err))
+		var errI18n *util.I18nError
+		errValidation := util.NewValidationError(fmt.Sprintf("could not validate SFTP fs config: %v", err))
+		if errors.As(err, &errI18n) {
+			return util.NewI18nError(errValidation, errI18n.Message)
+		}
+		return util.NewI18nError(errValidation, util.I18nErrorFsValidation)
 	}
 	if c.Password.IsPlain() {
 		c.Password.SetAdditionalData(additionalData)
 		if err := c.Password.Encrypt(); err != nil {
-			return util.NewValidationError(fmt.Sprintf("could not encrypt SFTP fs password: %v", err))
+			return util.NewI18nError(
+				util.NewValidationError(fmt.Sprintf("could not encrypt SFTP fs password: %v", err)),
+				util.I18nErrorFsValidation,
+			)
 		}
 	}
 	if c.PrivateKey.IsPlain() {
 		c.PrivateKey.SetAdditionalData(additionalData)
 		if err := c.PrivateKey.Encrypt(); err != nil {
-			return util.NewValidationError(fmt.Sprintf("could not encrypt SFTP fs private key: %v", err))
+			return util.NewI18nError(
+				util.NewValidationError(fmt.Sprintf("could not encrypt SFTP fs private key: %v", err)),
+				util.I18nErrorFsValidation,
+			)
 		}
 	}
 	if c.KeyPassphrase.IsPlain() {
 		c.KeyPassphrase.SetAdditionalData(additionalData)
 		if err := c.KeyPassphrase.Encrypt(); err != nil {
-			return util.NewValidationError(fmt.Sprintf("could not encrypt SFTP fs private key passphrase: %v", err))
+			return util.NewI18nError(
+				util.NewValidationError(fmt.Sprintf("could not encrypt SFTP fs private key passphrase: %v", err)),
+				util.I18nErrorFsValidation,
+			)
 		}
 	}
 	return nil
 }
 
 // getUniqueID returns an hash of the settings used to connect to the SFTP server
-func (c *SFTPFsConfig) getUniqueID(partition int) uint64 {
-	h := fnv.New64a()
+func (c *SFTPFsConfig) getUniqueID(partition int) string {
+	h := sha256.New()
 	var b bytes.Buffer
 
 	b.WriteString(c.Endpoint)
@@ -252,7 +302,7 @@ func (c *SFTPFsConfig) getUniqueID(partition int) uint64 {
 	b.WriteString(strconv.Itoa(partition))
 
 	h.Write(b.Bytes())
-	return h.Sum64()
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 // SFTPFs is a Fs implementation for SFTP backends
@@ -268,11 +318,7 @@ type SFTPFs struct {
 // NewSFTPFs returns an SFTPFs object that allows to interact with an SFTP server
 func NewSFTPFs(connectionID, mountPath, localTempDir string, forbiddenSelfUsernames []string, config SFTPFsConfig) (Fs, error) {
 	if localTempDir == "" {
-		if tempPath != "" {
-			localTempDir = tempPath
-		} else {
-			localTempDir = filepath.Clean(os.TempDir())
-		}
+		localTempDir = getLocalTempDir()
 	}
 	if err := config.validate(); err != nil {
 		return nil, err
@@ -292,15 +338,19 @@ func NewSFTPFs(connectionID, mountPath, localTempDir string, forbiddenSelfUserna
 			return nil, err
 		}
 	}
+	conn, err := sftpConnsCache.Get(&config, connectionID)
+	if err != nil {
+		return nil, err
+	}
 	config.forbiddenSelfUsernames = forbiddenSelfUsernames
 	sftpFs := &SFTPFs{
 		connectionID: connectionID,
 		mountPath:    getMountPath(mountPath),
 		localTempDir: localTempDir,
 		config:       &config,
-		conn:         sftpConnsCache.Get(&config, connectionID),
+		conn:         conn,
 	}
-	err := sftpFs.createConnection()
+	err = sftpFs.createConnection()
 	if err != nil {
 		sftpFs.Close() //nolint:errcheck
 	}
@@ -336,7 +386,7 @@ func (fs *SFTPFs) Lstat(name string) (os.FileInfo, error) {
 }
 
 // Open opens the named file for reading
-func (fs *SFTPFs) Open(name string, offset int64) (File, *pipeat.PipeReaderAt, func(), error) {
+func (fs *SFTPFs) Open(name string, offset int64) (File, PipeReader, func(), error) {
 	client, err := fs.conn.getClient()
 	if err != nil {
 		return nil, nil, nil, err
@@ -355,11 +405,13 @@ func (fs *SFTPFs) Open(name string, offset int64) (File, *pipeat.PipeReaderAt, f
 	if fs.config.BufferSize == 0 {
 		return f, nil, nil, nil
 	}
-	r, w, err := pipeat.PipeInDir(fs.localTempDir)
+	r, w, err := createPipeFn(fs.localTempDir, 0)
 	if err != nil {
 		f.Close()
 		return nil, nil, nil, err
 	}
+	p := NewPipeReader(r)
+
 	go func() {
 		// if we enable buffering the client stalls
 		//br := bufio.NewReaderSize(f, int(fs.config.BufferSize)*1024*1024)
@@ -370,11 +422,11 @@ func (fs *SFTPFs) Open(name string, offset int64) (File, *pipeat.PipeReaderAt, f
 		fsLog(fs, logger.LevelDebug, "download completed, path: %q size: %v, err: %v", name, n, err)
 	}()
 
-	return nil, r, nil, nil
+	return nil, p, nil, nil
 }
 
 // Create creates or opens the named file for writing
-func (fs *SFTPFs) Create(name string, flag int) (File, *PipeWriter, func(), error) {
+func (fs *SFTPFs) Create(name string, flag, _ int) (File, PipeWriter, func(), error) {
 	client, err := fs.conn.getClient()
 	if err != nil {
 		return nil, nil, nil, err
@@ -393,7 +445,7 @@ func (fs *SFTPFs) Create(name string, flag int) (File, *PipeWriter, func(), erro
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	r, w, err := pipeat.PipeInDir(fs.localTempDir)
+	r, w, err := createPipeFn(fs.localTempDir, 0)
 	if err != nil {
 		f.Close()
 		return nil, nil, nil, err
@@ -404,7 +456,7 @@ func (fs *SFTPFs) Create(name string, flag int) (File, *PipeWriter, func(), erro
 		bw := bufio.NewWriterSize(f, int(fs.config.BufferSize)*1024*1024)
 		// we don't use io.Copy since bufio.Writer implements io.WriterTo and
 		// so it calls the sftp.File WriteTo method without buffering
-		n, err := fs.copy(bw, r)
+		n, err := doCopy(bw, r, nil)
 		errFlush := bw.Flush()
 		if err == nil && errFlush != nil {
 			err = errFlush
@@ -427,7 +479,7 @@ func (fs *SFTPFs) Create(name string, flag int) (File, *PipeWriter, func(), erro
 }
 
 // Rename renames (moves) source to target.
-func (fs *SFTPFs) Rename(source, target string) (int, int64, error) {
+func (fs *SFTPFs) Rename(source, target string, checks int) (int, int64, error) {
 	if source == target {
 		return -1, -1, nil
 	}
@@ -437,9 +489,15 @@ func (fs *SFTPFs) Rename(source, target string) (int, int64, error) {
 	}
 	if _, ok := client.HasExtension("posix-rename@openssh.com"); ok {
 		err := client.PosixRename(source, target)
+		if checks&CheckUpdateModTime != 0 && err == nil {
+			fs.Chtimes(target, time.Now(), time.Now(), false) //nolint:errcheck
+		}
 		return -1, -1, err
 	}
 	err = client.Rename(source, target)
+	if checks&CheckUpdateModTime != 0 && err == nil {
+		fs.Chtimes(target, time.Now(), time.Now(), false) //nolint:errcheck
+	}
 	return -1, -1, err
 }
 
@@ -529,17 +587,27 @@ func (fs *SFTPFs) Truncate(name string, size int64) error {
 
 // ReadDir reads the directory named by dirname and returns
 // a list of directory entries.
-func (fs *SFTPFs) ReadDir(dirname string) ([]os.FileInfo, error) {
+func (fs *SFTPFs) ReadDir(dirname string) (DirLister, error) {
 	client, err := fs.conn.getClient()
 	if err != nil {
 		return nil, err
 	}
-	return client.ReadDir(dirname)
+	files, err := client.ReadDir(dirname)
+	if err != nil {
+		return nil, err
+	}
+	return &baseDirLister{files}, nil
 }
 
 // IsUploadResumeSupported returns true if resuming uploads is supported.
 func (fs *SFTPFs) IsUploadResumeSupported() bool {
 	return fs.config.BufferSize == 0
+}
+
+// IsConditionalUploadResumeSupported returns if resuming uploads is supported
+// for the specified size
+func (fs *SFTPFs) IsConditionalUploadResumeSupported(_ int64) bool {
+	return fs.IsUploadResumeSupported()
 }
 
 // IsAtomicUploadSupported returns true if atomic upload is supported.
@@ -573,7 +641,7 @@ func (*SFTPFs) IsNotSupported(err error) bool {
 // CheckRootPath creates the specified local root directory if it does not exists
 func (fs *SFTPFs) CheckRootPath(username string, uid int, gid int) bool {
 	// local directory for temporary files in buffer mode
-	osFs := NewOsFs(fs.ConnectionID(), fs.localTempDir, "")
+	osFs := NewOsFs(fs.ConnectionID(), fs.localTempDir, "", nil)
 	osFs.CheckRootPath(username, uid, gid)
 	if fs.config.Prefix == "/" {
 		return true
@@ -841,38 +909,6 @@ func (fs *SFTPFs) Close() error {
 	return nil
 }
 
-func (fs *SFTPFs) copy(dst io.Writer, src io.Reader) (written int64, err error) {
-	buf := make([]byte, 32768)
-	for {
-		nr, er := src.Read(buf)
-		if nr > 0 {
-			nw, ew := dst.Write(buf[0:nr])
-			if nw < 0 || nr < nw {
-				nw = 0
-				if ew == nil {
-					ew = errors.New("invalid write")
-				}
-			}
-			written += int64(nw)
-			if ew != nil {
-				err = ew
-				break
-			}
-			if nr != nw {
-				err = io.ErrShortWrite
-				break
-			}
-		}
-		if er != nil {
-			if er != io.EOF {
-				err = er
-			}
-			break
-		}
-	}
-	return written, err
-}
-
 func (fs *SFTPFs) createConnection() error {
 	err := fs.conn.OpenConnection()
 	if err != nil {
@@ -891,6 +927,7 @@ type sftpConnection struct {
 	isConnected  bool
 	sessions     map[string]bool
 	lastActivity time.Time
+	signer       ssh.Signer
 }
 
 func newSFTPConnection(config *SFTPFsConfig, sessionID string) *sftpConnection {
@@ -900,6 +937,7 @@ func newSFTPConnection(config *SFTPFsConfig, sessionID string) *sftpConnection {
 		isConnected:  false,
 		sessions:     map[string]bool{},
 		lastActivity: time.Now().UTC(),
+		signer:       nil,
 	}
 	c.sessions[sessionID] = true
 	return c
@@ -923,12 +961,12 @@ func (c *sftpConnection) openConnNoLock() error {
 		User: c.config.Username,
 		HostKeyCallback: func(_ string, _ net.Addr, key ssh.PublicKey) error {
 			fp := ssh.FingerprintSHA256(key)
-			if util.Contains(sftpFingerprints, fp) {
+			if slices.Contains(sftpFingerprints, fp) {
 				if allowSelfConnections == 0 {
 					logger.Log(logger.LevelError, c.logSender, "", "SFTP self connections not allowed")
 					return ErrSFTPLoop
 				}
-				if util.Contains(c.config.forbiddenSelfUsernames, c.config.Username) {
+				if slices.Contains(c.config.forbiddenSelfUsernames, c.config.Username) {
 					logger.Log(logger.LevelError, c.logSender, "",
 						"SFTP loop or nested local SFTP folders detected, username %q, forbidden usernames: %+v",
 						c.config.Username, c.config.forbiddenSelfUsernames)
@@ -946,37 +984,22 @@ func (c *sftpConnection) openConnNoLock() error {
 			logger.Log(logger.LevelWarn, c.logSender, "", "login without host key validation, please provide at least a fingerprint!")
 			return nil
 		},
-		Timeout:       10 * time.Second,
-		ClientVersion: fmt.Sprintf("SSH-2.0-SFTPGo_%v", version.Get().Version),
+		Timeout:       15 * time.Second,
+		ClientVersion: fmt.Sprintf("SSH-2.0-%s", version.GetServerVersion("_", false)),
 	}
-	if c.config.PrivateKey.GetPayload() != "" {
-		var signer ssh.Signer
-		var err error
-		if c.config.KeyPassphrase.GetPayload() != "" {
-			signer, err = ssh.ParsePrivateKeyWithPassphrase([]byte(c.config.PrivateKey.GetPayload()),
-				[]byte(c.config.KeyPassphrase.GetPayload()))
-		} else {
-			signer, err = ssh.ParsePrivateKey([]byte(c.config.PrivateKey.GetPayload()))
-		}
-		if err != nil {
-			return fmt.Errorf("sftpfs: unable to parse the private key: %w", err)
-		}
-		clientConfig.Auth = append(clientConfig.Auth, ssh.PublicKeys(signer))
+	if c.signer != nil {
+		clientConfig.Auth = append(clientConfig.Auth, ssh.PublicKeys(c.signer))
 	}
-	if c.config.Password.GetPayload() != "" {
-		clientConfig.Auth = append(clientConfig.Auth, ssh.Password(c.config.Password.GetPayload()))
+	if pwd := c.config.Password.GetPayload(); pwd != "" {
+		clientConfig.Auth = append(clientConfig.Auth, ssh.Password(pwd))
 	}
-	// add more ciphers, KEXs and MACs, they are negotiated according to the order
-	clientConfig.Ciphers = []string{"aes128-gcm@openssh.com", "aes256-gcm@openssh.com", "chacha20-poly1305@openssh.com",
-		"aes128-ctr", "aes192-ctr", "aes256-ctr", "aes128-cbc", "aes192-cbc", "aes256-cbc"}
-	clientConfig.KeyExchanges = []string{"curve25519-sha256", "curve25519-sha256@libssh.org",
-		"ecdh-sha2-nistp256", "ecdh-sha2-nistp384", "ecdh-sha2-nistp521",
-		"diffie-hellman-group14-sha256", "diffie-hellman-group16-sha512", "diffie-hellman-group18-sha512",
-		"diffie-hellman-group-exchange-sha256", "diffie-hellman-group-exchange-sha1",
-		"diffie-hellman-group14-sha1", "diffie-hellman-group1-sha1"}
-	clientConfig.MACs = []string{"hmac-sha2-256-etm@openssh.com", "hmac-sha2-256",
-		"hmac-sha2-512-etm@openssh.com", "hmac-sha2-512",
-		"hmac-sha1", "hmac-sha1-96"}
+	supportedAlgos := ssh.SupportedAlgorithms()
+	insecureAlgos := ssh.InsecureAlgorithms()
+	// add all available ciphers, KEXs and MACs, they are negotiated according to the order
+	clientConfig.Ciphers = append(supportedAlgos.Ciphers, ssh.InsecureCipherAES128CBC,
+		ssh.InsecureCipherAES192CBC, ssh.InsecureCipherAES256CBC)
+	clientConfig.KeyExchanges = append(supportedAlgos.KeyExchanges, insecureAlgos.KeyExchanges...)
+	clientConfig.MACs = append(supportedAlgos.MACs, insecureAlgos.MACs...)
 	sshClient, err := ssh.Dial("tcp", c.config.Endpoint, clientConfig)
 	if err != nil {
 		return fmt.Errorf("sftpfs: unable to connect: %w", err)
@@ -1123,13 +1146,13 @@ func (c *sftpConnection) GetLastActivity() time.Time {
 type sftpConnectionsCache struct {
 	scheduler *cron.Cron
 	sync.RWMutex
-	items map[uint64]*sftpConnection
+	items map[string]*sftpConnection
 }
 
 func newSFTPConnectionCache() *sftpConnectionsCache {
 	c := &sftpConnectionsCache{
 		scheduler: cron.New(cron.WithLocation(time.UTC), cron.WithLogger(cron.DiscardLogger)),
-		items:     make(map[uint64]*sftpConnection),
+		items:     make(map[string]*sftpConnection),
 	}
 	_, err := c.scheduler.AddFunc("@every 1m", c.Cleanup)
 	util.PanicOnError(err)
@@ -1137,48 +1160,51 @@ func newSFTPConnectionCache() *sftpConnectionsCache {
 	return c
 }
 
-func (c *sftpConnectionsCache) Get(config *SFTPFsConfig, sessionID string) *sftpConnection {
+func (c *sftpConnectionsCache) Get(config *SFTPFsConfig, sessionID string) (*sftpConnection, error) {
 	partition := 0
 	key := config.getUniqueID(partition)
 
 	c.Lock()
 	defer c.Unlock()
 
-	var oldKey uint64
 	for {
 		if val, ok := c.items[key]; ok {
 			activeSessions := val.ActiveSessions()
-			if activeSessions < maxSessionsPerConnection || key == oldKey {
+			if activeSessions < maxSessionsPerConnection {
 				logger.Debug(logSenderSFTPCache, "",
-					"reusing connection for session ID %q, key: %d, active sessions %d, active connections: %d",
+					"reusing connection for session ID %q, key %s, active sessions %d, active connections: %d",
 					sessionID, key, activeSessions+1, len(c.items))
 				val.AddSession(sessionID)
-				return val
+				return val, nil
 			}
 			partition++
-			oldKey = key
 			key = config.getUniqueID(partition)
 			logger.Debug(logSenderSFTPCache, "",
-				"connection full, generated new key for partition: %d, active sessions: %d, key: %d, old key: %d",
-				partition, activeSessions, oldKey, key)
+				"connection full, generated new key for partition: %d, active sessions: %d, key: %s",
+				partition, activeSessions, key)
 		} else {
 			conn := newSFTPConnection(config, sessionID)
+			signer, err := config.getKeySigner()
+			if err != nil {
+				return nil, fmt.Errorf("sftpfs: unable to parse the private key: %w", err)
+			}
+			conn.signer = signer
 			c.items[key] = conn
 			logger.Debug(logSenderSFTPCache, "",
-				"adding new connection for session ID %q, partition: %d, key: %d, active connections: %d",
+				"adding new connection for session ID %q, partition: %d, key: %s, active connections: %d",
 				sessionID, partition, key, len(c.items))
-			return conn
+			return conn, nil
 		}
 	}
 }
 
-func (c *sftpConnectionsCache) Remove(key uint64) {
+func (c *sftpConnectionsCache) Remove(key string) {
 	c.Lock()
 	defer c.Unlock()
 
 	if conn, ok := c.items[key]; ok {
 		delete(c.items, key)
-		logger.Debug(logSenderSFTPCache, "", "removed connection with key %d, active connections: %d", key, len(c.items))
+		logger.Debug(logSenderSFTPCache, "", "removed connection with key %s, active connections: %d", key, len(c.items))
 
 		defer conn.Close()
 	}
@@ -1191,7 +1217,7 @@ func (c *sftpConnectionsCache) Cleanup() {
 		if val := conn.GetLastActivity(); val.Before(time.Now().Add(-30 * time.Second)) {
 			logger.Debug(conn.logSender, "", "removing inactive connection, last activity %s", val)
 
-			defer func(key uint64) {
+			defer func(key string) {
 				c.Remove(key)
 			}(k)
 		}

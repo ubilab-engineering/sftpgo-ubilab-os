@@ -1,4 +1,4 @@
-// Copyright (C) 2019-2023 Nicola Murino
+// Copyright (C) 2019 Nicola Murino
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published
@@ -13,7 +13,6 @@
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 //go:build !nopgsql
-// +build !nopgsql
 
 package dataprovider
 
@@ -24,14 +23,17 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/stdlib"
 
 	"github.com/drakkan/sftpgo/v2/internal/logger"
+	"github.com/drakkan/sftpgo/v2/internal/util"
 	"github.com/drakkan/sftpgo/v2/internal/version"
 	"github.com/drakkan/sftpgo/v2/internal/vfs"
 )
@@ -62,30 +64,30 @@ DROP TABLE IF EXISTS "{{ip_lists}}" CASCADE;
 DROP TABLE IF EXISTS "{{configs}}" CASCADE;
 DROP TABLE IF EXISTS "{{schema_version}}" CASCADE;
 `
-	pgsqlInitial = `CREATE TABLE "{{schema_version}}" ("id" serial NOT NULL PRIMARY KEY, "version" integer NOT NULL);
-CREATE TABLE "{{admins}}" ("id" serial NOT NULL PRIMARY KEY, "username" varchar(255) NOT NULL UNIQUE,
+	pgsqlInitial = `CREATE TABLE "{{schema_version}}" ("id" integer NOT NULL PRIMARY KEY GENERATED ALWAYS AS IDENTITY, "version" integer NOT NULL);
+CREATE TABLE "{{admins}}" ("id" integer NOT NULL PRIMARY KEY GENERATED ALWAYS AS IDENTITY, "username" varchar(255) NOT NULL UNIQUE,
 "description" varchar(512) NULL, "password" varchar(255) NOT NULL, "email" varchar(255) NULL, "status" integer NOT NULL,
 "permissions" text NOT NULL, "filters" text NULL, "additional_info" text NULL, "last_login" bigint NOT NULL,
-"created_at" bigint NOT NULL, "updated_at" bigint NOT NULL);
-CREATE TABLE "{{active_transfers}}" ("id" bigserial NOT NULL PRIMARY KEY, "connection_id" varchar(100) NOT NULL,
+"role_id" integer NULL, "created_at" bigint NOT NULL, "updated_at" bigint NOT NULL);
+CREATE TABLE "{{active_transfers}}" ("id" bigint NOT NULL PRIMARY KEY GENERATED ALWAYS AS IDENTITY, "connection_id" varchar(100) NOT NULL,
 "transfer_id" bigint NOT NULL, "transfer_type" integer NOT NULL, "username" varchar(255) NOT NULL,
 "folder_name" varchar(255) NULL, "ip" varchar(50) NOT NULL, "truncated_size" bigint NOT NULL,
 "current_ul_size" bigint NOT NULL, "current_dl_size" bigint NOT NULL, "created_at" bigint NOT NULL,
 "updated_at" bigint NOT NULL);
-CREATE TABLE "{{defender_hosts}}" ("id" bigserial NOT NULL PRIMARY KEY, "ip" varchar(50) NOT NULL UNIQUE,
+CREATE TABLE "{{defender_hosts}}" ("id" bigint NOT NULL PRIMARY KEY GENERATED ALWAYS AS IDENTITY, "ip" varchar(50) NOT NULL UNIQUE,
 "ban_time" bigint NOT NULL, "updated_at" bigint NOT NULL);
-CREATE TABLE "{{defender_events}}" ("id" bigserial NOT NULL PRIMARY KEY, "date_time" bigint NOT NULL, "score" integer NOT NULL,
+CREATE TABLE "{{defender_events}}" ("id" bigint NOT NULL PRIMARY KEY GENERATED ALWAYS AS IDENTITY, "date_time" bigint NOT NULL, "score" integer NOT NULL,
 "host_id" bigint NOT NULL);
 ALTER TABLE "{{defender_events}}" ADD CONSTRAINT "{{prefix}}defender_events_host_id_fk_defender_hosts_id" FOREIGN KEY
 ("host_id") REFERENCES "{{defender_hosts}}" ("id") MATCH SIMPLE ON UPDATE NO ACTION ON DELETE CASCADE;
-CREATE TABLE "{{folders}}" ("id" serial NOT NULL PRIMARY KEY, "name" varchar(255) NOT NULL UNIQUE, "description" varchar(512) NULL,
+CREATE TABLE "{{folders}}" ("id" integer NOT NULL PRIMARY KEY GENERATED ALWAYS AS IDENTITY, "name" varchar(255) NOT NULL UNIQUE, "description" varchar(512) NULL,
 "path" text NULL, "used_quota_size" bigint NOT NULL, "used_quota_files" integer NOT NULL, "last_quota_update" bigint NOT NULL,
 "filesystem" text NULL);
-CREATE TABLE "{{groups}}" ("id" serial NOT NULL PRIMARY KEY, "name" varchar(255) NOT NULL UNIQUE,
+CREATE TABLE "{{groups}}" ("id" integer NOT NULL PRIMARY KEY GENERATED ALWAYS AS IDENTITY, "name" varchar(255) NOT NULL UNIQUE,
 "description" varchar(512) NULL, "created_at" bigint NOT NULL, "updated_at" bigint NOT NULL, "user_settings" text NULL);
 CREATE TABLE "{{shared_sessions}}" ("key" varchar(128) NOT NULL PRIMARY KEY,
 "data" text NOT NULL, "type" integer NOT NULL, "timestamp" bigint NOT NULL);
-CREATE TABLE "{{users}}" ("id" serial NOT NULL PRIMARY KEY, "username" varchar(255) NOT NULL UNIQUE, "status" integer NOT NULL,
+CREATE TABLE "{{users}}" ("id" integer NOT NULL PRIMARY KEY GENERATED ALWAYS AS IDENTITY, "username" varchar(255) NOT NULL UNIQUE, "status" integer NOT NULL,
 "expiration_date" bigint NOT NULL, "description" varchar(512) NULL, "password" text NULL, "public_keys" text NULL,
 "home_dir" text NOT NULL, "uid" bigint NOT NULL, "gid" bigint NOT NULL, "max_sessions" integer NOT NULL,
 "quota_size" bigint NOT NULL, "quota_files" integer NOT NULL, "permissions" text NOT NULL, "used_quota_size" bigint NOT NULL,
@@ -93,20 +95,20 @@ CREATE TABLE "{{users}}" ("id" serial NOT NULL PRIMARY KEY, "username" varchar(2
 "download_bandwidth" integer NOT NULL, "last_login" bigint NOT NULL, "filters" text NULL, "filesystem" text NULL,
 "additional_info" text NULL, "created_at" bigint NOT NULL, "updated_at" bigint NOT NULL, "email" varchar(255) NULL,
 "upload_data_transfer" integer NOT NULL, "download_data_transfer" integer NOT NULL, "total_data_transfer" integer NOT NULL,
-"used_upload_data_transfer" integer NOT NULL, "used_download_data_transfer" integer NOT NULL, "deleted_at" bigint NOT NULL,
-"first_download" bigint NOT NULL, "first_upload" bigint NOT NULL);
-CREATE TABLE "{{groups_folders_mapping}}" ("id" serial NOT NULL PRIMARY KEY, "group_id" integer NOT NULL,
+"used_upload_data_transfer" bigint NOT NULL, "used_download_data_transfer" bigint NOT NULL, "deleted_at" bigint NOT NULL,
+"first_download" bigint NOT NULL, "first_upload" bigint NOT NULL, "last_password_change" bigint NOT NULL, "role_id" integer NULL);
+CREATE TABLE "{{groups_folders_mapping}}" ("id" integer NOT NULL PRIMARY KEY GENERATED ALWAYS AS IDENTITY, "group_id" integer NOT NULL,
 "folder_id" integer NOT NULL, "virtual_path" text NOT NULL, "quota_size" bigint NOT NULL, "quota_files" integer NOT NULL);
-CREATE TABLE "{{users_groups_mapping}}" ("id" serial NOT NULL PRIMARY KEY, "user_id" integer NOT NULL,
+CREATE TABLE "{{users_groups_mapping}}" ("id" integer NOT NULL PRIMARY KEY GENERATED ALWAYS AS IDENTITY, "user_id" integer NOT NULL,
 "group_id" integer NOT NULL, "group_type" integer NOT NULL);
-CREATE TABLE "{{users_folders_mapping}}" ("id" serial NOT NULL PRIMARY KEY, "virtual_path" text NOT NULL,
+CREATE TABLE "{{users_folders_mapping}}" ("id" integer NOT NULL PRIMARY KEY GENERATED ALWAYS AS IDENTITY, "virtual_path" text NOT NULL,
 "quota_size" bigint NOT NULL, "quota_files" integer NOT NULL, "folder_id" integer NOT NULL, "user_id" integer NOT NULL);
 ALTER TABLE "{{users_folders_mapping}}" ADD CONSTRAINT "{{prefix}}unique_user_folder_mapping" UNIQUE ("user_id", "folder_id");
 ALTER TABLE "{{users_folders_mapping}}" ADD CONSTRAINT "{{prefix}}users_folders_mapping_folder_id_fk_folders_id"
 FOREIGN KEY ("folder_id") REFERENCES "{{folders}}" ("id") MATCH SIMPLE ON UPDATE NO ACTION ON DELETE CASCADE;
 ALTER TABLE "{{users_folders_mapping}}" ADD CONSTRAINT "{{prefix}}users_folders_mapping_user_id_fk_users_id"
 FOREIGN KEY ("user_id") REFERENCES "{{users}}" ("id") MATCH SIMPLE ON UPDATE NO ACTION ON DELETE CASCADE;
-CREATE TABLE "{{shares}}" ("id" serial NOT NULL PRIMARY KEY,
+CREATE TABLE "{{shares}}" ("id" integer NOT NULL PRIMARY KEY GENERATED ALWAYS AS IDENTITY,
 "share_id" varchar(60) NOT NULL UNIQUE, "name" varchar(255) NOT NULL, "description" varchar(512) NULL,
 "scope" integer NOT NULL, "paths" text NOT NULL, "created_at" bigint NOT NULL, "updated_at" bigint NOT NULL,
 "last_use_at" bigint NOT NULL, "expires_at" bigint NOT NULL, "password" text NULL,
@@ -114,7 +116,7 @@ CREATE TABLE "{{shares}}" ("id" serial NOT NULL PRIMARY KEY,
 "user_id" integer NOT NULL);
 ALTER TABLE "{{shares}}" ADD CONSTRAINT "{{prefix}}shares_user_id_fk_users_id" FOREIGN KEY ("user_id")
 REFERENCES "{{users}}" ("id") MATCH SIMPLE ON UPDATE NO ACTION ON DELETE CASCADE;
-CREATE TABLE "{{api_keys}}" ("id" serial NOT NULL PRIMARY KEY, "name" varchar(255) NOT NULL,
+CREATE TABLE "{{api_keys}}" ("id" integer NOT NULL PRIMARY KEY GENERATED ALWAYS AS IDENTITY, "name" varchar(255) NOT NULL,
 "key_id" varchar(50) NOT NULL UNIQUE, "api_key" varchar(255) NOT NULL UNIQUE, "scope" integer NOT NULL,
 "created_at" bigint NOT NULL, "updated_at" bigint NOT NULL, "last_use_at" bigint NOT NULL,"expires_at" bigint NOT NULL,
 "description" text NULL, "admin_id" integer NULL, "user_id" integer NULL);
@@ -136,29 +138,42 @@ FOREIGN KEY ("folder_id") REFERENCES "{{folders}}" ("id") MATCH SIMPLE ON UPDATE
 CREATE INDEX "{{prefix}}groups_folders_mapping_group_id_idx" ON "{{groups_folders_mapping}}" ("group_id");
 ALTER TABLE "{{groups_folders_mapping}}" ADD CONSTRAINT "{{prefix}}groups_folders_mapping_group_id_fk_groups_id"
 FOREIGN KEY ("group_id") REFERENCES "{{groups}}" ("id") MATCH SIMPLE ON UPDATE NO ACTION ON DELETE CASCADE;
-CREATE TABLE "{{events_rules}}" ("id" serial NOT NULL PRIMARY KEY, "name" varchar(255) NOT NULL UNIQUE,
-"description" varchar(512) NULL, "created_at" bigint NOT NULL, "updated_at" bigint NOT NULL, "trigger" integer NOT NULL,
-"conditions" text NOT NULL, "deleted_at" bigint NOT NULL);
-CREATE TABLE "{{events_actions}}" ("id" serial NOT NULL PRIMARY KEY, "name" varchar(255) NOT NULL UNIQUE,
+CREATE TABLE "{{events_rules}}" ("id" integer NOT NULL PRIMARY KEY GENERATED ALWAYS AS IDENTITY, "name" varchar(255) NOT NULL UNIQUE,
+"status" integer NOT NULL, "description" varchar(512) NULL, "created_at" bigint NOT NULL, "updated_at" bigint NOT NULL,
+"trigger" integer NOT NULL, "conditions" text NOT NULL, "deleted_at" bigint NOT NULL);
+CREATE TABLE "{{events_actions}}" ("id" integer NOT NULL PRIMARY KEY GENERATED ALWAYS AS IDENTITY, "name" varchar(255) NOT NULL UNIQUE,
 "description" varchar(512) NULL, "type" integer NOT NULL, "options" text NOT NULL);
-CREATE TABLE "{{rules_actions_mapping}}" ("id" serial NOT NULL PRIMARY KEY, "rule_id" integer NOT NULL,
+CREATE TABLE "{{rules_actions_mapping}}" ("id" integer NOT NULL PRIMARY KEY GENERATED ALWAYS AS IDENTITY, "rule_id" integer NOT NULL,
 "action_id" integer NOT NULL, "order" integer NOT NULL, "options" text NOT NULL);
-CREATE TABLE "{{tasks}}" ("id" serial NOT NULL PRIMARY KEY, "name" varchar(255) NOT NULL UNIQUE, "updated_at" bigint NOT NULL,
+CREATE TABLE "{{tasks}}" ("id" integer NOT NULL PRIMARY KEY GENERATED ALWAYS AS IDENTITY, "name" varchar(255) NOT NULL UNIQUE, "updated_at" bigint NOT NULL,
 "version" bigint NOT NULL);
 ALTER TABLE "{{rules_actions_mapping}}" ADD CONSTRAINT "{{prefix}}unique_rule_action_mapping" UNIQUE ("rule_id", "action_id");
 ALTER TABLE "{{rules_actions_mapping}}" ADD CONSTRAINT "{{prefix}}rules_actions_mapping_rule_id_fk_events_rules_id"
 FOREIGN KEY ("rule_id") REFERENCES "{{events_rules}}" ("id") MATCH SIMPLE ON UPDATE NO ACTION ON DELETE CASCADE;
 ALTER TABLE "{{rules_actions_mapping}}" ADD CONSTRAINT "{{prefix}}rules_actions_mapping_action_id_fk_events_targets_id"
 FOREIGN KEY ("action_id") REFERENCES "{{events_actions}}" ("id") MATCH SIMPLE ON UPDATE NO ACTION ON DELETE NO ACTION;
-CREATE TABLE "{{admins_groups_mapping}}" ("id" serial NOT NULL PRIMARY KEY,
+CREATE TABLE "{{admins_groups_mapping}}" ("id" integer NOT NULL PRIMARY KEY GENERATED ALWAYS AS IDENTITY,
 "admin_id" integer NOT NULL, "group_id" integer NOT NULL, "options" text NOT NULL);
 ALTER TABLE "{{admins_groups_mapping}}" ADD CONSTRAINT "{{prefix}}unique_admin_group_mapping" UNIQUE ("admin_id", "group_id");
 ALTER TABLE "{{admins_groups_mapping}}" ADD CONSTRAINT "{{prefix}}admins_groups_mapping_admin_id_fk_admins_id"
 FOREIGN KEY ("admin_id") REFERENCES "{{admins}}" ("id") MATCH SIMPLE ON UPDATE NO ACTION ON DELETE CASCADE;
 ALTER TABLE "{{admins_groups_mapping}}" ADD CONSTRAINT "{{prefix}}admins_groups_mapping_group_id_fk_groups_id"
 FOREIGN KEY ("group_id") REFERENCES "{{groups}}" ("id") MATCH SIMPLE ON UPDATE NO ACTION ON DELETE CASCADE;
-CREATE TABLE "{{nodes}}" ("id" serial NOT NULL PRIMARY KEY, "name" varchar(255) NOT NULL UNIQUE,
+CREATE TABLE "{{nodes}}" ("id" integer NOT NULL PRIMARY KEY GENERATED ALWAYS AS IDENTITY, "name" varchar(255) NOT NULL UNIQUE,
 "data" text NOT NULL, "created_at" bigint NOT NULL, "updated_at" bigint NOT NULL);
+CREATE TABLE "{{roles}}" ("id" integer NOT NULL PRIMARY KEY GENERATED ALWAYS AS IDENTITY, "name" varchar(255) NOT NULL UNIQUE,
+"description" varchar(512) NULL, "created_at" bigint NOT NULL, "updated_at" bigint NOT NULL);
+ALTER TABLE "{{admins}}" ADD CONSTRAINT "{{prefix}}admins_role_id_fk_roles_id" FOREIGN KEY ("role_id")
+REFERENCES "{{roles}}" ("id") ON DELETE NO ACTION;
+ALTER TABLE "{{users}}" ADD CONSTRAINT "{{prefix}}users_role_id_fk_roles_id" FOREIGN KEY ("role_id")
+REFERENCES "{{roles}}" ("id") ON DELETE SET NULL;
+CREATE TABLE "{{ip_lists}}" ("id" bigint NOT NULL PRIMARY KEY GENERATED ALWAYS AS IDENTITY, "type" integer NOT NULL,
+"ipornet" varchar(50) NOT NULL, "mode" integer NOT NULL, "description" varchar(512) NULL, "first" inet NOT NULL,
+"last" inet NOT NULL, "ip_type" integer NOT NULL, "protocols" integer NOT NULL,  "created_at" bigint NOT NULL,
+"updated_at" bigint NOT NULL, "deleted_at" bigint NOT NULL);
+ALTER TABLE "{{ip_lists}}" ADD CONSTRAINT "{{prefix}}unique_ipornet_type_mapping" UNIQUE ("type", "ipornet");
+CREATE TABLE "{{configs}}" ("id" integer NOT NULL PRIMARY KEY GENERATED ALWAYS AS IDENTITY, "configs" text NOT NULL);
+INSERT INTO {{configs}} (configs) VALUES ('{}');
 CREATE INDEX "{{prefix}}users_folders_mapping_folder_id_idx" ON "{{users_folders_mapping}}" ("folder_id");
 CREATE INDEX "{{prefix}}users_folders_mapping_user_id_idx" ON "{{users_folders_mapping}}" ("user_id");
 CREATE INDEX "{{prefix}}api_keys_admin_id_idx" ON "{{api_keys}}" ("admin_id");
@@ -183,46 +198,34 @@ CREATE INDEX "{{prefix}}rules_actions_mapping_action_id_idx" ON "{{rules_actions
 CREATE INDEX "{{prefix}}rules_actions_mapping_order_idx" ON "{{rules_actions_mapping}}" ("order");
 CREATE INDEX "{{prefix}}admins_groups_mapping_admin_id_idx" ON "{{admins_groups_mapping}}" ("admin_id");
 CREATE INDEX "{{prefix}}admins_groups_mapping_group_id_idx" ON "{{admins_groups_mapping}}" ("group_id");
-INSERT INTO {{schema_version}} (version) VALUES (23);
-`
-	pgsqlV24SQL = `CREATE TABLE "{{roles}}" ("id" serial NOT NULL PRIMARY KEY, "name" varchar(255) NOT NULL UNIQUE,
-"description" varchar(512) NULL, "created_at" bigint NOT NULL, "updated_at" bigint NOT NULL);
-ALTER TABLE "{{admins}}" ADD COLUMN "role_id" integer NULL CONSTRAINT "{{prefix}}admins_role_id_fk_roles_id"
-REFERENCES "{{roles}}"("id") ON DELETE NO ACTION;
-ALTER TABLE "{{users}}" ADD COLUMN "role_id" integer NULL CONSTRAINT "{{prefix}}users_role_id_fk_roles_id"
-REFERENCES "{{roles}}"("id") ON DELETE SET NULL;
 CREATE INDEX "{{prefix}}admins_role_id_idx" ON "{{admins}}" ("role_id");
 CREATE INDEX "{{prefix}}users_role_id_idx" ON "{{users}}" ("role_id");
-`
-	pgsqlV24DownSQL = `ALTER TABLE "{{users}}" DROP COLUMN "role_id" CASCADE;
-ALTER TABLE "{{admins}}" DROP COLUMN "role_id" CASCADE;
-DROP TABLE "{{roles}}" CASCADE;
-`
-	pgsqlV25SQL = `ALTER TABLE "{{users}}" ADD COLUMN "last_password_change" bigint DEFAULT 0 NOT NULL;
-ALTER TABLE "{{users}}" ALTER COLUMN "last_password_change" DROP DEFAULT;
-`
-	pgsqlV25DownSQL = `ALTER TABLE "{{users}}" DROP COLUMN "last_password_change" CASCADE;`
-	pgsqlV26SQL     = `ALTER TABLE "{{events_rules}}" ADD COLUMN "status" integer DEFAULT 1 NOT NULL;
-ALTER TABLE "{{events_rules}}" ALTER COLUMN "status" DROP DEFAULT;
-`
-	pgsqlV26DownSQL = `ALTER TABLE "{{events_rules}}" DROP COLUMN "status" CASCADE;`
-	pgsqlV27SQL     = `CREATE TABLE "{{ip_lists}}" ("id" bigserial NOT NULL PRIMARY KEY, "type" integer NOT NULL,
-"ipornet" varchar(50) NOT NULL, "mode" integer NOT NULL, "description" varchar(512) NULL, "first" inet NOT NULL,
-"last" inet NOT NULL, "ip_type" integer NOT NULL, "protocols" integer NOT NULL,  "created_at" bigint NOT NULL,
-"updated_at" bigint NOT NULL, "deleted_at" bigint NOT NULL);
-ALTER TABLE "{{ip_lists}}" ADD CONSTRAINT "{{prefix}}unique_ipornet_type_mapping" UNIQUE ("type", "ipornet");
 CREATE INDEX "{{prefix}}ip_lists_type_idx" ON "{{ip_lists}}" ("type");
 CREATE INDEX "{{prefix}}ip_lists_ipornet_idx" ON "{{ip_lists}}" ("ipornet");
-CREATE INDEX "{{prefix}}ip_lists_ipornet_like_idx" ON "{{ip_lists}}" ("ipornet" varchar_pattern_ops);
 CREATE INDEX "{{prefix}}ip_lists_updated_at_idx" ON "{{ip_lists}}" ("updated_at");
 CREATE INDEX "{{prefix}}ip_lists_deleted_at_idx" ON "{{ip_lists}}" ("deleted_at");
 CREATE INDEX "{{prefix}}ip_lists_first_last_idx" ON "{{ip_lists}}" ("first", "last");
+INSERT INTO {{schema_version}} (version) VALUES (29);
 `
-	pgsqlV27DownSQL = `DROP TABLE "{{ip_lists}}" CASCADE;`
-	pgsqlV28SQL     = `CREATE TABLE "{{configs}}" ("id" serial NOT NULL PRIMARY KEY, "configs" text NOT NULL);
-INSERT INTO {{configs}} (configs) VALUES ('{}');
+	// not supported in CockroachDB
+	ipListsLikeIndex = `CREATE INDEX "{{prefix}}ip_lists_ipornet_like_idx" ON "{{ip_lists}}" ("ipornet" varchar_pattern_ops);`
+	pgsqlV30SQL      = `ALTER TABLE "{{shares}}" ADD COLUMN "options" text NULL;`
+	pgsqlV30DownSQL  = `ALTER TABLE "{{shares}}" DROP COLUMN "options" CASCADE;`
+	pgsqlV31SQL      = `DROP TABLE "{{shared_sessions}}";
+CREATE TABLE "{{shared_sessions}}" ("key" varchar(128) NOT NULL, "type" integer NOT NULL,
+"data" text NOT NULL, "timestamp" bigint NOT NULL, PRIMARY KEY ("key", "type"));
+CREATE INDEX "{{prefix}}shared_sessions_type_idx" ON "{{shared_sessions}}" ("type");
+CREATE INDEX "{{prefix}}shared_sessions_timestamp_idx" ON "{{shared_sessions}}" ("timestamp");
 `
-	pgsqlV28DownSQL = `DROP TABLE "{{configs}}" CASCADE;`
+	pgsqlV31DownSQL = `DROP TABLE "{{shared_sessions}}" CASCADE;
+CREATE TABLE "{{shared_sessions}}" ("key" varchar(128) NOT NULL PRIMARY KEY,
+"data" text NOT NULL, "type" integer NOT NULL, "timestamp" bigint NOT NULL);
+CREATE INDEX "{{prefix}}shared_sessions_type_idx" ON "{{shared_sessions}}" ("type");
+CREATE INDEX "{{prefix}}shared_sessions_timestamp_idx" ON "{{shared_sessions}}" ("timestamp");`
+)
+
+var (
+	pgSQLTargetSessionAttrs = []string{"any", "read-write", "read-only", "primary", "standby", "prefer-standby"}
 )
 
 // PGSQLProvider defines the auth provider for PostgreSQL database
@@ -264,7 +267,11 @@ func initializePGSQLProvider() error {
 	dbHandle.SetConnMaxLifetime(240 * time.Second)
 	dbHandle.SetConnMaxIdleTime(120 * time.Second)
 	provider = &PGSQLProvider{dbHandle: dbHandle}
-	return nil
+
+	ctx, cancel := context.WithTimeout(context.Background(), defaultSQLQueryTimeout)
+	defer cancel()
+
+	return dbHandle.PingContext(ctx)
 }
 
 func getPGSQLHostsAndPorts(configHost string, configPort int) (string, string) {
@@ -311,7 +318,7 @@ func getPGSQLConnectionString(redactedPwd bool) string {
 		if config.DisableSNI {
 			connectionString += " sslsni=0"
 		}
-		if config.TargetSessionAttrs != "" {
+		if slices.Contains(pgSQLTargetSessionAttrs, config.TargetSessionAttrs) {
 			connectionString += fmt.Sprintf(" target_session_attrs='%s'", config.TargetSessionAttrs)
 		}
 	} else {
@@ -348,6 +355,14 @@ func (p *PGSQLProvider) getUsedQuota(username string) (int, int64, int64, int64,
 	return sqlCommonGetUsedQuota(username, p.dbHandle)
 }
 
+func (p *PGSQLProvider) getAdminSignature(username string) (string, error) {
+	return sqlCommonGetAdminSignature(username, p.dbHandle)
+}
+
+func (p *PGSQLProvider) getUserSignature(username string) (string, error) {
+	return sqlCommonGetUserSignature(username, p.dbHandle)
+}
+
 func (p *PGSQLProvider) setUpdatedAt(username string) {
 	sqlCommonSetUpdatedAt(username, p.dbHandle)
 }
@@ -365,11 +380,11 @@ func (p *PGSQLProvider) userExists(username, role string) (User, error) {
 }
 
 func (p *PGSQLProvider) addUser(user *User) error {
-	return sqlCommonAddUser(user, p.dbHandle)
+	return p.normalizeError(sqlCommonAddUser(user, p.dbHandle), fieldUsername)
 }
 
 func (p *PGSQLProvider) updateUser(user *User) error {
-	return sqlCommonUpdateUser(user, p.dbHandle)
+	return p.normalizeError(sqlCommonUpdateUser(user, p.dbHandle), -1)
 }
 
 func (p *PGSQLProvider) deleteUser(user User, softDelete bool) error {
@@ -411,7 +426,7 @@ func (p *PGSQLProvider) getFolderByName(name string) (vfs.BaseVirtualFolder, err
 }
 
 func (p *PGSQLProvider) addFolder(folder *vfs.BaseVirtualFolder) error {
-	return sqlCommonAddFolder(folder, p.dbHandle)
+	return p.normalizeError(sqlCommonAddFolder(folder, p.dbHandle), fieldName)
 }
 
 func (p *PGSQLProvider) updateFolder(folder *vfs.BaseVirtualFolder) error {
@@ -447,7 +462,7 @@ func (p *PGSQLProvider) groupExists(name string) (Group, error) {
 }
 
 func (p *PGSQLProvider) addGroup(group *Group) error {
-	return sqlCommonAddGroup(group, p.dbHandle)
+	return p.normalizeError(sqlCommonAddGroup(group, p.dbHandle), fieldName)
 }
 
 func (p *PGSQLProvider) updateGroup(group *Group) error {
@@ -467,11 +482,11 @@ func (p *PGSQLProvider) adminExists(username string) (Admin, error) {
 }
 
 func (p *PGSQLProvider) addAdmin(admin *Admin) error {
-	return sqlCommonAddAdmin(admin, p.dbHandle)
+	return p.normalizeError(sqlCommonAddAdmin(admin, p.dbHandle), fieldUsername)
 }
 
 func (p *PGSQLProvider) updateAdmin(admin *Admin) error {
-	return sqlCommonUpdateAdmin(admin, p.dbHandle)
+	return p.normalizeError(sqlCommonUpdateAdmin(admin, p.dbHandle), -1)
 }
 
 func (p *PGSQLProvider) deleteAdmin(admin Admin) error {
@@ -495,11 +510,11 @@ func (p *PGSQLProvider) apiKeyExists(keyID string) (APIKey, error) {
 }
 
 func (p *PGSQLProvider) addAPIKey(apiKey *APIKey) error {
-	return sqlCommonAddAPIKey(apiKey, p.dbHandle)
+	return p.normalizeError(sqlCommonAddAPIKey(apiKey, p.dbHandle), -1)
 }
 
 func (p *PGSQLProvider) updateAPIKey(apiKey *APIKey) error {
-	return sqlCommonUpdateAPIKey(apiKey, p.dbHandle)
+	return p.normalizeError(sqlCommonUpdateAPIKey(apiKey, p.dbHandle), -1)
 }
 
 func (p *PGSQLProvider) deleteAPIKey(apiKey APIKey) error {
@@ -523,11 +538,11 @@ func (p *PGSQLProvider) shareExists(shareID, username string) (Share, error) {
 }
 
 func (p *PGSQLProvider) addShare(share *Share) error {
-	return sqlCommonAddShare(share, p.dbHandle)
+	return p.normalizeError(sqlCommonAddShare(share, p.dbHandle), fieldName)
 }
 
 func (p *PGSQLProvider) updateShare(share *Share) error {
-	return sqlCommonUpdateShare(share, p.dbHandle)
+	return p.normalizeError(sqlCommonUpdateShare(share, p.dbHandle), -1)
 }
 
 func (p *PGSQLProvider) deleteShare(share Share) error {
@@ -602,12 +617,12 @@ func (p *PGSQLProvider) addSharedSession(session Session) error {
 	return sqlCommonAddSession(session, p.dbHandle)
 }
 
-func (p *PGSQLProvider) deleteSharedSession(key string) error {
-	return sqlCommonDeleteSession(key, p.dbHandle)
+func (p *PGSQLProvider) deleteSharedSession(key string, sessionType SessionType) error {
+	return sqlCommonDeleteSession(key, sessionType, p.dbHandle)
 }
 
-func (p *PGSQLProvider) getSharedSession(key string) (Session, error) {
-	return sqlCommonGetSession(key, p.dbHandle)
+func (p *PGSQLProvider) getSharedSession(key string, sessionType SessionType) (Session, error) {
+	return sqlCommonGetSession(key, sessionType, p.dbHandle)
 }
 
 func (p *PGSQLProvider) cleanupSharedSessions(sessionType SessionType, before int64) error {
@@ -627,7 +642,7 @@ func (p *PGSQLProvider) eventActionExists(name string) (BaseEventAction, error) 
 }
 
 func (p *PGSQLProvider) addEventAction(action *BaseEventAction) error {
-	return sqlCommonAddEventAction(action, p.dbHandle)
+	return p.normalizeError(sqlCommonAddEventAction(action, p.dbHandle), fieldName)
 }
 
 func (p *PGSQLProvider) updateEventAction(action *BaseEventAction) error {
@@ -655,7 +670,7 @@ func (p *PGSQLProvider) eventRuleExists(name string) (EventRule, error) {
 }
 
 func (p *PGSQLProvider) addEventRule(rule *EventRule) error {
-	return sqlCommonAddEventRule(rule, p.dbHandle)
+	return p.normalizeError(sqlCommonAddEventRule(rule, p.dbHandle), fieldName)
 }
 
 func (p *PGSQLProvider) updateEventRule(rule *EventRule) error {
@@ -707,7 +722,7 @@ func (p *PGSQLProvider) roleExists(name string) (Role, error) {
 }
 
 func (p *PGSQLProvider) addRole(role *Role) error {
-	return sqlCommonAddRole(role, p.dbHandle)
+	return p.normalizeError(sqlCommonAddRole(role, p.dbHandle), fieldName)
 }
 
 func (p *PGSQLProvider) updateRole(role *Role) error {
@@ -731,7 +746,7 @@ func (p *PGSQLProvider) ipListEntryExists(ipOrNet string, listType IPListType) (
 }
 
 func (p *PGSQLProvider) addIPListEntry(entry *IPListEntry) error {
-	return sqlCommonAddIPListEntry(entry, p.dbHandle)
+	return p.normalizeError(sqlCommonAddIPListEntry(entry, p.dbHandle), fieldIPNet)
 }
 
 func (p *PGSQLProvider) updateIPListEntry(entry *IPListEntry) error {
@@ -795,11 +810,17 @@ func (p *PGSQLProvider) initializeDatabase() error {
 	if errors.Is(err, sql.ErrNoRows) {
 		return errSchemaVersionEmpty
 	}
-	logger.InfoToConsole("creating initial database schema, version 23")
-	providerLog(logger.LevelInfo, "creating initial database schema, version 23")
-	initialSQL := sqlReplaceAll(pgsqlInitial)
+	logger.InfoToConsole("creating initial database schema, version 29")
+	providerLog(logger.LevelInfo, "creating initial database schema, version 29")
+	var initialSQL string
+	if config.Driver == CockroachDataProviderName {
+		initialSQL = sqlReplaceAll(pgsqlInitial)
+		initialSQL = strings.ReplaceAll(initialSQL, "GENERATED ALWAYS AS IDENTITY", "DEFAULT unordered_unique_rowid()")
+	} else {
+		initialSQL = sqlReplaceAll(pgsqlInitial + ipListsLikeIndex)
+	}
 
-	return sqlCommonExecSQLAndUpdateDBVersion(p.dbHandle, []string{initialSQL}, 23, true)
+	return sqlCommonExecSQLAndUpdateDBVersion(p.dbHandle, []string{initialSQL}, 29, true)
 }
 
 func (p *PGSQLProvider) migrateDatabase() error { //nolint:dupl
@@ -812,21 +833,17 @@ func (p *PGSQLProvider) migrateDatabase() error { //nolint:dupl
 	case version == sqlDatabaseVersion:
 		providerLog(logger.LevelDebug, "sql database is up to date, current version: %d", version)
 		return ErrNoInitRequired
-	case version < 23:
-		err = fmt.Errorf("database schema version %d is too old, please see the upgrading docs", version)
+	case version < 29:
+		err = errSchemaVersionTooOld(version)
 		providerLog(logger.LevelError, "%v", err)
 		logger.ErrorToConsole("%v", err)
 		return err
-	case version == 23:
-		return updatePgSQLDatabaseFromV23(p.dbHandle)
-	case version == 24:
-		return updatePgSQLDatabaseFromV24(p.dbHandle)
-	case version == 25:
-		return updatePgSQLDatabaseFromV25(p.dbHandle)
-	case version == 26:
-		return updatePgSQLDatabaseFromV26(p.dbHandle)
-	case version == 27:
-		return updatePgSQLDatabaseFromV27(p.dbHandle)
+	case version == 29:
+		return updatePGSQLDatabaseFromV29(p.dbHandle)
+	case version == 30:
+		return updatePGSQLDatabaseFromV30(p.dbHandle)
+	case version == 31:
+		return updatePGSQLDatabaseFromV31(p.dbHandle)
 	default:
 		if version > sqlDatabaseVersion {
 			providerLog(logger.LevelError, "database schema version %d is newer than the supported one: %d", version,
@@ -849,16 +866,12 @@ func (p *PGSQLProvider) revertDatabase(targetVersion int) error {
 	}
 
 	switch dbVersion.Version {
-	case 24:
-		return downgradePgSQLDatabaseFromV24(p.dbHandle)
-	case 25:
-		return downgradePgSQLDatabaseFromV25(p.dbHandle)
-	case 26:
-		return downgradePgSQLDatabaseFromV26(p.dbHandle)
-	case 27:
-		return downgradePgSQLDatabaseFromV27(p.dbHandle)
-	case 28:
-		return downgradePgSQLDatabaseFromV28(p.dbHandle)
+	case 30:
+		return downgradePGSQLDatabaseFromV30(p.dbHandle)
+	case 31:
+		return downgradePGSQLDatabaseFromV31(p.dbHandle)
+	case 32:
+		return downgradePGSQLDatabaseFromV32(p.dbHandle)
 	default:
 		return fmt.Errorf("database schema version not handled: %d", dbVersion.Version)
 	}
@@ -869,155 +882,100 @@ func (p *PGSQLProvider) resetDatabase() error {
 	return sqlCommonExecSQLAndUpdateDBVersion(p.dbHandle, []string{sql}, 0, false)
 }
 
-func updatePgSQLDatabaseFromV23(dbHandle *sql.DB) error {
-	if err := updatePgSQLDatabaseFrom23To24(dbHandle); err != nil {
+func (p *PGSQLProvider) normalizeError(err error, fieldType int) error {
+	if err == nil {
+		return nil
+	}
+	var pgsqlErr *pgconn.PgError
+	if errors.As(err, &pgsqlErr) {
+		switch pgsqlErr.Code {
+		case "23505":
+			var message string
+			switch fieldType {
+			case fieldUsername:
+				message = util.I18nErrorDuplicatedUsername
+			case fieldIPNet:
+				message = util.I18nErrorDuplicatedIPNet
+			default:
+				message = util.I18nErrorDuplicatedName
+			}
+			return util.NewI18nError(
+				fmt.Errorf("%w: %s", ErrDuplicatedKey, err.Error()),
+				message,
+			)
+		case "23503":
+			return fmt.Errorf("%w: %s", ErrForeignKeyViolated, err.Error())
+		}
+	}
+	return err
+}
+
+func updatePGSQLDatabaseFromV29(dbHandle *sql.DB) error {
+	if err := updatePGSQLDatabaseFrom29To30(dbHandle); err != nil {
 		return err
 	}
-	return updatePgSQLDatabaseFromV24(dbHandle)
+	return updatePGSQLDatabaseFromV30(dbHandle)
 }
 
-func updatePgSQLDatabaseFromV24(dbHandle *sql.DB) error {
-	if err := updatePgSQLDatabaseFrom24To25(dbHandle); err != nil {
+func updatePGSQLDatabaseFromV30(dbHandle *sql.DB) error {
+	if err := updatePGSQLDatabaseFrom30To31(dbHandle); err != nil {
 		return err
 	}
-	return updatePgSQLDatabaseFromV25(dbHandle)
+	return updatePGSQLDatabaseFromV31(dbHandle)
 }
 
-func updatePgSQLDatabaseFromV25(dbHandle *sql.DB) error {
-	if err := updatePgSQLDatabaseFrom25To26(dbHandle); err != nil {
+func updatePGSQLDatabaseFromV31(dbHandle *sql.DB) error {
+	return updateSQLDatabaseFrom31To32(dbHandle)
+}
+
+func downgradePGSQLDatabaseFromV30(dbHandle *sql.DB) error {
+	return downgradePGSQLDatabaseFrom30To29(dbHandle)
+}
+
+func downgradePGSQLDatabaseFromV31(dbHandle *sql.DB) error {
+	if err := downgradePGSQLDatabaseFrom31To30(dbHandle); err != nil {
 		return err
 	}
-	return updatePgSQLDatabaseFromV26(dbHandle)
+	return downgradePGSQLDatabaseFromV30(dbHandle)
 }
 
-func updatePgSQLDatabaseFromV26(dbHandle *sql.DB) error {
-	if err := updatePgSQLDatabaseFrom26To27(dbHandle); err != nil {
+func downgradePGSQLDatabaseFromV32(dbHandle *sql.DB) error {
+	if err := downgradeSQLDatabaseFrom32To31(dbHandle); err != nil {
 		return err
 	}
-	return updatePgSQLDatabaseFromV27(dbHandle)
+	return downgradePGSQLDatabaseFromV31(dbHandle)
 }
 
-func updatePgSQLDatabaseFromV27(dbHandle *sql.DB) error {
-	return updatePgSQLDatabaseFrom27To28(dbHandle)
+func updatePGSQLDatabaseFrom29To30(dbHandle *sql.DB) error {
+	logger.InfoToConsole("updating database schema version: 29 -> 30")
+	providerLog(logger.LevelInfo, "updating database schema version: 29 -> 30")
+
+	sql := strings.ReplaceAll(pgsqlV30SQL, "{{shares}}", sqlTableShares)
+	return sqlCommonExecSQLAndUpdateDBVersion(dbHandle, []string{sql}, 30, true)
 }
 
-func downgradePgSQLDatabaseFromV24(dbHandle *sql.DB) error {
-	return downgradePgSQLDatabaseFrom24To23(dbHandle)
+func downgradePGSQLDatabaseFrom30To29(dbHandle *sql.DB) error {
+	logger.InfoToConsole("downgrading database schema version: 30 -> 29")
+	providerLog(logger.LevelInfo, "downgrading database schema version: 30 -> 29")
+
+	sql := strings.ReplaceAll(pgsqlV30DownSQL, "{{shares}}", sqlTableShares)
+	return sqlCommonExecSQLAndUpdateDBVersion(dbHandle, []string{sql}, 29, false)
 }
 
-func downgradePgSQLDatabaseFromV25(dbHandle *sql.DB) error {
-	if err := downgradePgSQLDatabaseFrom25To24(dbHandle); err != nil {
-		return err
-	}
-	return downgradePgSQLDatabaseFromV24(dbHandle)
-}
+func updatePGSQLDatabaseFrom30To31(dbHandle *sql.DB) error {
+	logger.InfoToConsole("updating database schema version: 30 -> 31")
+	providerLog(logger.LevelInfo, "updating database schema version: 30 -> 31")
 
-func downgradePgSQLDatabaseFromV26(dbHandle *sql.DB) error {
-	if err := downgradePgSQLDatabaseFrom26To25(dbHandle); err != nil {
-		return err
-	}
-	return downgradePgSQLDatabaseFromV25(dbHandle)
-}
-
-func downgradePgSQLDatabaseFromV27(dbHandle *sql.DB) error {
-	if err := downgradePgSQLDatabaseFrom27To26(dbHandle); err != nil {
-		return err
-	}
-	return downgradePgSQLDatabaseFromV26(dbHandle)
-}
-
-func downgradePgSQLDatabaseFromV28(dbHandle *sql.DB) error {
-	if err := downgradePgSQLDatabaseFrom28To27(dbHandle); err != nil {
-		return err
-	}
-	return downgradePgSQLDatabaseFromV27(dbHandle)
-}
-
-func updatePgSQLDatabaseFrom23To24(dbHandle *sql.DB) error {
-	logger.InfoToConsole("updating database schema version: 23 -> 24")
-	providerLog(logger.LevelInfo, "updating database schema version: 23 -> 24")
-	sql := strings.ReplaceAll(pgsqlV24SQL, "{{roles}}", sqlTableRoles)
-	sql = strings.ReplaceAll(sql, "{{admins}}", sqlTableAdmins)
-	sql = strings.ReplaceAll(sql, "{{users}}", sqlTableUsers)
+	sql := strings.ReplaceAll(pgsqlV31SQL, "{{shared_sessions}}", sqlTableSharedSessions)
 	sql = strings.ReplaceAll(sql, "{{prefix}}", config.SQLTablesPrefix)
-	return sqlCommonExecSQLAndUpdateDBVersion(dbHandle, []string{sql}, 24, true)
+	return sqlCommonExecSQLAndUpdateDBVersion(dbHandle, []string{sql}, 31, true)
 }
 
-func updatePgSQLDatabaseFrom24To25(dbHandle *sql.DB) error {
-	logger.InfoToConsole("updating database schema version: 24 -> 25")
-	providerLog(logger.LevelInfo, "updating database schema version: 24 -> 25")
-	sql := pgsqlV25SQL
-	if config.Driver == CockroachDataProviderName {
-		sql = strings.ReplaceAll(sql, `ALTER TABLE "{{users}}" ALTER COLUMN "last_password_change" DROP DEFAULT;`, "")
-	}
-	sql = strings.ReplaceAll(sql, "{{users}}", sqlTableUsers)
-	return sqlCommonExecSQLAndUpdateDBVersion(dbHandle, []string{sql}, 25, true)
-}
+func downgradePGSQLDatabaseFrom31To30(dbHandle *sql.DB) error {
+	logger.InfoToConsole("downgrading database schema version: 31 -> 30")
+	providerLog(logger.LevelInfo, "downgrading database schema version: 31 -> 30")
 
-func updatePgSQLDatabaseFrom25To26(dbHandle *sql.DB) error {
-	logger.InfoToConsole("updating database schema version: 25 -> 26")
-	providerLog(logger.LevelInfo, "updating database schema version: 25 -> 26")
-	sql := pgsqlV26SQL
-	if config.Driver == CockroachDataProviderName {
-		sql = strings.ReplaceAll(sql, `ALTER TABLE "{{events_rules}}" ALTER COLUMN "status" DROP DEFAULT;`, "")
-	}
-	sql = strings.ReplaceAll(sql, "{{events_rules}}", sqlTableEventsRules)
-	return sqlCommonExecSQLAndUpdateDBVersion(dbHandle, []string{sql}, 26, true)
-}
-
-func updatePgSQLDatabaseFrom26To27(dbHandle *sql.DB) error {
-	logger.InfoToConsole("updating database schema version: 26 -> 27")
-	providerLog(logger.LevelInfo, "updating database schema version: 26 -> 27")
-	sql := pgsqlV27SQL
-	if config.Driver == CockroachDataProviderName {
-		sql = strings.ReplaceAll(sql, `CREATE INDEX "{{prefix}}ip_lists_ipornet_like_idx" ON "{{ip_lists}}" ("ipornet" varchar_pattern_ops);`, "")
-	}
-	sql = strings.ReplaceAll(sql, "{{ip_lists}}", sqlTableIPLists)
+	sql := strings.ReplaceAll(pgsqlV31DownSQL, "{{shared_sessions}}", sqlTableSharedSessions)
 	sql = strings.ReplaceAll(sql, "{{prefix}}", config.SQLTablesPrefix)
-	return sqlCommonExecSQLAndUpdateDBVersion(dbHandle, []string{sql}, 27, true)
-}
-
-func updatePgSQLDatabaseFrom27To28(dbHandle *sql.DB) error {
-	logger.InfoToConsole("updating database schema version: 27 -> 28")
-	providerLog(logger.LevelInfo, "updating database schema version: 27 -> 28")
-	sql := strings.ReplaceAll(pgsqlV28SQL, "{{configs}}", sqlTableConfigs)
-	return sqlCommonExecSQLAndUpdateDBVersion(dbHandle, []string{sql}, 28, true)
-}
-
-func downgradePgSQLDatabaseFrom24To23(dbHandle *sql.DB) error {
-	logger.InfoToConsole("downgrading database schema version: 24 -> 23")
-	providerLog(logger.LevelInfo, "downgrading database schema version: 24 -> 23")
-	sql := strings.ReplaceAll(pgsqlV24DownSQL, "{{roles}}", sqlTableRoles)
-	sql = strings.ReplaceAll(sql, "{{admins}}", sqlTableAdmins)
-	sql = strings.ReplaceAll(sql, "{{users}}", sqlTableUsers)
-	sql = strings.ReplaceAll(sql, "{{prefix}}", config.SQLTablesPrefix)
-	return sqlCommonExecSQLAndUpdateDBVersion(dbHandle, []string{sql}, 23, false)
-}
-
-func downgradePgSQLDatabaseFrom25To24(dbHandle *sql.DB) error {
-	logger.InfoToConsole("downgrading database schema version: 25 -> 24")
-	providerLog(logger.LevelInfo, "downgrading database schema version: 25 -> 24")
-	sql := strings.ReplaceAll(pgsqlV25DownSQL, "{{users}}", sqlTableUsers)
-	return sqlCommonExecSQLAndUpdateDBVersion(dbHandle, []string{sql}, 24, false)
-}
-
-func downgradePgSQLDatabaseFrom26To25(dbHandle *sql.DB) error {
-	logger.InfoToConsole("downgrading database schema version: 26 -> 25")
-	providerLog(logger.LevelInfo, "downgrading database schema version: 26 -> 25")
-	sql := strings.ReplaceAll(pgsqlV26DownSQL, "{{events_rules}}", sqlTableEventsRules)
-	return sqlCommonExecSQLAndUpdateDBVersion(dbHandle, []string{sql}, 25, false)
-}
-
-func downgradePgSQLDatabaseFrom27To26(dbHandle *sql.DB) error {
-	logger.InfoToConsole("downgrading database schema version: 27 -> 26")
-	providerLog(logger.LevelInfo, "downgrading database schema version: 27 -> 26")
-	sql := strings.ReplaceAll(pgsqlV27DownSQL, "{{ip_lists}}", sqlTableIPLists)
-	return sqlCommonExecSQLAndUpdateDBVersion(dbHandle, []string{sql}, 26, false)
-}
-
-func downgradePgSQLDatabaseFrom28To27(dbHandle *sql.DB) error {
-	logger.InfoToConsole("downgrading database schema version: 28 -> 27")
-	providerLog(logger.LevelInfo, "downgrading database schema version: 28 -> 27")
-	sql := strings.ReplaceAll(pgsqlV28DownSQL, "{{configs}}", sqlTableConfigs)
-	return sqlCommonExecSQLAndUpdateDBVersion(dbHandle, []string{sql}, 27, false)
+	return sqlCommonExecSQLAndUpdateDBVersion(dbHandle, []string{sql}, 30, false)
 }

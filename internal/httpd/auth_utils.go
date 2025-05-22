@@ -1,4 +1,4 @@
-// Copyright (C) 2019-2023 Nicola Murino
+// Copyright (C) 2019 Nicola Murino
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published
@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"time"
 
 	"github.com/go-chi/jwtauth/v5"
@@ -40,13 +41,14 @@ const (
 	tokenAudienceAPI              tokenAudience = "API"
 	tokenAudienceAPIUser          tokenAudience = "APIUser"
 	tokenAudienceCSRF             tokenAudience = "CSRF"
+	tokenAudienceOAuth2           tokenAudience = "OAuth2"
+	tokenAudienceWebLogin         tokenAudience = "WebLogin"
 )
 
-type tokenValidation = int
-
 const (
-	tokenValidationFull                      = iota
-	tokenValidationNoIPMatch tokenValidation = iota
+	tokenValidationModeDefault       = 0
+	tokenValidationModeNoIPMatch     = 1
+	tokenValidationModeUserSignature = 2
 )
 
 const (
@@ -59,19 +61,73 @@ const (
 	claimMustSetSecondFactorKey     = "2fa_required"
 	claimRequiredTwoFactorProtocols = "2fa_protos"
 	claimHideUserPageSection        = "hus"
+	claimRef                        = "ref"
 	basicRealm                      = "Basic realm=\"SFTPGo\""
 	jwtCookieKey                    = "jwt"
 )
 
 var (
-	tokenDuration      = 20 * time.Minute
-	shareTokenDuration = 12 * time.Hour
+	apiTokenDuration    = 20 * time.Minute
+	cookieTokenDuration = 20 * time.Minute
+	shareTokenDuration  = 2 * time.Hour
 	// csrf token duration is greater than normal token duration to reduce issues
 	// with the login form
-	csrfTokenDuration     = 6 * time.Hour
-	tokenRefreshThreshold = 10 * time.Minute
-	tokenValidationMode   = tokenValidationFull
+	csrfTokenDuration      = 4 * time.Hour
+	cookieRefreshThreshold = 10 * time.Minute
+	maxTokenDuration       = 12 * time.Hour
+	tokenValidationMode    = tokenValidationModeDefault
 )
+
+func isTokenDurationValid(minutes int) bool {
+	return minutes >= 1 && minutes <= 720
+}
+
+func updateTokensDuration(api, cookie, share int) {
+	if isTokenDurationValid(api) {
+		apiTokenDuration = time.Duration(api) * time.Minute
+	}
+	if isTokenDurationValid(cookie) {
+		cookieTokenDuration = time.Duration(cookie) * time.Minute
+		cookieRefreshThreshold = cookieTokenDuration / 2
+		if cookieTokenDuration > csrfTokenDuration {
+			csrfTokenDuration = cookieTokenDuration
+		}
+	}
+	if isTokenDurationValid(share) {
+		shareTokenDuration = time.Duration(share) * time.Minute
+	}
+	logger.Debug(logSender, "", "API token duration %s, cookie token duration %s, cookie refresh threshold %s, share token duration %s, csrf token duration %s",
+		apiTokenDuration, cookieTokenDuration, cookieRefreshThreshold, shareTokenDuration, csrfTokenDuration)
+}
+
+func getTokenDuration(audience tokenAudience) time.Duration {
+	switch audience {
+	case tokenAudienceWebShare:
+		return shareTokenDuration
+	case tokenAudienceWebLogin, tokenAudienceCSRF:
+		return csrfTokenDuration
+	case tokenAudienceAPI, tokenAudienceAPIUser:
+		return apiTokenDuration
+	case tokenAudienceWebAdmin, tokenAudienceWebClient:
+		return cookieTokenDuration
+	case tokenAudienceWebAdminPartial, tokenAudienceWebClientPartial, tokenAudienceOAuth2:
+		return 5 * time.Minute
+	default:
+		logger.Error(logSender, "", "token duration not handled for audience: %q", audience)
+		return 20 * time.Minute
+	}
+}
+
+func getMaxCookieDuration() time.Duration {
+	result := csrfTokenDuration
+	if shareTokenDuration > result {
+		result = shareTokenDuration
+	}
+	if cookieTokenDuration > result {
+		result = cookieTokenDuration
+	}
+	return result
+}
 
 type jwtTokenClaims struct {
 	Username                   string
@@ -85,6 +141,9 @@ type jwtTokenClaims struct {
 	MustChangePassword         bool
 	RequiredTwoFactorProtocols []string
 	HideUserPageSections       int
+	JwtID                      string
+	JwtIssuedAt                time.Time
+	Ref                        string
 }
 
 func (c *jwtTokenClaims) hasUserAudience() bool {
@@ -102,6 +161,15 @@ func (c *jwtTokenClaims) asMap() map[string]any {
 
 	claims[claimUsernameKey] = c.Username
 	claims[claimPermissionsKey] = c.Permissions
+	if c.JwtID != "" {
+		claims[jwt.JwtIDKey] = c.JwtID
+	}
+	if !c.JwtIssuedAt.IsZero() {
+		claims[jwt.IssuedAtKey] = c.JwtIssuedAt
+	}
+	if c.Ref != "" {
+		claims[claimRef] = c.Ref
+	}
 	if c.Role != "" {
 		claims[claimRole] = c.Role
 	}
@@ -168,11 +236,16 @@ func (c *jwtTokenClaims) Decode(token map[string]any) {
 	c.Permissions = nil
 	c.Username = c.decodeString(token[claimUsernameKey])
 	c.Signature = c.decodeString(token[jwt.SubjectKey])
+	c.JwtID = c.decodeString(token[jwt.JwtIDKey])
 
 	audience := token[jwt.AudienceKey]
 	switch v := audience.(type) {
 	case []string:
 		c.Audience = v
+	}
+
+	if val, ok := token[claimRef]; ok {
+		c.Ref = c.decodeString(val)
 	}
 
 	if val, ok := token[claimAPIKey]; ok {
@@ -210,34 +283,26 @@ func (c *jwtTokenClaims) Decode(token map[string]any) {
 	}
 }
 
-func (c *jwtTokenClaims) isCriticalPermRemoved(permissions []string) bool {
-	if util.Contains(permissions, dataprovider.PermAdminAny) {
-		return false
-	}
-	if (util.Contains(c.Permissions, dataprovider.PermAdminManageAdmins) ||
-		util.Contains(c.Permissions, dataprovider.PermAdminAny)) &&
-		!util.Contains(permissions, dataprovider.PermAdminManageAdmins) &&
-		!util.Contains(permissions, dataprovider.PermAdminAny) {
-		return true
-	}
-	return false
-}
-
 func (c *jwtTokenClaims) hasPerm(perm string) bool {
-	if util.Contains(c.Permissions, dataprovider.PermAdminAny) {
+	if slices.Contains(c.Permissions, dataprovider.PermAdminAny) {
 		return true
 	}
 
-	return util.Contains(c.Permissions, perm)
+	return slices.Contains(c.Permissions, perm)
 }
 
 func (c *jwtTokenClaims) createToken(tokenAuth *jwtauth.JWTAuth, audience tokenAudience, ip string) (jwt.Token, string, error) {
 	claims := c.asMap()
 	now := time.Now().UTC()
 
-	claims[jwt.JwtIDKey] = xid.New().String()
+	if _, ok := claims[jwt.JwtIDKey]; !ok {
+		claims[jwt.JwtIDKey] = xid.New().String()
+	}
+	if _, ok := claims[jwt.IssuedAtKey]; !ok {
+		claims[jwt.IssuedAtKey] = now
+	}
 	claims[jwt.NotBeforeKey] = now.Add(-30 * time.Second)
-	claims[jwt.ExpirationKey] = now.Add(tokenDuration)
+	claims[jwt.ExpirationKey] = now.Add(getTokenDuration(audience))
 	claims[jwt.AudienceKey] = []string{audience, ip}
 
 	return tokenAuth.Encode(claims)
@@ -269,25 +334,26 @@ func (c *jwtTokenClaims) createAndSetCookie(w http.ResponseWriter, r *http.Reque
 	} else {
 		basePath = webBaseClientPath
 	}
-	duration := tokenDuration
-	if audience == tokenAudienceWebShare {
-		duration = shareTokenDuration
-	}
+	setCookie(w, r, basePath, resp["access_token"].(string), getTokenDuration(audience))
+
+	return nil
+}
+
+func setCookie(w http.ResponseWriter, r *http.Request, cookiePath, cookieValue string, duration time.Duration) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     jwtCookieKey,
-		Value:    resp["access_token"].(string),
-		Path:     basePath,
+		Value:    cookieValue,
+		Path:     cookiePath,
 		Expires:  time.Now().Add(duration),
 		MaxAge:   int(duration / time.Second),
 		HttpOnly: true,
 		Secure:   isTLS(r),
 		SameSite: http.SameSiteStrictMode,
 	})
-
-	return nil
 }
 
-func (c *jwtTokenClaims) removeCookie(w http.ResponseWriter, r *http.Request, cookiePath string) {
+func removeCookie(w http.ResponseWriter, r *http.Request, cookiePath string) {
+	invalidateToken(r)
 	http.SetCookie(w, &http.Cookie{
 		Name:     jwtCookieKey,
 		Value:    "",
@@ -299,10 +365,9 @@ func (c *jwtTokenClaims) removeCookie(w http.ResponseWriter, r *http.Request, co
 		SameSite: http.SameSiteStrictMode,
 	})
 	w.Header().Add("Cache-Control", `no-cache="Set-Cookie"`)
-	invalidateToken(r)
 }
 
-func tokenFromContext(r *http.Request) string {
+func oidcTokenFromContext(r *http.Request) string {
 	if token, ok := r.Context().Value(oidcGeneratedToken).(string); ok {
 		return token
 	}
@@ -323,14 +388,14 @@ func isTokenInvalidated(r *http.Request) bool {
 	var findTokenFns []func(r *http.Request) string
 	findTokenFns = append(findTokenFns, jwtauth.TokenFromHeader)
 	findTokenFns = append(findTokenFns, jwtauth.TokenFromCookie)
-	findTokenFns = append(findTokenFns, tokenFromContext)
+	findTokenFns = append(findTokenFns, oidcTokenFromContext)
 
 	isTokenFound := false
 	for _, fn := range findTokenFns {
 		token := fn(r)
 		if token != "" {
 			isTokenFound = true
-			if _, ok := invalidatedJWTTokens.Load(token); ok {
+			if invalidatedJWTTokens.Get(token) {
 				return true
 			}
 		}
@@ -342,12 +407,21 @@ func isTokenInvalidated(r *http.Request) bool {
 func invalidateToken(r *http.Request) {
 	tokenString := jwtauth.TokenFromHeader(r)
 	if tokenString != "" {
-		invalidatedJWTTokens.Store(tokenString, time.Now().Add(tokenDuration).UTC())
+		invalidateTokenString(r, tokenString, apiTokenDuration)
 	}
 	tokenString = jwtauth.TokenFromCookie(r)
 	if tokenString != "" {
-		invalidatedJWTTokens.Store(tokenString, time.Now().Add(tokenDuration).UTC())
+		invalidateTokenString(r, tokenString, getMaxCookieDuration())
 	}
+}
+
+func invalidateTokenString(r *http.Request, tokenString string, fallbackDuration time.Duration) {
+	token, _, err := jwtauth.FromContext(r.Context())
+	if err != nil || token == nil {
+		invalidatedJWTTokens.Add(tokenString, time.Now().Add(fallbackDuration).UTC())
+		return
+	}
+	invalidatedJWTTokens.Add(tokenString, token.Expiration().Add(1*time.Minute).UTC())
 }
 
 func getUserFromToken(r *http.Request) *dataprovider.User {
@@ -379,15 +453,40 @@ func getAdminFromToken(r *http.Request) *dataprovider.Admin {
 	return admin
 }
 
-func createCSRFToken(ip string) string {
+func createLoginCookie(w http.ResponseWriter, r *http.Request, csrfTokenAuth *jwtauth.JWTAuth, tokenID, basePath, ip string,
+) {
+	c := jwtTokenClaims{
+		JwtID: tokenID,
+	}
+	resp, err := c.createTokenResponse(csrfTokenAuth, tokenAudienceWebLogin, ip)
+	if err != nil {
+		return
+	}
+	setCookie(w, r, basePath, resp["access_token"].(string), csrfTokenDuration)
+}
+
+func createCSRFToken(w http.ResponseWriter, r *http.Request, csrfTokenAuth *jwtauth.JWTAuth, tokenID,
+	basePath string,
+) string {
+	ip := util.GetIPFromRemoteAddress(r.RemoteAddr)
 	claims := make(map[string]any)
 	now := time.Now().UTC()
 
 	claims[jwt.JwtIDKey] = xid.New().String()
+	claims[jwt.IssuedAtKey] = now
 	claims[jwt.NotBeforeKey] = now.Add(-30 * time.Second)
 	claims[jwt.ExpirationKey] = now.Add(csrfTokenDuration)
 	claims[jwt.AudienceKey] = []string{tokenAudienceCSRF, ip}
-
+	if tokenID != "" {
+		createLoginCookie(w, r, csrfTokenAuth, tokenID, basePath, ip)
+		claims[claimRef] = tokenID
+	} else {
+		if c, err := getTokenClaims(r); err == nil {
+			claims[claimRef] = c.JwtID
+		} else {
+			logger.Error(logSender, "", "unable to add reference to CSRF token: %v", err)
+		}
+	}
 	_, tokenString, err := csrfTokenAuth.Encode(claims)
 	if err != nil {
 		logger.Debug(logSender, "", "unable to create CSRF token: %v", err)
@@ -396,24 +495,168 @@ func createCSRFToken(ip string) string {
 	return tokenString
 }
 
-func verifyCSRFToken(tokenString, ip string) error {
+func verifyCSRFToken(r *http.Request, csrfTokenAuth *jwtauth.JWTAuth) error {
+	tokenString := r.Form.Get(csrfFormToken)
 	token, err := jwtauth.VerifyToken(csrfTokenAuth, tokenString)
 	if err != nil || token == nil {
 		logger.Debug(logSender, "", "error validating CSRF token %q: %v", tokenString, err)
 		return fmt.Errorf("unable to verify form token: %v", err)
 	}
 
-	if !util.Contains(token.Audience(), tokenAudienceCSRF) {
+	if !slices.Contains(token.Audience(), tokenAudienceCSRF) {
 		logger.Debug(logSender, "", "error validating CSRF token audience")
 		return errors.New("the form token is not valid")
 	}
 
-	if tokenValidationMode != tokenValidationNoIPMatch {
-		if !util.Contains(token.Audience(), ip) {
-			logger.Debug(logSender, "", "error validating CSRF token IP audience")
-			return errors.New("the form token is not valid")
-		}
+	if err := validateIPForToken(token, util.GetIPFromRemoteAddress(r.RemoteAddr)); err != nil {
+		logger.Debug(logSender, "", "error validating CSRF token IP audience")
+		return errors.New("the form token is not valid")
+	}
+	return checkCSRFTokenRef(r, token)
+}
+
+func checkCSRFTokenRef(r *http.Request, token jwt.Token) error {
+	claims, err := getTokenClaims(r)
+	if err != nil {
+		logger.Debug(logSender, "", "error getting token claims for CSRF validation: %v", err)
+		return err
+	}
+	ref, ok := token.Get(claimRef)
+	if !ok {
+		logger.Debug(logSender, "", "error validating CSRF token, missing reference")
+		return errors.New("the form token is not valid")
+	}
+	if claims.JwtID == "" || claims.JwtID != ref.(string) {
+		logger.Debug(logSender, "", "error validating CSRF reference, id %q, reference %q", claims.JwtID, ref)
+		return errors.New("unexpected form token")
 	}
 
 	return nil
+}
+
+func verifyLoginCookie(r *http.Request) error {
+	token, _, err := jwtauth.FromContext(r.Context())
+	if err != nil || token == nil {
+		logger.Debug(logSender, "", "error getting login token: %v", err)
+		return errInvalidToken
+	}
+	if isTokenInvalidated(r) {
+		logger.Debug(logSender, "", "the login token has been invalidated")
+		return errInvalidToken
+	}
+	if !slices.Contains(token.Audience(), tokenAudienceWebLogin) {
+		logger.Debug(logSender, "", "the token with id %q is not valid for audience %q", token.JwtID(), tokenAudienceWebLogin)
+		return errInvalidToken
+	}
+	ipAddr := util.GetIPFromRemoteAddress(r.RemoteAddr)
+	if err := validateIPForToken(token, ipAddr); err != nil {
+		return err
+	}
+	return nil
+}
+
+func verifyLoginCookieAndCSRFToken(r *http.Request, csrfTokenAuth *jwtauth.JWTAuth) error {
+	if err := verifyLoginCookie(r); err != nil {
+		return err
+	}
+	if err := verifyCSRFToken(r, csrfTokenAuth); err != nil {
+		return err
+	}
+	return nil
+}
+
+func createOAuth2Token(csrfTokenAuth *jwtauth.JWTAuth, state, ip string) string {
+	claims := make(map[string]any)
+	now := time.Now().UTC()
+
+	claims[jwt.JwtIDKey] = state
+	claims[jwt.IssuedAtKey] = now
+	claims[jwt.NotBeforeKey] = now.Add(-30 * time.Second)
+	claims[jwt.ExpirationKey] = now.Add(getTokenDuration(tokenAudienceOAuth2))
+	claims[jwt.AudienceKey] = []string{tokenAudienceOAuth2, ip}
+
+	_, tokenString, err := csrfTokenAuth.Encode(claims)
+	if err != nil {
+		logger.Debug(logSender, "", "unable to create OAuth2 token: %v", err)
+		return ""
+	}
+	return tokenString
+}
+
+func verifyOAuth2Token(csrfTokenAuth *jwtauth.JWTAuth, tokenString, ip string) (string, error) {
+	token, err := jwtauth.VerifyToken(csrfTokenAuth, tokenString)
+	if err != nil || token == nil {
+		logger.Debug(logSender, "", "error validating OAuth2 token %q: %v", tokenString, err)
+		return "", util.NewI18nError(
+			fmt.Errorf("unable to verify OAuth2 state: %v", err),
+			util.I18nOAuth2ErrorVerifyState,
+		)
+	}
+
+	if !slices.Contains(token.Audience(), tokenAudienceOAuth2) {
+		logger.Debug(logSender, "", "error validating OAuth2 token audience")
+		return "", util.NewI18nError(errors.New("invalid OAuth2 state"), util.I18nOAuth2InvalidState)
+	}
+
+	if err := validateIPForToken(token, ip); err != nil {
+		logger.Debug(logSender, "", "error validating OAuth2 token IP audience")
+		return "", util.NewI18nError(errors.New("invalid OAuth2 state"), util.I18nOAuth2InvalidState)
+	}
+	if val, ok := token.Get(jwt.JwtIDKey); ok {
+		if state, ok := val.(string); ok {
+			return state, nil
+		}
+	}
+	logger.Debug(logSender, "", "jti not found in OAuth2 token")
+	return "", util.NewI18nError(errors.New("invalid OAuth2 state"), util.I18nOAuth2InvalidState)
+}
+
+func validateIPForToken(token jwt.Token, ip string) error {
+	if tokenValidationMode&tokenValidationModeNoIPMatch == 0 {
+		if !slices.Contains(token.Audience(), ip) {
+			return errInvalidToken
+		}
+	}
+	return nil
+}
+
+func checkTokenSignature(r *http.Request, token jwt.Token) error {
+	if _, ok := r.Context().Value(oidcTokenKey).(string); ok {
+		return nil
+	}
+	var err error
+	if tokenValidationMode&tokenValidationModeUserSignature != 0 {
+		for _, audience := range token.Audience() {
+			switch audience {
+			case tokenAudienceAPI, tokenAudienceWebAdmin:
+				err = validateSignatureForToken(token, dataprovider.GetAdminSignature)
+			case tokenAudienceAPIUser, tokenAudienceWebClient:
+				err = validateSignatureForToken(token, dataprovider.GetUserSignature)
+			}
+		}
+	}
+	if err != nil {
+		invalidateToken(r)
+	}
+	return err
+}
+
+func validateSignatureForToken(token jwt.Token, getter func(string) (string, error)) error {
+	username := ""
+	if u, ok := token.Get(claimUsernameKey); ok {
+		c := jwtTokenClaims{}
+		username = c.decodeString(u)
+	}
+
+	signature, err := getter(username)
+	if err != nil {
+		logger.Debug(logSender, "", "unable to get signature for username %q: %v", username, err)
+		return errInvalidToken
+	}
+	if signature != "" && signature == token.Subject() {
+		return nil
+	}
+	logger.Debug(logSender, "", "signature mismatch for username %q, signature %q, token signature %q",
+		username, signature, token.Subject())
+	return errInvalidToken
 }

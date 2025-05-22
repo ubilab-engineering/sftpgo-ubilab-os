@@ -1,4 +1,4 @@
-// Copyright (C) 2019-2023 Nicola Murino
+// Copyright (C) 2019 Nicola Murino
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published
@@ -17,11 +17,13 @@ package httpd
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"net/http"
+	"net/url"
+	"slices"
 	"strings"
 
 	"github.com/go-chi/jwtauth/v5"
-	"github.com/lestrrat-go/jwx/v2/jwt"
 	"github.com/rs/xid"
 	"github.com/sftpgo/sdk"
 
@@ -52,6 +54,9 @@ func validateJWTToken(w http.ResponseWriter, r *http.Request, audience tokenAudi
 		redirectPath = webAdminLoginPath
 	} else {
 		redirectPath = webClientLoginPath
+		if uri := r.RequestURI; strings.HasPrefix(uri, webClientFilesPath) {
+			redirectPath += "?next=" + url.QueryEscape(uri) //nolint:goconst
+		}
 	}
 
 	isAPIToken := (audience == tokenAudienceAPI || audience == tokenAudienceAPIUser)
@@ -70,12 +75,6 @@ func validateJWTToken(w http.ResponseWriter, r *http.Request, audience tokenAudi
 		return errInvalidToken
 	}
 
-	err = jwt.Validate(token)
-	if err != nil {
-		logger.Debug(logSender, "", "error validating jwt token: %v", err)
-		doRedirect(http.StatusText(http.StatusUnauthorized), err)
-		return errInvalidToken
-	}
 	if isTokenInvalidated(r) {
 		logger.Debug(logSender, "", "the token has been invalidated")
 		doRedirect("Your token is no longer valid", nil)
@@ -85,18 +84,20 @@ func validateJWTToken(w http.ResponseWriter, r *http.Request, audience tokenAudi
 	if err := checkPartialAuth(w, r, audience, token.Audience()); err != nil {
 		return err
 	}
-	if !util.Contains(token.Audience(), audience) {
+	if !slices.Contains(token.Audience(), audience) {
 		logger.Debug(logSender, "", "the token is not valid for audience %q", audience)
 		doRedirect("Your token audience is not valid", nil)
 		return errInvalidToken
 	}
-	if tokenValidationMode != tokenValidationNoIPMatch {
-		ipAddr := util.GetIPFromRemoteAddress(r.RemoteAddr)
-		if !util.Contains(token.Audience(), ipAddr) {
-			logger.Debug(logSender, "", "the token with id %q is not valid for the ip address %q", token.JwtID(), ipAddr)
-			doRedirect("Your token is not valid", nil)
-			return errInvalidToken
-		}
+	ipAddr := util.GetIPFromRemoteAddress(r.RemoteAddr)
+	if err := validateIPForToken(token, ipAddr); err != nil {
+		logger.Debug(logSender, "", "the token with id %q is not valid for the ip address %q", token.JwtID(), ipAddr)
+		doRedirect("Your token is not valid", nil)
+		return err
+	}
+	if err := checkTokenSignature(r, token); err != nil {
+		doRedirect("Your token is no longer valid", nil)
+		return err
 	}
 	return nil
 }
@@ -109,7 +110,7 @@ func (s *httpdServer) validateJWTPartialToken(w http.ResponseWriter, r *http.Req
 	} else {
 		notFoundFunc = s.renderClientNotFoundPage
 	}
-	if err != nil || token == nil || jwt.Validate(token) != nil {
+	if err != nil || token == nil {
 		notFoundFunc(w, r, nil)
 		return errInvalidToken
 	}
@@ -117,10 +118,16 @@ func (s *httpdServer) validateJWTPartialToken(w http.ResponseWriter, r *http.Req
 		notFoundFunc(w, r, nil)
 		return errInvalidToken
 	}
-	if !util.Contains(token.Audience(), audience) {
-		logger.Debug(logSender, "", "the token is not valid for audience %q", audience)
+	if !slices.Contains(token.Audience(), audience) {
+		logger.Debug(logSender, "", "the partial token with id %q is not valid for audience %q", token.JwtID(), audience)
 		notFoundFunc(w, r, nil)
 		return errInvalidToken
+	}
+	ipAddr := util.GetIPFromRemoteAddress(r.RemoteAddr)
+	if err := validateIPForToken(token, ipAddr); err != nil {
+		logger.Debug(logSender, "", "the partial token with id %q is not valid for the ip address %q", token.JwtID(), ipAddr)
+		notFoundFunc(w, r, nil)
+		return err
 	}
 
 	return nil
@@ -200,7 +207,7 @@ func (s *httpdServer) checkHTTPUserPerm(perm string) func(next http.Handler) htt
 			// for web client perms are negated and not granted
 			if tokenClaims.hasPerm(perm) {
 				if isWebRequest(r) {
-					s.renderClientForbiddenPage(w, r, "You don't have permission for this action")
+					s.renderClientForbiddenPage(w, r, errors.New("you don't have permission for this action"))
 				} else {
 					sendAPIResponse(w, r, nil, http.StatusText(http.StatusForbidden), http.StatusForbidden)
 				}
@@ -218,7 +225,11 @@ func (s *httpdServer) checkAuthRequirements(next http.Handler) http.Handler {
 		_, claims, err := jwtauth.FromContext(r.Context())
 		if err != nil {
 			if isWebRequest(r) {
-				s.renderClientBadRequestPage(w, r, err)
+				if isWebClientRequest(r) {
+					s.renderClientBadRequestPage(w, r, err)
+				} else {
+					s.renderBadRequestPage(w, r, err)
+				}
 			} else {
 				sendAPIResponse(w, r, err, http.StatusText(http.StatusBadRequest), http.StatusBadRequest)
 			}
@@ -227,17 +238,39 @@ func (s *httpdServer) checkAuthRequirements(next http.Handler) http.Handler {
 		tokenClaims := jwtTokenClaims{}
 		tokenClaims.Decode(claims)
 		if tokenClaims.MustSetTwoFactorAuth || tokenClaims.MustChangePassword {
-			var message string
+			var err error
 			if tokenClaims.MustSetTwoFactorAuth {
-				message = fmt.Sprintf("Two-factor authentication requirements not met, please configure two-factor authentication for the following protocols: %v",
-					strings.Join(tokenClaims.RequiredTwoFactorProtocols, ", "))
+				if len(tokenClaims.RequiredTwoFactorProtocols) > 0 {
+					protocols := strings.Join(tokenClaims.RequiredTwoFactorProtocols, ", ")
+					err = util.NewI18nError(
+						util.NewGenericError(
+							fmt.Sprintf("Two-factor authentication requirements not met, please configure two-factor authentication for the following protocols: %v",
+								protocols)),
+						util.I18nError2FARequired,
+						util.I18nErrorArgs(map[string]any{
+							"val": protocols,
+						}),
+					)
+				} else {
+					err = util.NewI18nError(
+						util.NewGenericError("Two-factor authentication requirements not met, please configure two-factor authentication"),
+						util.I18nError2FARequiredGeneric,
+					)
+				}
 			} else {
-				message = "Password change required. Please set a new password to continue to use your account"
+				err = util.NewI18nError(
+					util.NewGenericError("Password change required. Please set a new password to continue to use your account"),
+					util.I18nErrorChangePwdRequired,
+				)
 			}
 			if isWebRequest(r) {
-				s.renderClientForbiddenPage(w, r, message)
+				if isWebClientRequest(r) {
+					s.renderClientForbiddenPage(w, r, err)
+				} else {
+					s.renderForbiddenPage(w, r, err)
+				}
 			} else {
-				sendAPIResponse(w, r, nil, message, http.StatusForbidden)
+				sendAPIResponse(w, r, err, "", http.StatusForbidden)
 			}
 			return
 		}
@@ -249,10 +282,14 @@ func (s *httpdServer) checkAuthRequirements(next http.Handler) http.Handler {
 func (s *httpdServer) requireBuiltinLogin(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if isLoggedInWithOIDC(r) {
+			err := util.NewI18nError(
+				util.NewGenericError("This feature is not available if you are logged in with OpenID"),
+				util.I18nErrorNoOIDCFeature,
+			)
 			if isWebClientRequest(r) {
-				s.renderClientForbiddenPage(w, r, "This feature is not available if you are logged in with OpenID")
+				s.renderClientForbiddenPage(w, r, err)
 			} else {
-				s.renderForbiddenPage(w, r, "This feature is not available if you are logged in with OpenID")
+				s.renderForbiddenPage(w, r, err)
 			}
 			return
 		}
@@ -260,7 +297,7 @@ func (s *httpdServer) requireBuiltinLogin(next http.Handler) http.Handler {
 	})
 }
 
-func (s *httpdServer) checkPerm(perm string) func(next http.Handler) http.Handler {
+func (s *httpdServer) checkPerms(perms ...string) func(next http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			_, claims, err := jwtauth.FromContext(r.Context())
@@ -275,13 +312,15 @@ func (s *httpdServer) checkPerm(perm string) func(next http.Handler) http.Handle
 			tokenClaims := jwtTokenClaims{}
 			tokenClaims.Decode(claims)
 
-			if !tokenClaims.hasPerm(perm) {
-				if isWebRequest(r) {
-					s.renderForbiddenPage(w, r, "You don't have permission for this action")
-				} else {
-					sendAPIResponse(w, r, nil, http.StatusText(http.StatusForbidden), http.StatusForbidden)
+			for _, perm := range perms {
+				if !tokenClaims.hasPerm(perm) {
+					if isWebRequest(r) {
+						s.renderForbiddenPage(w, r, util.NewI18nError(fs.ErrPermission, util.I18nError403Message))
+					} else {
+						sendAPIResponse(w, r, nil, http.StatusText(http.StatusForbidden), http.StatusForbidden)
+					}
+					return
 				}
-				return
 			}
 
 			next.ServeHTTP(w, r)
@@ -289,28 +328,30 @@ func (s *httpdServer) checkPerm(perm string) func(next http.Handler) http.Handle
 	}
 }
 
-func verifyCSRFHeader(next http.Handler) http.Handler {
+func (s *httpdServer) verifyCSRFHeader(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		tokenString := r.Header.Get(csrfHeaderToken)
-		token, err := jwtauth.VerifyToken(csrfTokenAuth, tokenString)
+		token, err := jwtauth.VerifyToken(s.csrfTokenAuth, tokenString)
 		if err != nil || token == nil {
 			logger.Debug(logSender, "", "error validating CSRF header: %v", err)
 			sendAPIResponse(w, r, err, "Invalid token", http.StatusForbidden)
 			return
 		}
 
-		if !util.Contains(token.Audience(), tokenAudienceCSRF) {
+		if !slices.Contains(token.Audience(), tokenAudienceCSRF) {
 			logger.Debug(logSender, "", "error validating CSRF header token audience")
 			sendAPIResponse(w, r, errors.New("the token is not valid"), "", http.StatusForbidden)
 			return
 		}
 
-		if tokenValidationMode != tokenValidationNoIPMatch {
-			if !util.Contains(token.Audience(), util.GetIPFromRemoteAddress(r.RemoteAddr)) {
-				logger.Debug(logSender, "", "error validating CSRF header IP audience")
-				sendAPIResponse(w, r, errors.New("the token is not valid"), "", http.StatusForbidden)
-				return
-			}
+		if err := validateIPForToken(token, util.GetIPFromRemoteAddress(r.RemoteAddr)); err != nil {
+			logger.Debug(logSender, "", "error validating CSRF header IP audience")
+			sendAPIResponse(w, r, errors.New("the token is not valid"), "", http.StatusForbidden)
+			return
+		}
+		if err := checkCSRFTokenRef(r, token); err != nil {
+			sendAPIResponse(w, r, errors.New("the token is not valid"), "", http.StatusForbidden)
+			return
 		}
 
 		next.ServeHTTP(w, r)
@@ -376,8 +417,15 @@ func checkAPIKeyAuth(tokenAuth *jwtauth.JWTAuth, scope dataprovider.APIKeyScope)
 			k, err := dataprovider.APIKeyExists(keyID)
 			if err != nil {
 				handleDefenderEventLoginFailed(util.GetIPFromRemoteAddress(r.RemoteAddr), util.NewRecordNotFoundError("invalid api key")) //nolint:errcheck
-				logger.Debug(logSender, "invalid api key %q: %v", apiKey, err)
+				logger.Debug(logSender, "", "invalid api key %q: %v", apiKey, err)
 				sendAPIResponse(w, r, errors.New("the provided api key is not valid"), "", http.StatusBadRequest)
+				return
+			}
+			if k.Scope != scope {
+				handleDefenderEventLoginFailed(util.GetIPFromRemoteAddress(r.RemoteAddr), dataprovider.ErrInvalidCredentials) //nolint:errcheck
+				logger.Debug(logSender, "", "unable to authenticate api key %q: invalid scope: got %d, wanted: %d",
+					apiKey, k.Scope, scope)
+				sendAPIResponse(w, r, fmt.Errorf("the provided api key is invalid for this request"), "", http.StatusForbidden)
 				return
 			}
 			if err := k.Authenticate(key); err != nil {
@@ -398,6 +446,7 @@ func checkAPIKeyAuth(tokenAuth *jwtauth.JWTAuth, scope dataprovider.APIKeyScope)
 						"", http.StatusUnauthorized)
 					return
 				}
+				common.DelayLogin(nil)
 			} else {
 				if k.User != "" {
 					apiUser = k.User
@@ -406,7 +455,7 @@ func checkAPIKeyAuth(tokenAuth *jwtauth.JWTAuth, scope dataprovider.APIKeyScope)
 					logger.Debug(logSender, "", "unable to authenticate user %q associated with api key %q: %v",
 						apiUser, apiKey, err)
 					updateLoginMetrics(&dataprovider.User{BaseUser: sdk.BaseUser{Username: apiUser}},
-						dataprovider.LoginMethodPassword, util.GetIPFromRemoteAddress(r.RemoteAddr), err)
+						dataprovider.LoginMethodPassword, util.GetIPFromRemoteAddress(r.RemoteAddr), err, r)
 					code := http.StatusUnauthorized
 					if errors.Is(err, common.ErrInternalFailure) {
 						code = http.StatusInternalServerError
@@ -416,7 +465,7 @@ func checkAPIKeyAuth(tokenAuth *jwtauth.JWTAuth, scope dataprovider.APIKeyScope)
 					return
 				}
 				updateLoginMetrics(&dataprovider.User{BaseUser: sdk.BaseUser{Username: apiUser}},
-					dataprovider.LoginMethodPassword, util.GetIPFromRemoteAddress(r.RemoteAddr), nil)
+					dataprovider.LoginMethodPassword, util.GetIPFromRemoteAddress(r.RemoteAddr), nil, r)
 			}
 			dataprovider.UpdateAPIKeyLastUse(&k) //nolint:errcheck
 
@@ -470,6 +519,7 @@ func authenticateAdminWithAPIKey(username, keyID string, tokenAuth *jwtauth.JWTA
 	}
 	r.Header.Set("Authorization", fmt.Sprintf("Bearer %v", resp["access_token"]))
 	dataprovider.UpdateAdminLastLogin(&admin)
+	common.DelayLogin(nil)
 	return nil
 }
 
@@ -479,7 +529,7 @@ func authenticateUserWithAPIKey(username, keyID string, tokenAuth *jwtauth.JWTAu
 	if username == "" {
 		err := errors.New("the provided key is not associated with any user and no username was provided")
 		updateLoginMetrics(&dataprovider.User{BaseUser: sdk.BaseUser{Username: username}},
-			dataprovider.LoginMethodPassword, ipAddr, err)
+			dataprovider.LoginMethodPassword, ipAddr, err, r)
 		return err
 	}
 	if err := common.Config.ExecutePostConnectHook(ipAddr, protocol); err != nil {
@@ -488,27 +538,27 @@ func authenticateUserWithAPIKey(username, keyID string, tokenAuth *jwtauth.JWTAu
 	user, err := dataprovider.GetUserWithGroupSettings(username, "")
 	if err != nil {
 		updateLoginMetrics(&dataprovider.User{BaseUser: sdk.BaseUser{Username: username}},
-			dataprovider.LoginMethodPassword, ipAddr, err)
+			dataprovider.LoginMethodPassword, ipAddr, err, r)
 		return err
 	}
 	if !user.Filters.AllowAPIKeyAuth {
 		err := fmt.Errorf("API key authentication disabled for user %q", user.Username)
-		updateLoginMetrics(&user, dataprovider.LoginMethodPassword, ipAddr, err)
+		updateLoginMetrics(&user, dataprovider.LoginMethodPassword, ipAddr, err, r)
 		return err
 	}
 	if err := user.CheckLoginConditions(); err != nil {
-		updateLoginMetrics(&user, dataprovider.LoginMethodPassword, ipAddr, err)
+		updateLoginMetrics(&user, dataprovider.LoginMethodPassword, ipAddr, err, r)
 		return err
 	}
 	connectionID := fmt.Sprintf("%v_%v", protocol, xid.New().String())
-	if err := checkHTTPClientUser(&user, r, connectionID, true); err != nil {
-		updateLoginMetrics(&user, dataprovider.LoginMethodPassword, ipAddr, err)
+	if err := checkHTTPClientUser(&user, r, connectionID, true, false); err != nil {
+		updateLoginMetrics(&user, dataprovider.LoginMethodPassword, ipAddr, err, r)
 		return err
 	}
 	defer user.CloseFs() //nolint:errcheck
 	err = user.CheckFsRoot(connectionID)
 	if err != nil {
-		updateLoginMetrics(&user, dataprovider.LoginMethodPassword, ipAddr, common.ErrInternalFailure)
+		updateLoginMetrics(&user, dataprovider.LoginMethodPassword, ipAddr, common.ErrInternalFailure, r)
 		return common.ErrInternalFailure
 	}
 	c := jwtTokenClaims{
@@ -521,24 +571,38 @@ func authenticateUserWithAPIKey(username, keyID string, tokenAuth *jwtauth.JWTAu
 
 	resp, err := c.createTokenResponse(tokenAuth, tokenAudienceAPIUser, ipAddr)
 	if err != nil {
-		updateLoginMetrics(&user, dataprovider.LoginMethodPassword, ipAddr, common.ErrInternalFailure)
+		updateLoginMetrics(&user, dataprovider.LoginMethodPassword, ipAddr, common.ErrInternalFailure, r)
 		return err
 	}
 	r.Header.Set("Authorization", fmt.Sprintf("Bearer %v", resp["access_token"]))
 	dataprovider.UpdateLastLogin(&user)
-	updateLoginMetrics(&user, dataprovider.LoginMethodPassword, ipAddr, nil)
+	updateLoginMetrics(&user, dataprovider.LoginMethodPassword, ipAddr, nil, r)
 
 	return nil
 }
 
 func checkPartialAuth(w http.ResponseWriter, r *http.Request, audience string, tokenAudience []string) error {
-	if audience == tokenAudienceWebAdmin && util.Contains(tokenAudience, tokenAudienceWebAdminPartial) {
+	if audience == tokenAudienceWebAdmin && slices.Contains(tokenAudience, tokenAudienceWebAdminPartial) {
 		http.Redirect(w, r, webAdminTwoFactorPath, http.StatusFound)
 		return errInvalidToken
 	}
-	if audience == tokenAudienceWebClient && util.Contains(tokenAudience, tokenAudienceWebClientPartial) {
+	if audience == tokenAudienceWebClient && slices.Contains(tokenAudience, tokenAudienceWebClientPartial) {
 		http.Redirect(w, r, webClientTwoFactorPath, http.StatusFound)
 		return errInvalidToken
 	}
 	return nil
+}
+
+func cacheControlMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-cache, no-store, max-age=0, must-revalidate, private")
+		next.ServeHTTP(w, r)
+	})
+}
+
+func cleanCacheControlMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Del("Cache-Control")
+		next.ServeHTTP(w, r)
+	})
 }

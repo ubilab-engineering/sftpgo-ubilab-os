@@ -1,6 +1,6 @@
 #!/bin/bash
 
-NFPM_VERSION=2.27.1
+NFPM_VERSION=2.42.0
 NFPM_ARCH=${NFPM_ARCH:-amd64}
 if [ -z ${SFTPGO_VERSION} ]
 then
@@ -52,7 +52,7 @@ section: "net"
 priority: "optional"
 maintainer: "Nicola Murino <nicola.murino@gmail.com>"
 description: |
-  Fully featured and highly configurable SFTP server
+  Full-featured and highly configurable SFTP server
   SFTPGo has optional HTTP, FTP/S and WebDAV support.
   It can serve local filesystem, S3 (Compatible) Object Storage,
   Google Cloud Storage, Azure Blob Storage, SFTP.
@@ -82,6 +82,12 @@ contents:
 
   - src: "${BASE_DIR}/openapi/*"
     dst: "/usr/share/sftpgo/openapi"
+
+  - src: "${BASE_DIR}/LICENSE"
+    dst: "/usr/share/licenses/sftpgo/LICENSE"
+
+  - src: "${BASE_DIR}/NOTICE"
+    dst: "/usr/share/licenses/sftpgo/NOTICE"
 
   - src: "./sftpgo.json"
     dst: "/etc/sftpgo/sftpgo.json"

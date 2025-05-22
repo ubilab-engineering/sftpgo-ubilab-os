@@ -1,4 +1,4 @@
-// Copyright (C) 2019-2023 Nicola Murino
+// Copyright (C) 2019 Nicola Murino
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published
@@ -62,7 +62,7 @@ func (d *dbDefender) GetHost(ip string) (dataprovider.DefenderEntry, error) {
 // and increase ban time if the IP is found.
 // This method must be called as soon as the client connects
 func (d *dbDefender) IsBanned(ip, protocol string) bool {
-	if d.baseDefender.isBanned(ip, protocol) {
+	if d.isBanned(ip, protocol) {
 		return true
 	}
 
@@ -88,26 +88,29 @@ func (d *dbDefender) DeleteHost(ip string) bool {
 }
 
 // AddEvent adds an event for the given IP.
-// This method must be called for clients not yet banned
-func (d *dbDefender) AddEvent(ip, protocol string, event HostEvent) {
+// This method must be called for clients not yet banned.
+// Returns true if the IP is in the defender's safe list.
+func (d *dbDefender) AddEvent(ip, protocol string, event HostEvent) bool {
 	if d.IsSafe(ip, protocol) {
-		return
+		return true
 	}
 
-	score := d.baseDefender.getScore(event)
+	score := d.getScore(event)
 
 	host, err := dataprovider.AddDefenderEvent(ip, score, d.getStartObservationTime())
 	if err != nil {
-		return
+		return false
 	}
+	d.logEvent(ip, protocol, event, host.Score)
 	if host.Score > d.config.Threshold {
+		d.logBan(ip, protocol)
 		banTime := time.Now().Add(time.Duration(d.config.BanTime) * time.Minute)
 		err = dataprovider.SetDefenderBanTime(ip, util.GetTimeAsMsSinceEpoch(banTime))
 		if err == nil {
 			eventManager.handleIPBlockedEvent(EventParams{
 				Event:     ipBlockedEventName,
 				IP:        ip,
-				Timestamp: time.Now().UnixNano(),
+				Timestamp: time.Now(),
 				Status:    1,
 			})
 		}
@@ -116,6 +119,7 @@ func (d *dbDefender) AddEvent(ip, protocol string, event HostEvent) {
 	if err == nil {
 		d.cleanup()
 	}
+	return false
 }
 
 // GetBanTime returns the ban time for the given IP or nil if the IP is not banned

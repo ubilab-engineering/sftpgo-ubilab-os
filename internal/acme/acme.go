@@ -1,4 +1,4 @@
-// Copyright (C) 2019-2023 Nicola Murino
+// Copyright (C) 2019 Nicola Murino
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published
@@ -30,6 +30,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -43,6 +44,7 @@ import (
 	"github.com/go-acme/lego/v4/log"
 	"github.com/go-acme/lego/v4/providers/http/webroot"
 	"github.com/go-acme/lego/v4/registration"
+	"github.com/hashicorp/go-retryablehttp"
 	"github.com/robfig/cron/v3"
 
 	"github.com/drakkan/sftpgo/v2/internal/common"
@@ -68,6 +70,7 @@ var (
 		string(certcrypto.EC256),
 		string(certcrypto.EC384),
 		string(certcrypto.RSA2048),
+		string(certcrypto.RSA3072),
 		string(certcrypto.RSA4096),
 		string(certcrypto.RSA8192),
 	}
@@ -240,12 +243,15 @@ func (c *Configuration) Initialize(configDir string) error {
 		return nil
 	}
 	if c.Email == "" || !util.IsEmailValid(c.Email) {
-		return fmt.Errorf("invalid email address %q", c.Email)
+		return util.NewI18nError(
+			fmt.Errorf("invalid email address %q", c.Email),
+			util.I18nErrorInvalidEmail,
+		)
 	}
 	if c.RenewDays < 1 {
 		return fmt.Errorf("invalid number of days remaining before renewal: %d", c.RenewDays)
 	}
-	if !util.Contains(supportedKeyTypes, c.KeyType) {
+	if !slices.Contains(supportedKeyTypes, c.KeyType) {
 		return fmt.Errorf("invalid key type %q", c.KeyType)
 	}
 	caURL, err := url.Parse(c.CAEndpoint)
@@ -325,7 +331,7 @@ func (c *Configuration) getLockTime() (time.Time, error) {
 		acmeLog(logger.LevelError, "unable to read lock file %q: %v", c.lockPath, err)
 		return time.Time{}, err
 	}
-	msec, err := strconv.ParseInt(strings.TrimSpace(string(content)), 10, 64)
+	msec, err := strconv.ParseInt(strings.TrimSpace(util.BytesToString(content)), 10, 64)
 	if err != nil {
 		acmeLog(logger.LevelError, "unable to parse lock time: %v", err)
 		return time.Time{}, fmt.Errorf("unable to parse lock time: %w", err)
@@ -389,6 +395,10 @@ func (c *Configuration) loadPrivateKey() (crypto.PrivateKey, error) {
 	}
 
 	keyBlock, _ := pem.Decode(keyBytes)
+	if keyBlock == nil {
+		acmeLog(logger.LevelError, "unable to parse private key from file %q: pem decoding failed", c.accountKeyPath)
+		return nil, errors.New("pem decoding failed")
+	}
 
 	var privateKey crypto.PrivateKey
 	switch keyBlock.Type {
@@ -481,7 +491,16 @@ func (c *Configuration) setup() (*account, *lego.Client, error) {
 	config := lego.NewConfig(&account)
 	config.CADirURL = c.CAEndpoint
 	config.Certificate.KeyType = certcrypto.KeyType(c.KeyType)
-	config.UserAgent = fmt.Sprintf("SFTPGo/%v", version.Get().Version)
+	config.Certificate.OverallRequestLimit = 6
+	config.UserAgent = version.GetServerVersion("/", false)
+
+	retryClient := retryablehttp.NewClient()
+	retryClient.Logger = &logger.LeveledLogger{Sender: "RetryableHTTPClient"}
+	retryClient.RetryMax = 5
+	retryClient.HTTPClient = config.HTTPClient
+
+	config.HTTPClient = retryClient.StandardClient()
+
 	client, err := lego.NewClient(config)
 	if err != nil {
 		acmeLog(logger.LevelError, "unable to get ACME client: %v", err)
@@ -547,7 +566,14 @@ func (c *Configuration) register(client *lego.Client) (*registration.Resource, e
 func (c *Configuration) tryRecoverRegistration(privateKey crypto.PrivateKey) (*registration.Resource, error) {
 	config := lego.NewConfig(&account{key: privateKey})
 	config.CADirURL = c.CAEndpoint
-	config.UserAgent = fmt.Sprintf("SFTPGo/%v", version.Get().Version)
+	config.UserAgent = version.GetServerVersion("/", false)
+
+	retryClient := retryablehttp.NewClient()
+	retryClient.Logger = &logger.LeveledLogger{Sender: "RetryableHTTPClient"}
+	retryClient.RetryMax = 5
+	retryClient.HTTPClient = config.HTTPClient
+
+	config.HTTPClient = retryClient.StandardClient()
 
 	client, err := lego.NewClient(config)
 	if err != nil {
@@ -663,7 +689,7 @@ func (c *Configuration) notifyCertificateRenewal(domain string, err error) {
 	params := common.EventParams{
 		Name:      domain,
 		Event:     "Certificate renewal",
-		Timestamp: time.Now().UnixNano(),
+		Timestamp: time.Now(),
 	}
 	if err != nil {
 		params.Status = 2

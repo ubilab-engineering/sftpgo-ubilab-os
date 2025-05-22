@@ -1,4 +1,4 @@
-// Copyright (C) 2019-2023 Nicola Murino
+// Copyright (C) 2019 Nicola Murino
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published
@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"path"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -44,51 +45,58 @@ const (
 	ActionTypeTransferQuotaReset
 	ActionTypeDataRetentionCheck
 	ActionTypeFilesystem
-	ActionTypeMetadataCheck
+	actionTypeReserved
 	ActionTypePasswordExpirationCheck
 	ActionTypeUserExpirationCheck
 	ActionTypeIDPAccountCheck
+	ActionTypeUserInactivityCheck
+	ActionTypeRotateLogs
 )
 
 var (
 	supportedEventActions = []int{ActionTypeHTTP, ActionTypeCommand, ActionTypeEmail, ActionTypeFilesystem,
 		ActionTypeBackup, ActionTypeUserQuotaReset, ActionTypeFolderQuotaReset, ActionTypeTransferQuotaReset,
-		ActionTypeDataRetentionCheck, ActionTypeMetadataCheck, ActionTypePasswordExpirationCheck,
-		ActionTypeUserExpirationCheck, ActionTypeIDPAccountCheck}
+		ActionTypeDataRetentionCheck, ActionTypePasswordExpirationCheck, ActionTypeUserExpirationCheck,
+		ActionTypeUserInactivityCheck, ActionTypeIDPAccountCheck, ActionTypeRotateLogs}
+	// EnabledActionCommands defines the system commands that can be executed via EventManager,
+	// an empty list means that no command is allowed to be executed.
+	EnabledActionCommands []string
 )
 
 func isActionTypeValid(action int) bool {
-	return util.Contains(supportedEventActions, action)
+	return slices.Contains(supportedEventActions, action)
 }
 
 func getActionTypeAsString(action int) string {
 	switch action {
 	case ActionTypeHTTP:
-		return "HTTP"
+		return util.I18nActionTypeHTTP
 	case ActionTypeEmail:
-		return "Email"
+		return util.I18nActionTypeEmail
 	case ActionTypeBackup:
-		return "Backup"
+		return util.I18nActionTypeBackup
 	case ActionTypeUserQuotaReset:
-		return "User quota reset"
+		return util.I18nActionTypeUserQuotaReset
 	case ActionTypeFolderQuotaReset:
-		return "Folder quota reset"
+		return util.I18nActionTypeFolderQuotaReset
 	case ActionTypeTransferQuotaReset:
-		return "Transfer quota reset"
+		return util.I18nActionTypeTransferQuotaReset
 	case ActionTypeDataRetentionCheck:
-		return "Data retention check"
-	case ActionTypeMetadataCheck:
-		return "Metadata check"
+		return util.I18nActionTypeDataRetentionCheck
 	case ActionTypeFilesystem:
-		return "Filesystem"
+		return util.I18nActionTypeFilesystem
 	case ActionTypePasswordExpirationCheck:
-		return "Password expiration check"
+		return util.I18nActionTypePwdExpirationCheck
 	case ActionTypeUserExpirationCheck:
-		return "User expiration check"
+		return util.I18nActionTypeUserExpirationCheck
+	case ActionTypeUserInactivityCheck:
+		return util.I18nActionTypeUserInactivityCheck
 	case ActionTypeIDPAccountCheck:
-		return "Identity Provider account check"
+		return util.I18nActionTypeIDPCheck
+	case ActionTypeRotateLogs:
+		return util.I18nActionTypeRotateLogs
 	default:
-		return "Command"
+		return util.I18nActionTypeCommand
 	}
 }
 
@@ -111,25 +119,25 @@ var (
 )
 
 func isEventTriggerValid(trigger int) bool {
-	return util.Contains(supportedEventTriggers, trigger)
+	return slices.Contains(supportedEventTriggers, trigger)
 }
 
 func getTriggerTypeAsString(trigger int) string {
 	switch trigger {
 	case EventTriggerFsEvent:
-		return "Filesystem event"
+		return util.I18nTriggerFsEvent
 	case EventTriggerProviderEvent:
-		return "Provider event"
+		return util.I18nTriggerProviderEvent
 	case EventTriggerIPBlocked:
-		return "IP blocked"
+		return util.I18nTriggerIPBlockedEvent
 	case EventTriggerCertificate:
-		return "Certificate renewal"
+		return util.I18nTriggerCertificateRenewEvent
 	case EventTriggerOnDemand:
-		return "On demand"
+		return util.I18nTriggerOnDemandEvent
 	case EventTriggerIDPLogin:
-		return "Identity Provider login"
+		return util.I18nTriggerIDPLoginEvent
 	default:
-		return "Schedule"
+		return util.I18nTriggerScheduleEvent
 	}
 }
 
@@ -165,23 +173,23 @@ var (
 )
 
 func isFilesystemActionValid(value int) bool {
-	return util.Contains(supportedFsActions, value)
+	return slices.Contains(supportedFsActions, value)
 }
 
 func getFsActionTypeAsString(value int) string {
 	switch value {
 	case FilesystemActionRename:
-		return "Rename"
+		return util.I18nActionFsTypeRename
 	case FilesystemActionDelete:
-		return "Delete"
+		return util.I18nActionFsTypeDelete
 	case FilesystemActionExist:
-		return "Paths exist"
+		return util.I18nActionFsTypePathExists
 	case FilesystemActionCompress:
-		return "Compress"
+		return util.I18nActionFsTypeCompress
 	case FilesystemActionCopy:
-		return "Copy"
+		return util.I18nActionFsTypeCopy
 	default:
-		return "Create directories"
+		return util.I18nActionFsTypeCreateDirs
 	}
 }
 
@@ -199,7 +207,7 @@ var (
 	SupporteRuleConditionProviderObjects = []string{actionObjectUser, actionObjectFolder, actionObjectGroup,
 		actionObjectAdmin, actionObjectAPIKey, actionObjectShare, actionObjectEventRule, actionObjectEventAction}
 	// SupportedHTTPActionMethods defines the supported methods for HTTP actions
-	SupportedHTTPActionMethods = []string{http.MethodPost, http.MethodGet, http.MethodPut}
+	SupportedHTTPActionMethods = []string{http.MethodPost, http.MethodGet, http.MethodPut, http.MethodDelete}
 	allowedSyncFsEvents        = []string{"upload", "pre-upload", "pre-download", "pre-delete"}
 	mandatorySyncFsEvents      = []string{"pre-upload", "pre-download", "pre-delete"}
 )
@@ -259,7 +267,7 @@ type HTTPPart struct {
 
 func (p *HTTPPart) validate() error {
 	if p.Name == "" {
-		return util.NewValidationError("HTTP part name is required")
+		return util.NewI18nError(util.NewValidationError("HTTP part name is required"), util.I18nErrorHTTPPartNameRequired)
 	}
 	for _, kv := range p.Headers {
 		if kv.isNotValid() {
@@ -268,7 +276,10 @@ func (p *HTTPPart) validate() error {
 	}
 	if p.Filepath == "" {
 		if p.Body == "" {
-			return util.NewValidationError("HTTP part body is required if no file path is provided")
+			return util.NewI18nError(
+				util.NewValidationError("HTTP part body is required if no file path is provided"),
+				util.I18nErrorHTTPPartBodyRequired,
+			)
 		}
 	} else {
 		p.Body = ""
@@ -318,18 +329,24 @@ func (c *EventActionHTTPConfig) validateMultiparts() error {
 		}
 		if filePath := c.Parts[idx].Filepath; filePath != "" {
 			if filePaths[filePath] {
-				return fmt.Errorf("filepath %q is duplicated", filePath)
+				return util.NewI18nError(fmt.Errorf("filepath %q is duplicated", filePath), util.I18nErrorPathDuplicated)
 			}
 			filePaths[filePath] = true
 		}
 	}
 	if len(c.Parts) > 0 {
 		if c.Body != "" {
-			return util.NewValidationError("multipart requests require no body. The request body is build from the specified parts")
+			return util.NewI18nError(
+				util.NewValidationError("multipart requests require no body. The request body is build from the specified parts"),
+				util.I18nErrorMultipartBody,
+			)
 		}
 		for _, k := range c.Headers {
-			if strings.ToLower(k.Key) == "content-type" {
-				return util.NewValidationError("content type is automatically set for multipart requests")
+			if strings.EqualFold(k.Key, "content-type") {
+				return util.NewI18nError(
+					util.NewValidationError("content type is automatically set for multipart requests"),
+					util.I18nErrorMultipartCType,
+				)
 			}
 		}
 	}
@@ -338,10 +355,13 @@ func (c *EventActionHTTPConfig) validateMultiparts() error {
 
 func (c *EventActionHTTPConfig) validate(additionalData string) error {
 	if c.Endpoint == "" {
-		return util.NewValidationError("HTTP endpoint is required")
+		return util.NewI18nError(util.NewValidationError("HTTP endpoint is required"), util.I18nErrorURLRequired)
 	}
 	if !util.IsStringPrefixInSlice(c.Endpoint, []string{"http://", "https://"}) {
-		return util.NewValidationError("invalid HTTP endpoint schema: http and https are supported")
+		return util.NewI18nError(
+			util.NewValidationError("invalid HTTP endpoint schema: http and https are supported"),
+			util.I18nErrorURLInvalid,
+		)
 	}
 	if c.isTimeoutNotValid() {
 		return util.NewValidationError(fmt.Sprintf("invalid HTTP timeout %d", c.Timeout))
@@ -364,7 +384,7 @@ func (c *EventActionHTTPConfig) validate(additionalData string) error {
 			return util.NewValidationError(fmt.Sprintf("could not encrypt HTTP password: %v", err))
 		}
 	}
-	if !util.Contains(SupportedHTTPActionMethods, c.Method) {
+	if !slices.Contains(SupportedHTTPActionMethods, c.Method) {
 		return util.NewValidationError(fmt.Sprintf("unsupported HTTP method: %s", c.Method))
 	}
 	for _, kv := range c.QueryParameters {
@@ -385,11 +405,11 @@ func (c *EventActionHTTPConfig) GetContext() (context.Context, context.CancelFun
 
 // HasObjectData returns true if the {{ObjectData}} placeholder is defined
 func (c *EventActionHTTPConfig) HasObjectData() bool {
-	if strings.Contains(c.Body, "{{ObjectData}}") {
+	if strings.Contains(c.Body, "{{ObjectData}}") || strings.Contains(c.Body, "{{ObjectDataString}}") {
 		return true
 	}
 	for _, part := range c.Parts {
-		if strings.Contains(part.Body, "{{ObjectData}}") {
+		if strings.Contains(part.Body, "{{ObjectData}}") || strings.Contains(part.Body, "{{ObjectDataString}}") {
 			return true
 		}
 	}
@@ -425,13 +445,17 @@ func (c *EventActionHTTPConfig) GetHTTPClient() *http.Client {
 			transport.TLSClientConfig.InsecureSkipVerify = true
 		} else {
 			transport.TLSClientConfig = &tls.Config{
-				NextProtos:         []string{"http/1.1", "h2"},
 				InsecureSkipVerify: true,
 			}
 		}
 		client.Transport = transport
 	}
 	return client
+}
+
+// IsActionCommandAllowed returns true if the specified command is allowed
+func IsActionCommandAllowed(cmd string) bool {
+	return slices.Contains(EnabledActionCommands, cmd)
 }
 
 // EventActionCommandConfig defines the configuration for a command event target
@@ -444,10 +468,16 @@ type EventActionCommandConfig struct {
 
 func (c *EventActionCommandConfig) validate() error {
 	if c.Cmd == "" {
-		return util.NewValidationError("command is required")
+		return util.NewI18nError(util.NewValidationError("command is required"), util.I18nErrorCommandRequired)
+	}
+	if !IsActionCommandAllowed(c.Cmd) {
+		return util.NewValidationError(fmt.Sprintf("command %q is not allowed", c.Cmd))
 	}
 	if !filepath.IsAbs(c.Cmd) {
-		return util.NewValidationError("invalid command, it must be an absolute path")
+		return util.NewI18nError(
+			util.NewValidationError("invalid command, it must be an absolute path"),
+			util.I18nErrorCommandInvalid,
+		)
 	}
 	if c.Timeout < 1 || c.Timeout > 120 {
 		return util.NewValidationError(fmt.Sprintf("invalid command action timeout %d", c.Timeout))
@@ -474,14 +504,21 @@ func (c EventActionCommandConfig) GetArgumentsAsString() string {
 // EventActionEmailConfig defines the configuration options for SMTP event actions
 type EventActionEmailConfig struct {
 	Recipients  []string `json:"recipients,omitempty"`
+	Bcc         []string `json:"bcc,omitempty"`
 	Subject     string   `json:"subject,omitempty"`
 	Body        string   `json:"body,omitempty"`
 	Attachments []string `json:"attachments,omitempty"`
+	ContentType int      `json:"content_type,omitempty"`
 }
 
 // GetRecipientsAsString returns the list of recipients as comma separated string
 func (c EventActionEmailConfig) GetRecipientsAsString() string {
 	return strings.Join(c.Recipients, ",")
+}
+
+// GetBccAsString returns the list of bcc as comma separated string
+func (c EventActionEmailConfig) GetBccAsString() string {
+	return strings.Join(c.Bcc, ",")
 }
 
 // GetAttachmentsAsString returns the list of attachments as comma separated string
@@ -500,7 +537,10 @@ func (c *EventActionEmailConfig) hasFilesAttachments() bool {
 
 func (c *EventActionEmailConfig) validate() error {
 	if len(c.Recipients) == 0 {
-		return util.NewValidationError("at least one email recipient is required")
+		return util.NewI18nError(
+			util.NewValidationError("at least one email recipient is required"),
+			util.I18nErrorEmailRecipientRequired,
+		)
 	}
 	c.Recipients = util.RemoveDuplicates(c.Recipients, false)
 	for _, r := range c.Recipients {
@@ -508,11 +548,26 @@ func (c *EventActionEmailConfig) validate() error {
 			return util.NewValidationError("invalid email recipients")
 		}
 	}
+	c.Bcc = util.RemoveDuplicates(c.Bcc, false)
+	for _, r := range c.Bcc {
+		if r == "" {
+			return util.NewValidationError("invalid email bcc")
+		}
+	}
 	if c.Subject == "" {
-		return util.NewValidationError("email subject is required")
+		return util.NewI18nError(
+			util.NewValidationError("email subject is required"),
+			util.I18nErrorEmailSubjectRequired,
+		)
 	}
 	if c.Body == "" {
-		return util.NewValidationError("email body is required")
+		return util.NewI18nError(
+			util.NewValidationError("email body is required"),
+			util.I18nErrorEmailBodyRequired,
+		)
+	}
+	if c.ContentType < 0 || c.ContentType > 1 {
+		return util.NewValidationError("invalid email content type")
 	}
 	for idx, val := range c.Attachments {
 		val = strings.TrimSpace(val)
@@ -541,10 +596,6 @@ type FolderRetention struct {
 	// DeleteEmptyDirs defines if empty directories will be deleted.
 	// The user need the delete permission
 	DeleteEmptyDirs bool `json:"delete_empty_dirs,omitempty"`
-	// IgnoreUserPermissions defines whether to delete files even if the user does not have the delete permission.
-	// The default is "false" which means that files will be skipped if the user does not have the permission
-	// to delete them. This applies to sub directories too.
-	IgnoreUserPermissions bool `json:"ignore_user_permissions,omitempty"`
 }
 
 // Validate returns an error if the configuration is not valid
@@ -574,12 +625,18 @@ func (c *EventActionDataRetentionConfig) validate() error {
 			nothingToDo = false
 		}
 		if _, ok := folderPaths[f.Path]; ok {
-			return util.NewValidationError(fmt.Sprintf("duplicated folder path %q", f.Path))
+			return util.NewI18nError(
+				util.NewValidationError(fmt.Sprintf("duplicated folder path %q", f.Path)),
+				util.I18nErrorPathDuplicated,
+			)
 		}
 		folderPaths[f.Path] = true
 	}
 	if nothingToDo {
-		return util.NewValidationError("nothing to delete!")
+		return util.NewI18nError(
+			util.NewValidationError("nothing to delete!"),
+			util.I18nErrorRetentionDirRequired,
+		)
 	}
 	return nil
 }
@@ -594,14 +651,14 @@ type EventActionFsCompress struct {
 
 func (c *EventActionFsCompress) validate() error {
 	if c.Name == "" {
-		return util.NewValidationError("archive name is mandatory")
+		return util.NewI18nError(util.NewValidationError("archive name is mandatory"), util.I18nErrorArchiveNameRequired)
 	}
 	c.Name = util.CleanPath(strings.TrimSpace(c.Name))
 	if c.Name == "/" {
-		return util.NewValidationError("invalid archive name")
+		return util.NewI18nError(util.NewValidationError("invalid archive name"), util.I18nErrorRootNotAllowed)
 	}
 	if len(c.Paths) == 0 {
-		return util.NewValidationError("no path to compress specified")
+		return util.NewI18nError(util.NewValidationError("no path to compress specified"), util.I18nErrorPathRequired)
 	}
 	for idx, val := range c.Paths {
 		val = strings.TrimSpace(val)
@@ -614,12 +671,21 @@ func (c *EventActionFsCompress) validate() error {
 	return nil
 }
 
+// RenameConfig defines the configuration for a filesystem rename
+type RenameConfig struct {
+	// key is the source and target the value
+	KeyValue
+	// This setting only applies to storage providers that support
+	// changing modification times.
+	UpdateModTime bool `json:"update_modtime,omitempty"`
+}
+
 // EventActionFilesystemConfig defines the configuration for filesystem actions
 type EventActionFilesystemConfig struct {
 	// Filesystem actions, see the above enum
 	Type int `json:"type,omitempty"`
-	// files/dirs to rename, key is the source and target the value
-	Renames []KeyValue `json:"renames,omitempty"`
+	// files/dirs to rename
+	Renames []RenameConfig `json:"renames,omitempty"`
 	// directories to create
 	MkDirs []string `json:"mkdirs,omitempty"`
 	// files/dirs to delete
@@ -658,25 +724,34 @@ func (c EventActionFilesystemConfig) GetCompressPathsAsString() string {
 
 func (c *EventActionFilesystemConfig) validateRenames() error {
 	if len(c.Renames) == 0 {
-		return util.NewValidationError("no path to rename specified")
+		return util.NewI18nError(util.NewValidationError("no path to rename specified"), util.I18nErrorPathRequired)
 	}
-	for idx, kv := range c.Renames {
-		key := strings.TrimSpace(kv.Key)
-		value := strings.TrimSpace(kv.Value)
+	for idx, cfg := range c.Renames {
+		key := strings.TrimSpace(cfg.Key)
+		value := strings.TrimSpace(cfg.Value)
 		if key == "" || value == "" {
 			return util.NewValidationError("invalid paths to rename")
 		}
 		key = util.CleanPath(key)
 		value = util.CleanPath(value)
 		if key == value {
-			return util.NewValidationError("rename source and target cannot be equal")
+			return util.NewI18nError(
+				util.NewValidationError("rename source and target cannot be equal"),
+				util.I18nErrorSourceDestMatch,
+			)
 		}
 		if key == "/" || value == "/" {
-			return util.NewValidationError("renaming the root directory is not allowed")
+			return util.NewI18nError(
+				util.NewValidationError("renaming the root directory is not allowed"),
+				util.I18nErrorRootNotAllowed,
+			)
 		}
-		c.Renames[idx] = KeyValue{
-			Key:   key,
-			Value: value,
+		c.Renames[idx] = RenameConfig{
+			KeyValue: KeyValue{
+				Key:   key,
+				Value: value,
+			},
+			UpdateModTime: cfg.UpdateModTime,
 		}
 	}
 	return nil
@@ -684,7 +759,7 @@ func (c *EventActionFilesystemConfig) validateRenames() error {
 
 func (c *EventActionFilesystemConfig) validateCopy() error {
 	if len(c.Copy) == 0 {
-		return util.NewValidationError("no path to copy specified")
+		return util.NewI18nError(util.NewValidationError("no path to copy specified"), util.I18nErrorPathRequired)
 	}
 	for idx, kv := range c.Copy {
 		key := strings.TrimSpace(kv.Key)
@@ -695,10 +770,16 @@ func (c *EventActionFilesystemConfig) validateCopy() error {
 		key = util.CleanPath(key)
 		value = util.CleanPath(value)
 		if key == value {
-			return util.NewValidationError("copy source and target cannot be equal")
+			return util.NewI18nError(
+				util.NewValidationError("copy source and target cannot be equal"),
+				util.I18nErrorSourceDestMatch,
+			)
 		}
 		if key == "/" || value == "/" {
-			return util.NewValidationError("copying the root directory is not allowed")
+			return util.NewI18nError(
+				util.NewValidationError("copying the root directory is not allowed"),
+				util.I18nErrorRootNotAllowed,
+			)
 		}
 		if strings.HasSuffix(c.Copy[idx].Key, "/") {
 			key += "/"
@@ -716,7 +797,7 @@ func (c *EventActionFilesystemConfig) validateCopy() error {
 
 func (c *EventActionFilesystemConfig) validateDeletes() error {
 	if len(c.Deletes) == 0 {
-		return util.NewValidationError("no path to delete specified")
+		return util.NewI18nError(util.NewValidationError("no path to delete specified"), util.I18nErrorPathRequired)
 	}
 	for idx, val := range c.Deletes {
 		val = strings.TrimSpace(val)
@@ -731,7 +812,7 @@ func (c *EventActionFilesystemConfig) validateDeletes() error {
 
 func (c *EventActionFilesystemConfig) validateMkdirs() error {
 	if len(c.MkDirs) == 0 {
-		return util.NewValidationError("no directory to create specified")
+		return util.NewI18nError(util.NewValidationError("no directory to create specified"), util.I18nErrorPathRequired)
 	}
 	for idx, val := range c.MkDirs {
 		val = strings.TrimSpace(val)
@@ -746,7 +827,7 @@ func (c *EventActionFilesystemConfig) validateMkdirs() error {
 
 func (c *EventActionFilesystemConfig) validateExist() error {
 	if len(c.Exist) == 0 {
-		return util.NewValidationError("no path to check for existence specified")
+		return util.NewI18nError(util.NewValidationError("no path to check for existence specified"), util.I18nErrorPathRequired)
 	}
 	for idx, val := range c.Exist {
 		val = strings.TrimSpace(val)
@@ -834,7 +915,7 @@ func (c *EventActionFilesystemConfig) getACopy() EventActionFilesystemConfig {
 
 	return EventActionFilesystemConfig{
 		Type:    c.Type,
-		Renames: cloneKeyValues(c.Renames),
+		Renames: cloneRenameConfigs(c.Renames),
 		MkDirs:  mkdirs,
 		Deletes: deletes,
 		Exist:   exist,
@@ -860,6 +941,38 @@ func (c *EventActionPasswordExpiration) validate() error {
 	return nil
 }
 
+// EventActionUserInactivity defines the configuration for user inactivity checks.
+type EventActionUserInactivity struct {
+	// DisableThreshold defines inactivity in days, since the last login before disabling the account
+	DisableThreshold int `json:"disable_threshold,omitempty"`
+	// DeleteThreshold defines inactivity in days, since the last login before deleting the account
+	DeleteThreshold int `json:"delete_threshold,omitempty"`
+}
+
+func (c *EventActionUserInactivity) validate() error {
+	if c.DeleteThreshold < 0 {
+		c.DeleteThreshold = 0
+	}
+	if c.DisableThreshold < 0 {
+		c.DisableThreshold = 0
+	}
+	if c.DisableThreshold == 0 && c.DeleteThreshold == 0 {
+		return util.NewI18nError(
+			util.NewValidationError("at least a threshold must be defined"),
+			util.I18nActionThresholdRequired,
+		)
+	}
+	if c.DeleteThreshold > 0 && c.DisableThreshold > 0 {
+		if c.DeleteThreshold <= c.DisableThreshold {
+			return util.NewI18nError(
+				util.NewValidationError(fmt.Sprintf("deletion threshold %d must be greater than deactivation threshold: %d", c.DeleteThreshold, c.DisableThreshold)),
+				util.I18nActionThresholdsInvalid,
+			)
+		}
+	}
+	return nil
+}
+
 // EventActionIDPAccountCheck defines the check to execute after a successful IDP login
 type EventActionIDPAccountCheck struct {
 	// 0 create/update, 1 create the account if it doesn't exist
@@ -870,7 +983,10 @@ type EventActionIDPAccountCheck struct {
 
 func (c *EventActionIDPAccountCheck) validate() error {
 	if c.TemplateAdmin == "" && c.TemplateUser == "" {
-		return util.NewValidationError("at least a template must be set")
+		return util.NewI18nError(
+			util.NewValidationError("at least a template must be set"),
+			util.I18nErrorIDPTemplateRequired,
+		)
 	}
 	if c.Mode < 0 || c.Mode > 1 {
 		return util.NewValidationError(fmt.Sprintf("invalid account check mode: %d", c.Mode))
@@ -880,19 +996,22 @@ func (c *EventActionIDPAccountCheck) validate() error {
 
 // BaseEventActionOptions defines the supported configuration options for a base event actions
 type BaseEventActionOptions struct {
-	HTTPConfig          EventActionHTTPConfig          `json:"http_config"`
-	CmdConfig           EventActionCommandConfig       `json:"cmd_config"`
-	EmailConfig         EventActionEmailConfig         `json:"email_config"`
-	RetentionConfig     EventActionDataRetentionConfig `json:"retention_config"`
-	FsConfig            EventActionFilesystemConfig    `json:"fs_config"`
-	PwdExpirationConfig EventActionPasswordExpiration  `json:"pwd_expiration_config"`
-	IDPConfig           EventActionIDPAccountCheck     `json:"idp_config"`
+	HTTPConfig           EventActionHTTPConfig          `json:"http_config"`
+	CmdConfig            EventActionCommandConfig       `json:"cmd_config"`
+	EmailConfig          EventActionEmailConfig         `json:"email_config"`
+	RetentionConfig      EventActionDataRetentionConfig `json:"retention_config"`
+	FsConfig             EventActionFilesystemConfig    `json:"fs_config"`
+	PwdExpirationConfig  EventActionPasswordExpiration  `json:"pwd_expiration_config"`
+	UserInactivityConfig EventActionUserInactivity      `json:"user_inactivity_config"`
+	IDPConfig            EventActionIDPAccountCheck     `json:"idp_config"`
 }
 
 func (o *BaseEventActionOptions) getACopy() BaseEventActionOptions {
 	o.SetEmptySecretsIfNil()
 	emailRecipients := make([]string, len(o.EmailConfig.Recipients))
 	copy(emailRecipients, o.EmailConfig.Recipients)
+	emailBcc := make([]string, len(o.EmailConfig.Bcc))
+	copy(emailBcc, o.EmailConfig.Bcc)
 	emailAttachments := make([]string, len(o.EmailConfig.Attachments))
 	copy(emailAttachments, o.EmailConfig.Attachments)
 	cmdArgs := make([]string, len(o.CmdConfig.Args))
@@ -900,10 +1019,9 @@ func (o *BaseEventActionOptions) getACopy() BaseEventActionOptions {
 	folders := make([]FolderRetention, 0, len(o.RetentionConfig.Folders))
 	for _, folder := range o.RetentionConfig.Folders {
 		folders = append(folders, FolderRetention{
-			Path:                  folder.Path,
-			Retention:             folder.Retention,
-			DeleteEmptyDirs:       folder.DeleteEmptyDirs,
-			IgnoreUserPermissions: folder.IgnoreUserPermissions,
+			Path:            folder.Path,
+			Retention:       folder.Retention,
+			DeleteEmptyDirs: folder.DeleteEmptyDirs,
 		})
 	}
 	httpParts := make([]HTTPPart, 0, len(o.HTTPConfig.Parts))
@@ -937,7 +1055,9 @@ func (o *BaseEventActionOptions) getACopy() BaseEventActionOptions {
 		},
 		EmailConfig: EventActionEmailConfig{
 			Recipients:  emailRecipients,
+			Bcc:         emailBcc,
 			Subject:     o.EmailConfig.Subject,
+			ContentType: o.EmailConfig.ContentType,
 			Body:        o.EmailConfig.Body,
 			Attachments: emailAttachments,
 		},
@@ -946,6 +1066,10 @@ func (o *BaseEventActionOptions) getACopy() BaseEventActionOptions {
 		},
 		PwdExpirationConfig: EventActionPasswordExpiration{
 			Threshold: o.PwdExpirationConfig.Threshold,
+		},
+		UserInactivityConfig: EventActionUserInactivity{
+			DisableThreshold: o.UserInactivityConfig.DisableThreshold,
+			DeleteThreshold:  o.UserInactivityConfig.DeleteThreshold,
 		},
 		IDPConfig: EventActionIDPAccountCheck{
 			Mode:          o.IDPConfig.Mode,
@@ -985,6 +1109,7 @@ func (o *BaseEventActionOptions) validate(action int, name string) error {
 		o.FsConfig = EventActionFilesystemConfig{}
 		o.PwdExpirationConfig = EventActionPasswordExpiration{}
 		o.IDPConfig = EventActionIDPAccountCheck{}
+		o.UserInactivityConfig = EventActionUserInactivity{}
 		return o.HTTPConfig.validate(name)
 	case ActionTypeCommand:
 		o.HTTPConfig = EventActionHTTPConfig{}
@@ -993,6 +1118,7 @@ func (o *BaseEventActionOptions) validate(action int, name string) error {
 		o.FsConfig = EventActionFilesystemConfig{}
 		o.PwdExpirationConfig = EventActionPasswordExpiration{}
 		o.IDPConfig = EventActionIDPAccountCheck{}
+		o.UserInactivityConfig = EventActionUserInactivity{}
 		return o.CmdConfig.validate()
 	case ActionTypeEmail:
 		o.HTTPConfig = EventActionHTTPConfig{}
@@ -1001,6 +1127,7 @@ func (o *BaseEventActionOptions) validate(action int, name string) error {
 		o.FsConfig = EventActionFilesystemConfig{}
 		o.PwdExpirationConfig = EventActionPasswordExpiration{}
 		o.IDPConfig = EventActionIDPAccountCheck{}
+		o.UserInactivityConfig = EventActionUserInactivity{}
 		return o.EmailConfig.validate()
 	case ActionTypeDataRetentionCheck:
 		o.HTTPConfig = EventActionHTTPConfig{}
@@ -1009,6 +1136,7 @@ func (o *BaseEventActionOptions) validate(action int, name string) error {
 		o.FsConfig = EventActionFilesystemConfig{}
 		o.PwdExpirationConfig = EventActionPasswordExpiration{}
 		o.IDPConfig = EventActionIDPAccountCheck{}
+		o.UserInactivityConfig = EventActionUserInactivity{}
 		return o.RetentionConfig.validate()
 	case ActionTypeFilesystem:
 		o.HTTPConfig = EventActionHTTPConfig{}
@@ -1017,6 +1145,7 @@ func (o *BaseEventActionOptions) validate(action int, name string) error {
 		o.RetentionConfig = EventActionDataRetentionConfig{}
 		o.PwdExpirationConfig = EventActionPasswordExpiration{}
 		o.IDPConfig = EventActionIDPAccountCheck{}
+		o.UserInactivityConfig = EventActionUserInactivity{}
 		return o.FsConfig.validate()
 	case ActionTypePasswordExpirationCheck:
 		o.HTTPConfig = EventActionHTTPConfig{}
@@ -1025,7 +1154,17 @@ func (o *BaseEventActionOptions) validate(action int, name string) error {
 		o.RetentionConfig = EventActionDataRetentionConfig{}
 		o.FsConfig = EventActionFilesystemConfig{}
 		o.IDPConfig = EventActionIDPAccountCheck{}
+		o.UserInactivityConfig = EventActionUserInactivity{}
 		return o.PwdExpirationConfig.validate()
+	case ActionTypeUserInactivityCheck:
+		o.HTTPConfig = EventActionHTTPConfig{}
+		o.CmdConfig = EventActionCommandConfig{}
+		o.EmailConfig = EventActionEmailConfig{}
+		o.RetentionConfig = EventActionDataRetentionConfig{}
+		o.FsConfig = EventActionFilesystemConfig{}
+		o.IDPConfig = EventActionIDPAccountCheck{}
+		o.PwdExpirationConfig = EventActionPasswordExpiration{}
+		return o.UserInactivityConfig.validate()
 	case ActionTypeIDPAccountCheck:
 		o.HTTPConfig = EventActionHTTPConfig{}
 		o.CmdConfig = EventActionCommandConfig{}
@@ -1033,6 +1172,7 @@ func (o *BaseEventActionOptions) validate(action int, name string) error {
 		o.RetentionConfig = EventActionDataRetentionConfig{}
 		o.FsConfig = EventActionFilesystemConfig{}
 		o.PwdExpirationConfig = EventActionPasswordExpiration{}
+		o.UserInactivityConfig = EventActionUserInactivity{}
 		return o.IDPConfig.validate()
 	default:
 		o.HTTPConfig = EventActionHTTPConfig{}
@@ -1042,6 +1182,7 @@ func (o *BaseEventActionOptions) validate(action int, name string) error {
 		o.FsConfig = EventActionFilesystemConfig{}
 		o.PwdExpirationConfig = EventActionPasswordExpiration{}
 		o.IDPConfig = EventActionIDPAccountCheck{}
+		o.UserInactivityConfig = EventActionUserInactivity{}
 	}
 	return nil
 }
@@ -1110,7 +1251,7 @@ func (a *BaseEventAction) RenderAsJSON(reload bool) ([]byte, error) {
 
 func (a *BaseEventAction) validate() error {
 	if a.Name == "" {
-		return util.NewValidationError("name is mandatory")
+		return util.NewI18nError(util.NewValidationError("name is mandatory"), util.I18nErrorNameRequired)
 	}
 	if !isActionTypeValid(a.Type) {
 		return util.NewValidationError(fmt.Sprintf("invalid action type: %d", a.Type))
@@ -1148,17 +1289,26 @@ func (a *EventAction) getACopy() EventAction {
 func (a *EventAction) validateAssociation(trigger int, fsEvents []string) error {
 	if a.Options.IsFailureAction {
 		if a.Options.ExecuteSync {
-			return util.NewValidationError("sync execution is not supported for failure actions")
+			return util.NewI18nError(
+				util.NewValidationError("sync execution is not supported for failure actions"),
+				util.I18nErrorEvSyncFailureActions,
+			)
 		}
 	}
 	if a.Options.ExecuteSync {
 		if trigger != EventTriggerFsEvent && trigger != EventTriggerIDPLogin {
-			return util.NewValidationError("sync execution is only supported for some filesystem events and Identity Provider logins")
+			return util.NewI18nError(
+				util.NewValidationError("sync execution is only supported for some filesystem events and Identity Provider logins"),
+				util.I18nErrorEvSyncUnsupported,
+			)
 		}
 		if trigger == EventTriggerFsEvent {
 			for _, ev := range fsEvents {
-				if !util.Contains(allowedSyncFsEvents, ev) {
-					return util.NewValidationError("sync execution is only supported for upload and pre-* events")
+				if !slices.Contains(allowedSyncFsEvents, ev) {
+					return util.NewI18nError(
+						util.NewValidationError("sync execution is only supported for upload and pre-* events"),
+						util.I18nErrorEvSyncUnsupportedFs,
+					)
 				}
 			}
 		}
@@ -1197,6 +1347,7 @@ type ConditionOptions struct {
 	ProviderObjects []string           `json:"provider_objects,omitempty"`
 	MinFileSize     int64              `json:"min_size,omitempty"`
 	MaxFileSize     int64              `json:"max_size,omitempty"`
+	EventStatuses   []int              `json:"event_statuses,omitempty"`
 	// allow to execute scheduled tasks concurrently from multiple instances
 	ConcurrentExecution bool `json:"concurrent_execution,omitempty"`
 }
@@ -1206,6 +1357,8 @@ func (f *ConditionOptions) getACopy() ConditionOptions {
 	copy(protocols, f.Protocols)
 	providerObjects := make([]string, len(f.ProviderObjects))
 	copy(providerObjects, f.ProviderObjects)
+	statuses := make([]int, len(f.EventStatuses))
+	copy(statuses, f.EventStatuses)
 
 	return ConditionOptions{
 		Names:               cloneConditionPatterns(f.Names),
@@ -1216,8 +1369,18 @@ func (f *ConditionOptions) getACopy() ConditionOptions {
 		ProviderObjects:     providerObjects,
 		MinFileSize:         f.MinFileSize,
 		MaxFileSize:         f.MaxFileSize,
+		EventStatuses:       statuses,
 		ConcurrentExecution: f.ConcurrentExecution,
 	}
+}
+
+func (f *ConditionOptions) validateStatuses() error {
+	for _, status := range f.EventStatuses {
+		if status < 0 || status > 3 {
+			return util.NewValidationError(fmt.Sprintf("invalid event_status %d", status))
+		}
+	}
+	return nil
 }
 
 func (f *ConditionOptions) validate() error {
@@ -1235,12 +1398,12 @@ func (f *ConditionOptions) validate() error {
 	}
 
 	for _, p := range f.Protocols {
-		if !util.Contains(SupportedRuleConditionProtocols, p) {
+		if !slices.Contains(SupportedRuleConditionProtocols, p) {
 			return util.NewValidationError(fmt.Sprintf("unsupported rule condition protocol: %q", p))
 		}
 	}
 	for _, p := range f.ProviderObjects {
-		if !util.Contains(SupporteRuleConditionProviderObjects, p) {
+		if !slices.Contains(SupporteRuleConditionProviderObjects, p) {
 			return util.NewValidationError(fmt.Sprintf("unsupported provider object: %q", p))
 		}
 	}
@@ -1249,6 +1412,9 @@ func (f *ConditionOptions) validate() error {
 			return util.NewValidationError(fmt.Sprintf("invalid max file size %s, it is lesser or equal than min file size %s",
 				util.ByteCountSI(f.MaxFileSize), util.ByteCountSI(f.MinFileSize)))
 		}
+	}
+	if err := f.validateStatuses(); err != nil {
+		return err
 	}
 	if config.IsShared == 0 {
 		f.ConcurrentExecution = false
@@ -1315,11 +1481,14 @@ func (c *EventConditions) getACopy() EventConditions {
 
 func (c *EventConditions) validateSchedules() error {
 	if len(c.Schedules) == 0 {
-		return util.NewValidationError("at least one schedule is required")
+		return util.NewI18nError(
+			util.NewValidationError("at least one schedule is required"),
+			util.I18nErrorRuleScheduleRequired,
+		)
 	}
 	for _, schedule := range c.Schedules {
 		if err := schedule.validate(); err != nil {
-			return err
+			return util.NewI18nError(err, util.I18nErrorRuleScheduleInvalid)
 		}
 	}
 	return nil
@@ -1333,27 +1502,33 @@ func (c *EventConditions) validate(trigger int) error {
 		c.Options.ProviderObjects = nil
 		c.IDPLoginEvent = 0
 		if len(c.FsEvents) == 0 {
-			return util.NewValidationError("at least one filesystem event is required")
+			return util.NewI18nError(
+				util.NewValidationError("at least one filesystem event is required"),
+				util.I18nErrorRuleFsEventRequired,
+			)
 		}
 		for _, ev := range c.FsEvents {
-			if !util.Contains(SupportedFsEvents, ev) {
+			if !slices.Contains(SupportedFsEvents, ev) {
 				return util.NewValidationError(fmt.Sprintf("unsupported fs event: %q", ev))
 			}
 		}
 	case EventTriggerProviderEvent:
 		c.FsEvents = nil
 		c.Schedules = nil
-		c.Options.GroupNames = nil
 		c.Options.FsPaths = nil
 		c.Options.Protocols = nil
+		c.Options.EventStatuses = nil
 		c.Options.MinFileSize = 0
 		c.Options.MaxFileSize = 0
 		c.IDPLoginEvent = 0
 		if len(c.ProviderEvents) == 0 {
-			return util.NewValidationError("at least one provider event is required")
+			return util.NewI18nError(
+				util.NewValidationError("at least one provider event is required"),
+				util.I18nErrorRuleProviderEventRequired,
+			)
 		}
 		for _, ev := range c.ProviderEvents {
-			if !util.Contains(SupportedProviderEvents, ev) {
+			if !slices.Contains(SupportedProviderEvents, ev) {
 				return util.NewValidationError(fmt.Sprintf("unsupported provider event: %q", ev))
 			}
 		}
@@ -1362,6 +1537,7 @@ func (c *EventConditions) validate(trigger int) error {
 		c.ProviderEvents = nil
 		c.Options.FsPaths = nil
 		c.Options.Protocols = nil
+		c.Options.EventStatuses = nil
 		c.Options.MinFileSize = 0
 		c.Options.MaxFileSize = 0
 		c.Options.ProviderObjects = nil
@@ -1377,6 +1553,7 @@ func (c *EventConditions) validate(trigger int) error {
 		c.Options.RoleNames = nil
 		c.Options.FsPaths = nil
 		c.Options.Protocols = nil
+		c.Options.EventStatuses = nil
 		c.Options.MinFileSize = 0
 		c.Options.MaxFileSize = 0
 		c.Schedules = nil
@@ -1386,6 +1563,7 @@ func (c *EventConditions) validate(trigger int) error {
 		c.ProviderEvents = nil
 		c.Options.FsPaths = nil
 		c.Options.Protocols = nil
+		c.Options.EventStatuses = nil
 		c.Options.MinFileSize = 0
 		c.Options.MaxFileSize = 0
 		c.Options.ProviderObjects = nil
@@ -1399,10 +1577,11 @@ func (c *EventConditions) validate(trigger int) error {
 		c.Options.RoleNames = nil
 		c.Options.FsPaths = nil
 		c.Options.Protocols = nil
+		c.Options.EventStatuses = nil
 		c.Options.MinFileSize = 0
 		c.Options.MaxFileSize = 0
 		c.Schedules = nil
-		if !util.Contains(supportedIDPLoginEvents, c.IDPLoginEvent) {
+		if !slices.Contains(supportedIDPLoginEvents, c.IDPLoginEvent) {
 			return util.NewValidationError(fmt.Sprintf("invalid Identity Provider login event %d", c.IDPLoginEvent))
 		}
 	default:
@@ -1412,6 +1591,7 @@ func (c *EventConditions) validate(trigger int) error {
 		c.Options.RoleNames = nil
 		c.Options.FsPaths = nil
 		c.Options.Protocols = nil
+		c.Options.EventStatuses = nil
 		c.Options.MinFileSize = 0
 		c.Options.MaxFileSize = 0
 		c.Schedules = nil
@@ -1494,7 +1674,7 @@ func (r *EventRule) isStatusValid() bool {
 
 func (r *EventRule) validate() error {
 	if r.Name == "" {
-		return util.NewValidationError("name is mandatory")
+		return util.NewI18nError(util.NewValidationError("name is mandatory"), util.I18nErrorNameRequired)
 	}
 	if !r.isStatusValid() {
 		return util.NewValidationError(fmt.Sprintf("invalid event rule status: %d", r.Status))
@@ -1506,7 +1686,7 @@ func (r *EventRule) validate() error {
 		return err
 	}
 	if len(r.Actions) == 0 {
-		return util.NewValidationError("at least one action is required")
+		return util.NewI18nError(util.NewValidationError("at least one action is required"), util.I18nErrorRuleActionRequired)
 	}
 	actionNames := make(map[string]bool)
 	actionOrders := make(map[int]bool)
@@ -1517,7 +1697,10 @@ func (r *EventRule) validate() error {
 			return util.NewValidationError(fmt.Sprintf("invalid action at position %d, name not specified", idx))
 		}
 		if actionNames[r.Actions[idx].Name] {
-			return util.NewValidationError(fmt.Sprintf("duplicated action %q", r.Actions[idx].Name))
+			return util.NewI18nError(
+				util.NewValidationError(fmt.Sprintf("duplicated action %q", r.Actions[idx].Name)),
+				util.I18nErrorRuleDuplicateActions,
+			)
 		}
 		if actionOrders[r.Actions[idx].Order] {
 			return util.NewValidationError(fmt.Sprintf("duplicated order %d for action %q",
@@ -1536,7 +1719,10 @@ func (r *EventRule) validate() error {
 		actionOrders[r.Actions[idx].Order] = true
 	}
 	if len(r.Actions) == failureActions {
-		return util.NewValidationError("at least a non-failure action is required")
+		return util.NewI18nError(
+			util.NewValidationError("at least a non-failure action is required"),
+			util.I18nErrorRuleFailureActionsOnly,
+		)
 	}
 	if !hasSyncAction {
 		return r.validateMandatorySyncActions()
@@ -1549,8 +1735,14 @@ func (r *EventRule) validateMandatorySyncActions() error {
 		return nil
 	}
 	for _, ev := range r.Conditions.FsEvents {
-		if util.Contains(mandatorySyncFsEvents, ev) {
-			return util.NewValidationError(fmt.Sprintf("event %q requires at least a sync action", ev))
+		if slices.Contains(mandatorySyncFsEvents, ev) {
+			return util.NewI18nError(
+				util.NewValidationError(fmt.Sprintf("event %q requires at least a sync action", ev)),
+				util.I18nErrorRuleSyncActionRequired,
+				util.I18nErrorArgs(map[string]any{
+					"val": ev,
+				}),
+			)
 		}
 	}
 	return nil
@@ -1558,10 +1750,10 @@ func (r *EventRule) validateMandatorySyncActions() error {
 
 func (r *EventRule) checkIPBlockedAndCertificateActions() error {
 	unavailableActions := []int{ActionTypeUserQuotaReset, ActionTypeFolderQuotaReset, ActionTypeTransferQuotaReset,
-		ActionTypeDataRetentionCheck, ActionTypeMetadataCheck, ActionTypeFilesystem, ActionTypePasswordExpirationCheck,
+		ActionTypeDataRetentionCheck, ActionTypeFilesystem, ActionTypePasswordExpirationCheck,
 		ActionTypeUserExpirationCheck}
 	for _, action := range r.Actions {
-		if util.Contains(unavailableActions, action.Type) {
+		if slices.Contains(unavailableActions, action.Type) {
 			return fmt.Errorf("action %q, type %q is not supported for event trigger %q",
 				action.Name, getActionTypeAsString(action.Type), getTriggerTypeAsString(r.Trigger))
 		}
@@ -1574,10 +1766,10 @@ func (r *EventRule) checkProviderEventActions(providerObjectType string) error {
 	// can be executed only if we modify a user. They will be executed for the
 	// affected user. Folder quota reset can be executed only for folders.
 	userSpecificActions := []int{ActionTypeUserQuotaReset, ActionTypeTransferQuotaReset,
-		ActionTypeDataRetentionCheck, ActionTypeMetadataCheck, ActionTypeFilesystem,
+		ActionTypeDataRetentionCheck, ActionTypeFilesystem,
 		ActionTypePasswordExpirationCheck, ActionTypeUserExpirationCheck}
 	for _, action := range r.Actions {
-		if util.Contains(userSpecificActions, action.Type) && providerObjectType != actionObjectUser {
+		if slices.Contains(userSpecificActions, action.Type) && providerObjectType != actionObjectUser {
 			return fmt.Errorf("action %q, type %q is only supported for provider user events",
 				action.Name, getActionTypeAsString(action.Type))
 		}
@@ -1683,6 +1875,20 @@ func (r *EventRule) RenderAsJSON(reload bool) ([]byte, error) {
 	}
 	r.PrepareForRendering()
 	return json.Marshal(r)
+}
+
+func cloneRenameConfigs(renames []RenameConfig) []RenameConfig {
+	res := make([]RenameConfig, 0, len(renames))
+	for _, c := range renames {
+		res = append(res, RenameConfig{
+			KeyValue: KeyValue{
+				Key:   c.Key,
+				Value: c.Value,
+			},
+			UpdateModTime: c.UpdateModTime,
+		})
+	}
+	return res
 }
 
 func cloneKeyValues(keyVals []KeyValue) []KeyValue {

@@ -1,4 +1,4 @@
-// Copyright (C) 2019-2023 Nicola Murino
+// Copyright (C) 2019 Nicola Murino
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published
@@ -24,6 +24,7 @@ import (
 	"github.com/drakkan/sftpgo/v2/internal/config"
 	"github.com/drakkan/sftpgo/v2/internal/dataprovider"
 	"github.com/drakkan/sftpgo/v2/internal/logger"
+	"github.com/drakkan/sftpgo/v2/internal/plugin"
 	"github.com/drakkan/sftpgo/v2/internal/util"
 )
 
@@ -56,6 +57,15 @@ renewed by the SFTPGo service
 				logger.ErrorToConsole("unable to initialize KMS: %v", err)
 				os.Exit(1)
 			}
+			if config.HasKMSPlugin() {
+				if err := plugin.Initialize(config.GetPluginsConfig(), "debug"); err != nil {
+					logger.ErrorToConsole("unable to initialize plugin system: %v", err)
+					os.Exit(1)
+				}
+				registerSignals()
+				defer plugin.Handler.Cleanup()
+			}
+
 			mfaConfig := config.GetMFAConfig()
 			err = mfaConfig.Initialize()
 			if err != nil {

@@ -1,4 +1,4 @@
-// Copyright (C) 2019-2023 Nicola Murino
+// Copyright (C) 2019 Nicola Murino
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published
@@ -134,6 +134,53 @@ func TestBasicFTPHandlingCryptFs(t *testing.T) {
 	assert.Eventually(t, func() bool { return len(common.Connections.GetStats("")) == 0 }, 1*time.Second, 50*time.Millisecond)
 	assert.Eventually(t, func() bool { return common.Connections.GetClientConnections() == 0 }, 1000*time.Millisecond,
 		50*time.Millisecond)
+	assert.Equal(t, int32(0), common.Connections.GetTotalTransfers())
+}
+
+func TestBufferedCryptFs(t *testing.T) {
+	u := getTestUserWithCryptFs()
+	u.FsConfig.CryptConfig.OSFsConfig = sdk.OSFsConfig{
+		ReadBufferSize:  1,
+		WriteBufferSize: 1,
+	}
+	user, _, err := httpdtest.AddUser(u, http.StatusCreated)
+	assert.NoError(t, err)
+	client, err := getFTPClient(user, true, nil)
+	if assert.NoError(t, err) {
+		testFilePath := filepath.Join(homeBasePath, testFileName)
+		testFileSize := int64(65535)
+		err = createTestFile(testFilePath, testFileSize)
+		assert.NoError(t, err)
+
+		err = checkBasicFTP(client)
+		assert.NoError(t, err)
+		err = ftpUploadFile(testFilePath, testFileName, testFileSize, client, 0)
+		assert.NoError(t, err)
+		// overwrite an existing file
+		err = ftpUploadFile(testFilePath, testFileName, testFileSize, client, 0)
+		assert.NoError(t, err)
+		localDownloadPath := filepath.Join(homeBasePath, testDLFileName)
+		err = ftpDownloadFile(testFileName, localDownloadPath, testFileSize, client, 0)
+		assert.NoError(t, err)
+		info, err := os.Stat(localDownloadPath)
+		if assert.NoError(t, err) {
+			assert.Equal(t, testFileSize, info.Size())
+		}
+		err = os.Remove(testFilePath)
+		assert.NoError(t, err)
+		err = os.Remove(localDownloadPath)
+		assert.NoError(t, err)
+		err = client.Quit()
+		assert.NoError(t, err)
+	}
+	_, err = httpdtest.RemoveUser(user, http.StatusOK)
+	assert.NoError(t, err)
+	err = os.RemoveAll(user.GetHomeDir())
+	assert.NoError(t, err)
+	assert.Eventually(t, func() bool { return len(common.Connections.GetStats("")) == 0 }, 1*time.Second, 50*time.Millisecond)
+	assert.Eventually(t, func() bool { return common.Connections.GetClientConnections() == 0 }, 1000*time.Millisecond,
+		50*time.Millisecond)
+	assert.Equal(t, int32(0), common.Connections.GetTotalTransfers())
 }
 
 func TestZeroBytesTransfersCryptFs(t *testing.T) {
@@ -236,11 +283,11 @@ func TestResumeCryptFs(t *testing.T) {
 		assert.Equal(t, initialHash, downloadHash)
 		err = os.Truncate(localDownloadPath, 32767)
 		assert.NoError(t, err)
-		err = ftpDownloadFile(testFileName, localDownloadPath+"_partial", testFileSize-32767, client, 32767)
+		err = ftpDownloadFile(testFileName, localDownloadPath+"_partial", testFileSize-32767, client, 32767) //nolint:goconst
 		assert.NoError(t, err)
 		file, err := os.OpenFile(localDownloadPath, os.O_APPEND|os.O_WRONLY, os.ModePerm)
 		assert.NoError(t, err)
-		file1, err := os.Open(localDownloadPath + "_partial")
+		file1, err := os.Open(localDownloadPath + "_partial") //nolint:goconst
 		assert.NoError(t, err)
 		_, err = io.Copy(file, file1)
 		assert.NoError(t, err)

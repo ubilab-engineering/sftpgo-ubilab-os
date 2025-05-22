@@ -1,4 +1,4 @@
-// Copyright (C) 2019-2023 Nicola Murino
+// Copyright (C) 2019 Nicola Murino
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published
@@ -16,8 +16,8 @@ package plugin
 
 import (
 	"fmt"
-	"os/exec"
 	"path/filepath"
+	"slices"
 
 	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/go-plugin"
@@ -26,13 +26,13 @@ import (
 
 	"github.com/drakkan/sftpgo/v2/internal/kms"
 	"github.com/drakkan/sftpgo/v2/internal/logger"
-	"github.com/drakkan/sftpgo/v2/internal/util"
 )
 
 var (
-	validKMSSchemes           = []string{sdkkms.SchemeAWS, sdkkms.SchemeGCP, sdkkms.SchemeVaultTransit, sdkkms.SchemeAzureKeyVault}
+	validKMSSchemes = []string{sdkkms.SchemeAWS, sdkkms.SchemeGCP, sdkkms.SchemeVaultTransit,
+		sdkkms.SchemeAzureKeyVault, sdkkms.SchemeOracleKeyVault}
 	validKMSEncryptedStatuses = []string{sdkkms.SecretStatusVaultTransit, sdkkms.SecretStatusAWS, sdkkms.SecretStatusGCP,
-		sdkkms.SecretStatusAzureKeyVault}
+		sdkkms.SecretStatusAzureKeyVault, sdkkms.SecretStatusOracleKeyVault}
 )
 
 // KMSConfig defines configuration parameters for kms plugins
@@ -42,10 +42,10 @@ type KMSConfig struct {
 }
 
 func (c *KMSConfig) validate() error {
-	if !util.Contains(validKMSSchemes, c.Scheme) {
+	if !slices.Contains(validKMSSchemes, c.Scheme) {
 		return fmt.Errorf("invalid kms scheme: %v", c.Scheme)
 	}
-	if !util.Contains(validKMSEncryptedStatuses, c.EncryptedStatus) {
+	if !slices.Contains(validKMSEncryptedStatuses, c.EncryptedStatus) {
 		return fmt.Errorf("invalid kms encrypted status: %v", c.EncryptedStatus)
 	}
 	return nil
@@ -81,7 +81,8 @@ func (p *kmsPlugin) initialize() error {
 	client := plugin.NewClient(&plugin.ClientConfig{
 		HandshakeConfig: kmsplugin.Handshake,
 		Plugins:         kmsplugin.PluginMap,
-		Cmd:             exec.Command(p.config.Cmd, p.config.Args...),
+		Cmd:             p.config.getCommand(),
+		SkipHostEnv:     true,
 		AllowedProtocols: []plugin.Protocol{
 			plugin.ProtocolGRPC,
 		},

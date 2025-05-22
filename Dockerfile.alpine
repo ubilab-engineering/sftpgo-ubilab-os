@@ -1,8 +1,8 @@
-FROM golang:1.20-alpine3.17 AS builder
+FROM golang:1.24-alpine3.21 AS builder
 
 ENV GOFLAGS="-mod=readonly"
 
-RUN apk add --update --no-cache bash ca-certificates curl git gcc g++
+RUN apk -U upgrade --no-cache && apk add --update --no-cache bash ca-certificates curl git gcc g++
 
 RUN mkdir -p /workspace
 WORKDIR /workspace
@@ -10,7 +10,7 @@ WORKDIR /workspace
 ARG GOPROXY
 
 COPY go.mod go.sum ./
-RUN go mod download
+RUN go mod download && go mod verify
 
 ARG COMMIT_SHA
 
@@ -25,14 +25,12 @@ RUN set -xe && \
     export COMMIT_SHA=${COMMIT_SHA:-$(git describe --always --abbrev=8 --dirty)} && \
     go build $(if [ -n "${FEATURES}" ]; then echo "-tags ${FEATURES}"; fi) -trimpath -ldflags "-s -w -X github.com/drakkan/sftpgo/v2/internal/version.commit=${COMMIT_SHA} -X github.com/drakkan/sftpgo/v2/internal/version.date=`date -u +%FT%TZ`" -v -o sftpgo
 
-RUN apk add --update --no-cache openssh-client-common
-
-FROM alpine:3.17
+FROM alpine:3.21
 
 # Set to "true" to install jq and the optional git and rsync dependencies
 ARG INSTALL_OPTIONAL_PACKAGES=false
 
-RUN apk add --update --no-cache ca-certificates tzdata mailcap
+RUN apk -U upgrade --no-cache && apk add --update --no-cache ca-certificates tzdata mailcap
 
 RUN if [ "${INSTALL_OPTIONAL_PACKAGES}" = "true" ]; then apk add --update --no-cache jq git rsync; fi
 
@@ -42,7 +40,6 @@ RUN addgroup -g 1000 -S sftpgo && \
     adduser -u 1000 -h /var/lib/sftpgo -s /sbin/nologin -G sftpgo -S -D -H -g "SFTPGo user" sftpgo
 
 COPY --from=builder /workspace/sftpgo.json /etc/sftpgo/sftpgo.json
-COPY --from=builder /etc/ssh/moduli /etc/sftpgo/moduli
 COPY --from=builder /workspace/templates /usr/share/sftpgo/templates
 COPY --from=builder /workspace/static /usr/share/sftpgo/static
 COPY --from=builder /workspace/openapi /usr/share/sftpgo/openapi

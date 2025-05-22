@@ -1,4 +1,4 @@
-// Copyright (C) 2019-2023 Nicola Murino
+// Copyright (C) 2019 Nicola Murino
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published
@@ -110,7 +110,7 @@ func (m *dbResetCodeManager) Add(code *resetCode) error {
 }
 
 func (m *dbResetCodeManager) Get(code string) (*resetCode, error) {
-	session, err := dataprovider.GetSharedSession(code)
+	session, err := dataprovider.GetSharedSession(code, dataprovider.SessionTypeResetCode)
 	if err != nil {
 		return nil, err
 	}
@@ -132,7 +132,7 @@ func (m *dbResetCodeManager) decodeData(data any) (*resetCode, error) {
 }
 
 func (m *dbResetCodeManager) Delete(code string) error {
-	return dataprovider.DeleteSharedSession(code)
+	return dataprovider.DeleteSharedSession(code, dataprovider.SessionTypeResetCode)
 }
 
 func (m *dbResetCodeManager) Cleanup() {

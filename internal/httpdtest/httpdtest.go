@@ -1,4 +1,4 @@
-// Copyright (C) 2019-2023 Nicola Murino
+// Copyright (C) 2019 Nicola Murino
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published
@@ -25,6 +25,7 @@ import (
 	"net/http"
 	"net/url"
 	"path"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -36,7 +37,6 @@ import (
 	"github.com/drakkan/sftpgo/v2/internal/httpclient"
 	"github.com/drakkan/sftpgo/v2/internal/httpd"
 	"github.com/drakkan/sftpgo/v2/internal/kms"
-	"github.com/drakkan/sftpgo/v2/internal/util"
 	"github.com/drakkan/sftpgo/v2/internal/version"
 	"github.com/drakkan/sftpgo/v2/internal/vfs"
 )
@@ -175,7 +175,7 @@ func AddUser(user dataprovider.User, expectedStatusCode int) (dataprovider.User,
 func UpdateUserWithJSON(user dataprovider.User, expectedStatusCode int, disconnect string, userAsJSON []byte) (dataprovider.User, []byte, error) {
 	var newUser dataprovider.User
 	var body []byte
-	url, err := addDisconnectQueryParam(buildURLRelativeToBase(userPath, url.PathEscape(user.Username)), disconnect)
+	url, err := addUpdateUserQueryParams(buildURLRelativeToBase(userPath, url.PathEscape(user.Username)), disconnect)
 	if err != nil {
 		return user, body, err
 	}
@@ -283,6 +283,7 @@ func AddGroup(group dataprovider.Group, expectedStatusCode int) (dataprovider.Gr
 		body, _ = getResponseBody(resp)
 	}
 	if err == nil {
+		group.UserSettings.Filters.TLSCerts = nil
 		err = checkGroup(group, newGroup)
 	}
 	return newGroup, body, err
@@ -1470,7 +1471,7 @@ func RemoveDefenderHostByIP(ip string, expectedStatusCode int) ([]byte, error) {
 
 // Dumpdata requests a backup to outputFile.
 // outputFile is relative to the configured backups_path
-func Dumpdata(outputFile, outputData, indent string, expectedStatusCode int) (map[string]any, []byte, error) {
+func Dumpdata(outputFile, outputData, indent string, expectedStatusCode int, scopes ...string) (map[string]any, []byte, error) {
 	var response map[string]any
 	var body []byte
 	url, err := url.Parse(buildURLRelativeToBase(dumpDataPath))
@@ -1486,6 +1487,9 @@ func Dumpdata(outputFile, outputData, indent string, expectedStatusCode int) (ma
 	}
 	if indent != "" {
 		q.Add("indent", indent)
+	}
+	if len(scopes) > 0 {
+		q.Add("scopes", strings.Join(scopes, ","))
 	}
 	url.RawQuery = q.Encode()
 	resp, err := sendHTTPRequest(http.MethodGet, url.String(), nil, "", getDefaultToken())
@@ -1596,6 +1600,12 @@ func checkEventAction(expected, actual dataprovider.BaseEventAction) error {
 	if expected.Options.PwdExpirationConfig.Threshold != actual.Options.PwdExpirationConfig.Threshold {
 		return errors.New("password expiration threshold mismatch")
 	}
+	if expected.Options.UserInactivityConfig.DisableThreshold != actual.Options.UserInactivityConfig.DisableThreshold {
+		return errors.New("user inactivity disable threshold mismatch")
+	}
+	if expected.Options.UserInactivityConfig.DeleteThreshold != actual.Options.UserInactivityConfig.DeleteThreshold {
+		return errors.New("user inactivity delete threshold mismatch")
+	}
 	if err := compareEventActionIDPConfigFields(expected.Options.IDPConfig, actual.Options.IDPConfig); err != nil {
 		return err
 	}
@@ -1652,7 +1662,7 @@ func compareConditionPatternOptions(expected, actual []dataprovider.ConditionPat
 	return nil
 }
 
-func checkEventConditionOptions(expected, actual dataprovider.ConditionOptions) error {
+func checkEventConditionOptions(expected, actual dataprovider.ConditionOptions) error { //nolint:gocyclo
 	if err := compareConditionPatternOptions(expected.Names, actual.Names); err != nil {
 		return errors.New("condition names mismatch")
 	}
@@ -1669,15 +1679,23 @@ func checkEventConditionOptions(expected, actual dataprovider.ConditionOptions) 
 		return errors.New("condition protocols mismatch")
 	}
 	for _, v := range expected.Protocols {
-		if !util.Contains(actual.Protocols, v) {
+		if !slices.Contains(actual.Protocols, v) {
 			return errors.New("condition protocols content mismatch")
+		}
+	}
+	if len(expected.EventStatuses) != len(actual.EventStatuses) {
+		return errors.New("condition statuses mismatch")
+	}
+	for _, v := range expected.EventStatuses {
+		if !slices.Contains(actual.EventStatuses, v) {
+			return errors.New("condition statuses content mismatch")
 		}
 	}
 	if len(expected.ProviderObjects) != len(actual.ProviderObjects) {
 		return errors.New("condition provider objects mismatch")
 	}
 	for _, v := range expected.ProviderObjects {
-		if !util.Contains(actual.ProviderObjects, v) {
+		if !slices.Contains(actual.ProviderObjects, v) {
 			return errors.New("condition provider objects content mismatch")
 		}
 	}
@@ -1695,7 +1713,7 @@ func checkEventConditions(expected, actual dataprovider.EventConditions) error {
 		return errors.New("fs events mismatch")
 	}
 	for _, v := range expected.FsEvents {
-		if !util.Contains(actual.FsEvents, v) {
+		if !slices.Contains(actual.FsEvents, v) {
 			return errors.New("fs events content mismatch")
 		}
 	}
@@ -1703,7 +1721,7 @@ func checkEventConditions(expected, actual dataprovider.EventConditions) error {
 		return errors.New("provider events mismatch")
 	}
 	for _, v := range expected.ProviderEvents {
-		if !util.Contains(actual.ProviderEvents, v) {
+		if !slices.Contains(actual.ProviderEvents, v) {
 			return errors.New("provider events content mismatch")
 		}
 	}
@@ -1938,7 +1956,7 @@ func checkAdmin(expected, actual *dataprovider.Admin) error {
 		return errors.New("permissions mismatch")
 	}
 	for _, p := range expected.Permissions {
-		if !util.Contains(actual.Permissions, p) {
+		if !slices.Contains(actual.Permissions, p) {
 			return errors.New("permissions content mismatch")
 		}
 	}
@@ -1956,7 +1974,7 @@ func compareAdminFilters(expected, actual dataprovider.AdminFilters) error {
 		return errors.New("allow list mismatch")
 	}
 	for _, v := range expected.AllowList {
-		if !util.Contains(actual.AllowList, v) {
+		if !slices.Contains(actual.AllowList, v) {
 			return errors.New("allow list content mismatch")
 		}
 	}
@@ -1965,6 +1983,12 @@ func compareAdminFilters(expected, actual dataprovider.AdminFilters) error {
 	}
 	if expected.Preferences.DefaultUsersExpiration != actual.Preferences.DefaultUsersExpiration {
 		return errors.New("default users expiration mismatch")
+	}
+	if expected.RequirePasswordChange != actual.RequirePasswordChange {
+		return errors.New("require password change mismatch")
+	}
+	if expected.RequireTwoFactor != actual.RequireTwoFactor {
+		return errors.New("require two factor mismatch")
 	}
 	return nil
 }
@@ -2013,6 +2037,9 @@ func checkUser(expected *dataprovider.User, actual *dataprovider.User) error {
 	if expected.Email != actual.Email {
 		return errors.New("email mismatch")
 	}
+	if !slices.Equal(expected.Filters.AdditionalEmails, actual.Filters.AdditionalEmails) {
+		return errors.New("additional emails mismatch")
+	}
 	if expected.Filters.RequirePasswordChange != actual.Filters.RequirePasswordChange {
 		return errors.New("require_password_change mismatch")
 	}
@@ -2041,7 +2068,7 @@ func compareUserPermissions(expected map[string][]string, actual map[string][]st
 	for dir, perms := range expected {
 		if actualPerms, ok := actual[dir]; ok {
 			for _, v := range actualPerms {
-				if !util.Contains(perms, v) {
+				if !slices.Contains(perms, v) {
 					return errors.New("permissions contents mismatch")
 				}
 			}
@@ -2102,8 +2129,8 @@ func compareVirtualFolders(expected []vfs.VirtualFolder, actual []vfs.VirtualFol
 		found := false
 		for _, v1 := range expected {
 			if path.Clean(v.VirtualPath) == path.Clean(v1.VirtualPath) {
-				if err := checkFolder(&v1.BaseVirtualFolder, &v.BaseVirtualFolder); err != nil {
-					return err
+				if dataprovider.ConvertName(v1.Name) != v.Name {
+					return errors.New("virtual folder name mismatch")
 				}
 				if v.QuotaSize != v1.QuotaSize {
 					return errors.New("vfolder quota size mismatch")
@@ -2126,6 +2153,12 @@ func compareFsConfig(expected *vfs.Filesystem, actual *vfs.Filesystem) error {
 	if expected.Provider != actual.Provider {
 		return errors.New("fs provider mismatch")
 	}
+	if expected.OSConfig.ReadBufferSize != actual.OSConfig.ReadBufferSize {
+		return fmt.Errorf("read buffer size mismatch")
+	}
+	if expected.OSConfig.WriteBufferSize != actual.OSConfig.WriteBufferSize {
+		return fmt.Errorf("write buffer size mismatch")
+	}
 	if err := compareS3Config(expected, actual); err != nil {
 		return err
 	}
@@ -2137,6 +2170,12 @@ func compareFsConfig(expected *vfs.Filesystem, actual *vfs.Filesystem) error {
 	}
 	if err := checkEncryptedSecret(expected.CryptConfig.Passphrase, actual.CryptConfig.Passphrase); err != nil {
 		return err
+	}
+	if expected.CryptConfig.ReadBufferSize != actual.CryptConfig.ReadBufferSize {
+		return fmt.Errorf("crypt read buffer size mismatch")
+	}
+	if expected.CryptConfig.WriteBufferSize != actual.CryptConfig.WriteBufferSize {
+		return fmt.Errorf("crypt write buffer size mismatch")
 	}
 	if err := compareSFTPFsConfig(expected, actual); err != nil {
 		return err
@@ -2159,6 +2198,9 @@ func compareS3Config(expected *vfs.Filesystem, actual *vfs.Filesystem) error { /
 	}
 	if err := checkEncryptedSecret(expected.S3Config.AccessSecret, actual.S3Config.AccessSecret); err != nil {
 		return fmt.Errorf("fs S3 access secret mismatch: %v", err)
+	}
+	if err := checkEncryptedSecret(expected.S3Config.SSECustomerKey, actual.S3Config.SSECustomerKey); err != nil {
+		return fmt.Errorf("fs S3 SSE customer key mismatch: %v", err)
 	}
 	if expected.S3Config.Endpoint != actual.S3Config.Endpoint {
 		return errors.New("fs S3 endpoint mismatch")
@@ -2183,6 +2225,9 @@ func compareS3Config(expected *vfs.Filesystem, actual *vfs.Filesystem) error { /
 	}
 	if expected.S3Config.ForcePathStyle != actual.S3Config.ForcePathStyle {
 		return errors.New("fs S3 force path style mismatch")
+	}
+	if expected.S3Config.SkipTLSVerify != actual.S3Config.SkipTLSVerify {
+		return errors.New("fs S3 skip TLS verify mismatch")
 	}
 	if expected.S3Config.DownloadPartMaxTime != actual.S3Config.DownloadPartMaxTime {
 		return errors.New("fs S3 download part max time mismatch")
@@ -2279,7 +2324,7 @@ func compareSFTPFsConfig(expected *vfs.Filesystem, actual *vfs.Filesystem) error
 		return errors.New("SFTPFs fingerprints mismatch")
 	}
 	for _, value := range actual.SFTPConfig.Fingerprints {
-		if !util.Contains(expected.SFTPConfig.Fingerprints, value) {
+		if !slices.Contains(expected.SFTPConfig.Fingerprints, value) {
 			return errors.New("SFTPFs fingerprints mismatch")
 		}
 	}
@@ -2370,30 +2415,40 @@ func checkEncryptedSecret(expected, actual *kms.Secret) error {
 
 func compareUserFilterSubStructs(expected sdk.BaseUserFilters, actual sdk.BaseUserFilters) error {
 	for _, IPMask := range expected.AllowedIP {
-		if !util.Contains(actual.AllowedIP, IPMask) {
+		if !slices.Contains(actual.AllowedIP, IPMask) {
 			return errors.New("allowed IP contents mismatch")
 		}
 	}
 	for _, IPMask := range expected.DeniedIP {
-		if !util.Contains(actual.DeniedIP, IPMask) {
+		if !slices.Contains(actual.DeniedIP, IPMask) {
 			return errors.New("denied IP contents mismatch")
 		}
 	}
 	for _, method := range expected.DeniedLoginMethods {
-		if !util.Contains(actual.DeniedLoginMethods, method) {
+		if !slices.Contains(actual.DeniedLoginMethods, method) {
 			return errors.New("denied login methods contents mismatch")
 		}
 	}
 	for _, protocol := range expected.DeniedProtocols {
-		if !util.Contains(actual.DeniedProtocols, protocol) {
+		if !slices.Contains(actual.DeniedProtocols, protocol) {
 			return errors.New("denied protocols contents mismatch")
 		}
 	}
 	for _, options := range expected.WebClient {
-		if !util.Contains(actual.WebClient, options) {
+		if !slices.Contains(actual.WebClient, options) {
 			return errors.New("web client options contents mismatch")
 		}
 	}
+
+	if len(expected.TLSCerts) != len(actual.TLSCerts) {
+		return errors.New("TLS certs mismatch")
+	}
+	for _, cert := range expected.TLSCerts {
+		if !slices.Contains(actual.TLSCerts, cert) {
+			return errors.New("TLS certs content mismatch")
+		}
+	}
+
 	return compareUserFiltersEqualFields(expected, actual)
 }
 
@@ -2416,7 +2471,7 @@ func compareUserFiltersEqualFields(expected sdk.BaseUserFilters, actual sdk.Base
 	return nil
 }
 
-func compareBaseUserFilters(expected sdk.BaseUserFilters, actual sdk.BaseUserFilters) error {
+func compareBaseUserFilters(expected sdk.BaseUserFilters, actual sdk.BaseUserFilters) error { //nolint:gocyclo
 	if len(expected.AllowedIP) != len(actual.AllowedIP) {
 		return errors.New("allowed IP mismatch")
 	}
@@ -2453,6 +2508,9 @@ func compareBaseUserFilters(expected sdk.BaseUserFilters, actual sdk.BaseUserFil
 	if expected.DefaultSharesExpiration != actual.DefaultSharesExpiration {
 		return errors.New("default_shares_expiration mismatch")
 	}
+	if expected.MaxSharesExpiration != actual.MaxSharesExpiration {
+		return errors.New("max_shares_expiration mismatch")
+	}
 	if expected.PasswordExpiration != actual.PasswordExpiration {
 		return errors.New("password_expiration mismatch")
 	}
@@ -2472,7 +2530,7 @@ func compareUserFilters(expected sdk.BaseUserFilters, actual sdk.BaseUserFilters
 	if err := compareUserBandwidthLimitFilters(expected, actual); err != nil {
 		return err
 	}
-	if err := compareUserDataTransferLimitFilters(expected, actual); err != nil {
+	if err := compareAccessTimeFilters(expected, actual); err != nil {
 		return err
 	}
 	return compareUserFilePatternsFilters(expected, actual)
@@ -2483,31 +2541,27 @@ func checkFilterMatch(expected []string, actual []string) bool {
 		return false
 	}
 	for _, e := range expected {
-		if !util.Contains(actual, strings.ToLower(e)) {
+		if !slices.Contains(actual, strings.ToLower(e)) {
 			return false
 		}
 	}
 	return true
 }
 
-func compareUserDataTransferLimitFilters(expected sdk.BaseUserFilters, actual sdk.BaseUserFilters) error {
-	if len(expected.DataTransferLimits) != len(actual.DataTransferLimits) {
-		return errors.New("data transfer limits filters mismatch")
+func compareAccessTimeFilters(expected sdk.BaseUserFilters, actual sdk.BaseUserFilters) error {
+	if len(expected.AccessTime) != len(actual.AccessTime) {
+		return errors.New("access time filters mismatch")
 	}
-	for idx, l := range expected.DataTransferLimits {
-		if actual.DataTransferLimits[idx].UploadDataTransfer != l.UploadDataTransfer {
-			return errors.New("data transfer limit upload_data_transfer mismatch")
+
+	for idx, p := range expected.AccessTime {
+		if actual.AccessTime[idx].DayOfWeek != p.DayOfWeek {
+			return errors.New("access time day of week mismatch")
 		}
-		if actual.DataTransferLimits[idx].DownloadDataTransfer != l.DownloadDataTransfer {
-			return errors.New("data transfer limit download_data_transfer mismatch")
+		if actual.AccessTime[idx].From != p.From {
+			return errors.New("access time from mismatch")
 		}
-		if actual.DataTransferLimits[idx].TotalDataTransfer != l.TotalDataTransfer {
-			return errors.New("data transfer limit total_data_transfer mismatch")
-		}
-		for _, source := range actual.DataTransferLimits[idx].Sources {
-			if !util.Contains(l.Sources, source) {
-				return errors.New("data transfer limit source mismatch")
-			}
+		if actual.AccessTime[idx].To != p.To {
+			return errors.New("access time to mismatch")
 		}
 	}
 
@@ -2530,7 +2584,7 @@ func compareUserBandwidthLimitFilters(expected sdk.BaseUserFilters, actual sdk.B
 			return errors.New("bandwidth filters sources mismatch")
 		}
 		for _, source := range actual.BandwidthLimits[idx].Sources {
-			if !util.Contains(l.Sources, source) {
+			if !slices.Contains(l.Sources, source) {
 				return errors.New("bandwidth filters source mismatch")
 			}
 		}
@@ -2561,9 +2615,28 @@ func compareUserFilePatternsFilters(expected sdk.BaseUserFilters, actual sdk.Bas
 	return nil
 }
 
+func compareRenameConfigs(expected, actual []dataprovider.RenameConfig) error {
+	if len(expected) != len(actual) {
+		return errors.New("rename configs mismatch")
+	}
+	for _, ex := range expected {
+		found := false
+		for _, ac := range actual {
+			if ac.Key == ex.Key && ac.Value == ex.Value && ac.UpdateModTime == ex.UpdateModTime {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return errors.New("rename configs mismatch")
+		}
+	}
+	return nil
+}
+
 func compareKeyValues(expected, actual []dataprovider.KeyValue) error {
 	if len(expected) != len(actual) {
-		return errors.New("kay values mismatch")
+		return errors.New("key values mismatch")
 	}
 	for _, ex := range expected {
 		found := false
@@ -2574,7 +2647,7 @@ func compareKeyValues(expected, actual []dataprovider.KeyValue) error {
 			}
 		}
 		if !found {
-			return errors.New("kay values mismatch")
+			return errors.New("key values mismatch")
 		}
 	}
 	return nil
@@ -2640,12 +2713,23 @@ func compareEventActionEmailConfigFields(expected, actual dataprovider.EventActi
 		return errors.New("email recipients mismatch")
 	}
 	for _, v := range expected.Recipients {
-		if !util.Contains(actual.Recipients, v) {
+		if !slices.Contains(actual.Recipients, v) {
 			return errors.New("email recipients content mismatch")
+		}
+	}
+	if len(expected.Bcc) != len(actual.Bcc) {
+		return errors.New("email bcc mismatch")
+	}
+	for _, v := range expected.Bcc {
+		if !slices.Contains(actual.Bcc, v) {
+			return errors.New("email bcc content mismatch")
 		}
 	}
 	if expected.Subject != actual.Subject {
 		return errors.New("email subject mismatch")
+	}
+	if expected.ContentType != actual.ContentType {
+		return errors.New("email content type mismatch")
 	}
 	if expected.Body != actual.Body {
 		return errors.New("email body mismatch")
@@ -2654,7 +2738,7 @@ func compareEventActionEmailConfigFields(expected, actual dataprovider.EventActi
 		return errors.New("email attachments mismatch")
 	}
 	for _, v := range expected.Attachments {
-		if !util.Contains(actual.Attachments, v) {
+		if !slices.Contains(actual.Attachments, v) {
 			return errors.New("email attachments content mismatch")
 		}
 	}
@@ -2669,7 +2753,7 @@ func compareEventActionFsCompressFields(expected, actual dataprovider.EventActio
 		return errors.New("fs compress paths mismatch")
 	}
 	for _, v := range expected.Paths {
-		if !util.Contains(actual.Paths, v) {
+		if !slices.Contains(actual.Paths, v) {
 			return errors.New("fs compress paths content mismatch")
 		}
 	}
@@ -2680,7 +2764,7 @@ func compareEventActionFsConfigFields(expected, actual dataprovider.EventActionF
 	if expected.Type != actual.Type {
 		return errors.New("fs type mismatch")
 	}
-	if err := compareKeyValues(expected.Renames, actual.Renames); err != nil {
+	if err := compareRenameConfigs(expected.Renames, actual.Renames); err != nil {
 		return errors.New("fs renames mismatch")
 	}
 	if err := compareKeyValues(expected.Copy, actual.Copy); err != nil {
@@ -2690,7 +2774,7 @@ func compareEventActionFsConfigFields(expected, actual dataprovider.EventActionF
 		return errors.New("fs deletes mismatch")
 	}
 	for _, v := range expected.Deletes {
-		if !util.Contains(actual.Deletes, v) {
+		if !slices.Contains(actual.Deletes, v) {
 			return errors.New("fs deletes content mismatch")
 		}
 	}
@@ -2698,7 +2782,7 @@ func compareEventActionFsConfigFields(expected, actual dataprovider.EventActionF
 		return errors.New("fs mkdirs mismatch")
 	}
 	for _, v := range expected.MkDirs {
-		if !util.Contains(actual.MkDirs, v) {
+		if !slices.Contains(actual.MkDirs, v) {
 			return errors.New("fs mkdir content mismatch")
 		}
 	}
@@ -2706,7 +2790,7 @@ func compareEventActionFsConfigFields(expected, actual dataprovider.EventActionF
 		return errors.New("fs exist mismatch")
 	}
 	for _, v := range expected.Exist {
-		if !util.Contains(actual.Exist, v) {
+		if !slices.Contains(actual.Exist, v) {
 			return errors.New("fs exist content mismatch")
 		}
 	}
@@ -2737,7 +2821,7 @@ func compareEventActionCmdConfigFields(expected, actual dataprovider.EventAction
 		return errors.New("cmd args mismatch")
 	}
 	for _, v := range expected.Args {
-		if !util.Contains(actual.Args, v) {
+		if !slices.Contains(actual.Args, v) {
 			return errors.New("cmd args content mismatch")
 		}
 	}
@@ -2761,9 +2845,6 @@ func compareEventActionDataRetentionFields(expected, actual dataprovider.EventAc
 				}
 				if f1.DeleteEmptyDirs != f2.DeleteEmptyDirs {
 					return fmt.Errorf("delete_empty_dirs mismatch for folder %s", f1.Path)
-				}
-				if f1.IgnoreUserPermissions != f2.IgnoreUserPermissions {
-					return fmt.Errorf("ignore_user_permissions mismatch for folder %s", f1.Path)
 				}
 				break
 			}
@@ -2900,13 +2981,13 @@ func addModeQueryParam(rawurl, mode string) (*url.URL, error) {
 	return url, err
 }
 
-func addDisconnectQueryParam(rawurl, disconnect string) (*url.URL, error) {
+func addUpdateUserQueryParams(rawurl, disconnect string) (*url.URL, error) {
 	url, err := url.Parse(rawurl)
 	if err != nil {
 		return nil, err
 	}
 	q := url.Query()
-	if len(disconnect) > 0 {
+	if disconnect != "" {
 		q.Add("disconnect", disconnect)
 	}
 	url.RawQuery = q.Encode()

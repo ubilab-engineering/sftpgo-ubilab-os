@@ -1,4 +1,4 @@
-// Copyright (C) 2019-2023 Nicola Murino
+// Copyright (C) 2019 Nicola Murino
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published
@@ -72,13 +72,15 @@ type Conf struct {
 	// Note that TLS 1.3 ciphersuites are not configurable.
 	// The supported ciphersuites names are defined here:
 	//
-	// https://github.com/golang/go/blob/master/src/crypto/tls/cipher_suites.go#L52
+	// https://github.com/golang/go/blob/master/src/crypto/tls/cipher_suites.go#L53
 	//
 	// any invalid name will be silently ignored.
 	// The order matters, the ciphers listed first will be the preferred ones.
 	TLSCipherSuites []string `json:"tls_cipher_suites" mapstructure:"tls_cipher_suites"`
 	// Defines the minimum TLS version. 13 means TLS 1.3, default is TLS 1.2
 	MinTLSVersion int `json:"min_tls_version" mapstructure:"min_tls_version"`
+	// HTTP protocols to enable in preference order. Supported values: http/1.1, h2
+	Protocols []string `json:"tls_protocols" mapstructure:"tls_protocols"`
 }
 
 // ShouldBind returns true if there service must be started
@@ -126,17 +128,16 @@ func (c Conf) Initialize(configDir string) error {
 			return err
 		}
 		config := &tls.Config{
-			GetCertificate:           certMgr.GetCertificateFunc(common.DefaultTLSKeyPaidID),
-			MinVersion:               util.GetTLSVersion(c.MinTLSVersion),
-			NextProtos:               []string{"http/1.1", "h2"},
-			CipherSuites:             util.GetTLSCiphersFromNames(c.TLSCipherSuites),
-			PreferServerCipherSuites: true,
+			GetCertificate: certMgr.GetCertificateFunc(common.DefaultTLSKeyPaidID),
+			MinVersion:     util.GetTLSVersion(c.MinTLSVersion),
+			NextProtos:     util.GetALPNProtocols(c.Protocols),
+			CipherSuites:   util.GetTLSCiphersFromNames(c.TLSCipherSuites),
 		}
 		logger.Debug(logSender, "", "configured TLS cipher suites: %v", config.CipherSuites)
 		httpServer.TLSConfig = config
-		return util.HTTPListenAndServe(httpServer, c.BindAddress, c.BindPort, true, logSender)
+		return util.HTTPListenAndServe(httpServer, c.BindAddress, c.BindPort, true, nil, logSender)
 	}
-	return util.HTTPListenAndServe(httpServer, c.BindAddress, c.BindPort, false, logSender)
+	return util.HTTPListenAndServe(httpServer, c.BindAddress, c.BindPort, false, nil, logSender)
 }
 
 // ReloadCertificateMgr reloads the certificate manager

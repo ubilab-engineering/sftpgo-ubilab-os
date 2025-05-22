@@ -1,4 +1,4 @@
-// Copyright (C) 2019-2023 Nicola Murino
+// Copyright (C) 2019 Nicola Murino
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published
@@ -23,11 +23,11 @@ import (
 	"net/http"
 	"os"
 	"path"
+	"slices"
 	"sync/atomic"
 	"time"
 
 	"github.com/drakkan/webdav"
-	"github.com/eikenb/pipeat"
 
 	"github.com/drakkan/sftpgo/v2/internal/common"
 	"github.com/drakkan/sftpgo/v2/internal/dataprovider"
@@ -48,10 +48,10 @@ type webDavFile struct {
 	info        os.FileInfo
 	startOffset int64
 	isFinished  bool
-	readTryed   atomic.Bool
+	readTried   atomic.Bool
 }
 
-func newWebDavFile(baseTransfer *common.BaseTransfer, pipeWriter *vfs.PipeWriter, pipeReader *pipeat.PipeReaderAt) *webDavFile {
+func newWebDavFile(baseTransfer *common.BaseTransfer, pipeWriter vfs.PipeWriter, pipeReader vfs.PipeReader) *webDavFile {
 	var writer io.WriteCloser
 	var reader io.ReadCloser
 	if baseTransfer.File != nil {
@@ -70,7 +70,7 @@ func newWebDavFile(baseTransfer *common.BaseTransfer, pipeWriter *vfs.PipeWriter
 		startOffset:  0,
 		info:         nil,
 	}
-	f.readTryed.Store(false)
+	f.readTried.Store(false)
 	return f
 }
 
@@ -108,22 +108,24 @@ func (fi *webDavFileInfo) ContentType(_ context.Context) (string, error) {
 
 // Readdir reads directory entries from the handle
 func (f *webDavFile) Readdir(_ int) ([]os.FileInfo, error) {
+	return nil, webdav.ErrNotImplemented
+}
+
+// ReadDir implements the FileDirLister interface
+func (f *webDavFile) ReadDir() (webdav.DirLister, error) {
 	if !f.Connection.User.HasPerm(dataprovider.PermListItems, f.GetVirtualPath()) {
 		return nil, f.Connection.GetPermissionDeniedError()
 	}
-	entries, err := f.Connection.ListDir(f.GetVirtualPath())
+	lister, err := f.Connection.ListDir(f.GetVirtualPath())
 	if err != nil {
 		return nil, err
 	}
-	for idx, info := range entries {
-		entries[idx] = &webDavFileInfo{
-			FileInfo:    info,
-			Fs:          f.Fs,
-			virtualPath: path.Join(f.GetVirtualPath(), info.Name()),
-			fsPath:      f.Fs.Join(f.GetFsPath(), info.Name()),
-		}
-	}
-	return entries, nil
+	return &webDavDirLister{
+		DirLister:      lister,
+		fs:             f.Fs,
+		virtualDirPath: f.GetVirtualPath(),
+		fsDirPath:      f.GetFsPath(),
+	}, nil
 }
 
 // Stat the handle
@@ -145,7 +147,7 @@ func (f *webDavFile) Stat() (os.FileInfo, error) {
 	}
 	info, err := f.Fs.Stat(f.GetFsPath())
 	if err != nil {
-		return nil, err
+		return nil, f.Connection.GetFsError(f.Fs, err)
 	}
 	if vfs.IsCryptOsFs(f.Fs) {
 		info = f.Fs.(*vfs.CryptFs).ConvertFileInfo(info)
@@ -163,7 +165,7 @@ func (f *webDavFile) checkFirstRead() error {
 	if !f.Connection.User.HasPerm(dataprovider.PermDownload, path.Dir(f.GetVirtualPath())) {
 		return f.Connection.GetPermissionDeniedError()
 	}
-	transferQuota := f.BaseTransfer.GetTransferQuota()
+	transferQuota := f.GetTransferQuota()
 	if !transferQuota.HasDownloadSpace() {
 		f.Connection.Log(logger.LevelInfo, "denying file read due to quota limits")
 		return f.Connection.GetReadQuotaExceededError()
@@ -177,7 +179,7 @@ func (f *webDavFile) checkFirstRead() error {
 		f.Connection.Log(logger.LevelDebug, "download for file %q denied by pre action: %v", f.GetVirtualPath(), err)
 		return f.Connection.GetPermissionDeniedError()
 	}
-	f.readTryed.Store(true)
+	f.readTried.Store(true)
 	return nil
 }
 
@@ -186,7 +188,7 @@ func (f *webDavFile) Read(p []byte) (n int, err error) {
 	if f.AbortTransfer.Load() {
 		return 0, errTransferAborted
 	}
-	if !f.readTryed.Load() {
+	if !f.readTried.Load() {
 		if err := f.checkFirstRead(); err != nil {
 			return 0, err
 		}
@@ -210,13 +212,13 @@ func (f *webDavFile) Read(p []byte) (n int, err error) {
 			} else if r != nil {
 				f.reader = r
 			}
-			f.BaseTransfer.SetCancelFn(cancelFn)
+			f.SetCancelFn(cancelFn)
 		}
 		f.ErrTransfer = e
 		f.startOffset = 0
 		f.Unlock()
 		if e != nil {
-			return 0, e
+			return 0, f.Connection.GetFsError(f.Fs, e)
 		}
 	}
 
@@ -227,6 +229,7 @@ func (f *webDavFile) Read(p []byte) (n int, err error) {
 	}
 	if err != nil && err != io.EOF {
 		f.TransferError(err)
+		err = f.ConvertError(err)
 		return
 	}
 	f.HandleThrottle()
@@ -249,6 +252,7 @@ func (f *webDavFile) Write(p []byte) (n int, err error) {
 	}
 	if err != nil {
 		f.TransferError(err)
+		err = f.ConvertError(err)
 		return
 	}
 	f.HandleThrottle()
@@ -280,7 +284,7 @@ func (f *webDavFile) updateTransferQuotaOnSeek() {
 }
 
 func (f *webDavFile) checkFile() error {
-	if f.File == nil && vfs.IsLocalOrUnbufferedSFTPFs(f.Fs) {
+	if f.File == nil && vfs.FsOpenReturnsFile(f.Fs) {
 		file, _, _, err := f.Fs.Open(f.GetFsPath(), 0)
 		if err != nil {
 			f.Connection.Log(logger.LevelWarn, "could not open file %q for seeking: %v",
@@ -318,9 +322,10 @@ func (f *webDavFile) Seek(offset int64, whence int) (int64, error) {
 	if f.GetType() == common.TransferDownload {
 		readOffset := f.startOffset + f.BytesSent.Load()
 		if offset == 0 && readOffset == 0 {
-			if whence == io.SeekStart {
+			switch whence {
+			case io.SeekStart:
 				return 0, nil
-			} else if whence == io.SeekEnd {
+			case io.SeekEnd:
 				if err := f.updateStatInfo(); err != nil {
 					return 0, err
 				}
@@ -359,7 +364,7 @@ func (f *webDavFile) Seek(offset int64, whence int) (int64, error) {
 			f.reader = r
 		}
 		f.ErrTransfer = err
-		f.BaseTransfer.SetCancelFn(cancelFn)
+		f.SetCancelFn(cancelFn)
 		f.Unlock()
 
 		return startByte, err
@@ -398,6 +403,9 @@ func (f *webDavFile) closeIO() error {
 		f.Unlock()
 	} else if f.reader != nil {
 		err = f.reader.Close()
+		if metadater, ok := f.reader.(vfs.Metadater); ok {
+			f.SetMetadata(metadater.Metadata())
+		}
 	}
 	return err
 }
@@ -415,7 +423,7 @@ func (f *webDavFile) setFinished() error {
 
 func (f *webDavFile) isTransfer() bool {
 	if f.GetType() == common.TransferDownload {
-		return f.readTryed.Load()
+		return f.readTried.Load()
 	}
 	return true
 }
@@ -440,11 +448,11 @@ func (f *webDavFile) Patch(patches []webdav.Proppatch) ([]webdav.Propstat, error
 		pstat := webdav.Propstat{}
 		for _, p := range patch.Props {
 			if status == http.StatusForbidden && !hasError {
-				if !patch.Remove && util.Contains(lastModifiedProps, p.XMLName.Local) {
-					parsed, err := http.ParseTime(string(p.InnerXML))
+				if !patch.Remove && slices.Contains(lastModifiedProps, p.XMLName.Local) {
+					parsed, err := parseTime(util.BytesToString(p.InnerXML))
 					if err != nil {
 						f.Connection.Log(logger.LevelWarn, "unsupported last modification time: %q, err: %v",
-							string(p.InnerXML), err)
+							p.InnerXML, err)
 						hasError = true
 						continue
 					}
@@ -468,4 +476,25 @@ func (f *webDavFile) Patch(patches []webdav.Proppatch) ([]webdav.Propstat, error
 		resp = append(resp, pstat)
 	}
 	return resp, nil
+}
+
+type webDavDirLister struct {
+	vfs.DirLister
+	fs             vfs.Fs
+	virtualDirPath string
+	fsDirPath      string
+}
+
+func (l *webDavDirLister) Next(limit int) ([]os.FileInfo, error) {
+	files, err := l.DirLister.Next(limit)
+	for idx := range files {
+		info := files[idx]
+		files[idx] = &webDavFileInfo{
+			FileInfo:    info,
+			Fs:          l.fs,
+			virtualPath: path.Join(l.virtualDirPath, info.Name()),
+			fsPath:      l.fs.Join(l.fsDirPath, info.Name()),
+		}
+	}
+	return files, err
 }

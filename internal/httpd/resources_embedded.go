@@ -1,4 +1,4 @@
-// Copyright (C) 2019-2023 Nicola Murino
+// Copyright (C) 2019 Nicola Murino
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published
@@ -13,21 +13,24 @@
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 //go:build bundle
-// +build bundle
 
 package httpd
 
 import (
+	"net/http"
+
 	"github.com/go-chi/chi/v5"
 
 	"github.com/drakkan/sftpgo/v2/internal/bundle"
 )
 
-func serveStaticDir(router chi.Router, path, _ string) {
+func serveStaticDir(router chi.Router, path, fsDirPath string, disableDirectoryIndex bool) {
 	switch path {
 	case webStaticFilesPath:
-		fileServer(router, path, bundle.GetStaticFs())
+		fileServer(router, path, bundle.GetStaticFs(), disableDirectoryIndex)
 	case webOpenAPIPath:
-		fileServer(router, path, bundle.GetOpenAPIFs())
+		fileServer(router, path, bundle.GetOpenAPIFs(), disableDirectoryIndex)
+	default:
+		fileServer(router, path, http.Dir(fsDirPath), disableDirectoryIndex)
 	}
 }

@@ -1,8 +1,8 @@
 ﻿$ErrorActionPreference  = 'Stop'
 $packageName    = 'sftpgo'
 $softwareName   = 'SFTPGo'
-$url            = 'https://github.com/drakkan/sftpgo/releases/download/v2.4.4/sftpgo_v2.4.4_windows_x86_64.exe'
-$checksum       = 'E43B7097B2099ACE95D336694DAEEF65646D4078FC045011DD3C6A2F07A30B46'
+$url            = 'https://github.com/drakkan/sftpgo/releases/download/v2.6.6/sftpgo_v2.6.6_windows_x86_64.exe'
+$checksum       = '42FD81261F8472E67DA18206EF96050329D156B745AC5F9FF1CA31DD3EE9114C'
 $silentArgs     = '/VERYSILENT'
 $validExitCodes = @(0)
 
@@ -44,11 +44,9 @@ Write-Output "`t$EnvDirPath"
 Write-Output "If the SFTPGo service does not start, make sure that TCP ports 2022 and 8080 are"
 Write-Output "not used by other services or change the SFTPGo configuration to suit your needs."
 Write-Output ""
-Write-Output "General information (README) location:"
-Write-Output "`thttps://github.com/drakkan/sftpgo"
-Write-Output "Getting started guide location:"
-Write-Output "`thttps://github.com/drakkan/sftpgo/blob/v2.4.4/docs/howto/getting-started.md"
-Write-Output "Detailed information (docs folder) location:"
-Write-Output "`thttps://github.com/drakkan/sftpgo/tree/v2.4.4/docs"
+Write-Output "General information:"
+Write-Output "`thttps://sftpgo.com"
+Write-Output "Documentation location:"
+Write-Output "`thttps://docs.sftpgo.com/"
 Write-Output ""
 Write-Output "---------------------------"

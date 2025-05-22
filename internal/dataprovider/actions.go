@@ -1,4 +1,4 @@
-// Copyright (C) 2019-2023 Nicola Murino
+// Copyright (C) 2019 Nicola Murino
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published
@@ -21,6 +21,7 @@ import (
 	"net/url"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -78,8 +79,8 @@ func executeAction(operation, executor, ip, objectType, objectName, role string,
 	if config.Actions.Hook == "" {
 		return
 	}
-	if !util.Contains(config.Actions.ExecuteOn, operation) ||
-		!util.Contains(config.Actions.ExecuteFor, objectType) {
+	if !slices.Contains(config.Actions.ExecuteOn, operation) ||
+		!slices.Contains(config.Actions.ExecuteFor, objectType) {
 		return
 	}
 
@@ -141,14 +142,14 @@ func executeNotificationCommand(operation, executor, ip, objectType, objectName,
 
 	cmd := exec.CommandContext(ctx, config.Actions.Hook, args...)
 	cmd.Env = append(env,
-		fmt.Sprintf("SFTPGO_PROVIDER_ACTION=%vs", operation),
+		fmt.Sprintf("SFTPGO_PROVIDER_ACTION=%s", operation),
 		fmt.Sprintf("SFTPGO_PROVIDER_OBJECT_TYPE=%s", objectType),
 		fmt.Sprintf("SFTPGO_PROVIDER_OBJECT_NAME=%s", objectName),
 		fmt.Sprintf("SFTPGO_PROVIDER_USERNAME=%s", executor),
 		fmt.Sprintf("SFTPGO_PROVIDER_IP=%s", ip),
 		fmt.Sprintf("SFTPGO_PROVIDER_ROLE=%s", role),
 		fmt.Sprintf("SFTPGO_PROVIDER_TIMESTAMP=%d", util.GetTimeAsMsSinceEpoch(time.Now())),
-		fmt.Sprintf("SFTPGO_PROVIDER_OBJECT=%s", string(objectAsJSON)))
+		fmt.Sprintf("SFTPGO_PROVIDER_OBJECT=%s", objectAsJSON))
 
 	startTime := time.Now()
 	err := cmd.Run()

@@ -1,4 +1,4 @@
-// Copyright (C) 2019-2023 Nicola Murino
+// Copyright (C) 2019 Nicola Murino
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published
@@ -17,6 +17,7 @@ package common
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -94,7 +95,7 @@ func (r *RateLimiterConfig) validate() error {
 	}
 	r.Protocols = util.RemoveDuplicates(r.Protocols, true)
 	for _, protocol := range r.Protocols {
-		if !util.Contains(rateLimiterProtocolValues, protocol) {
+		if !slices.Contains(rateLimiterProtocolValues, protocol) {
 			return fmt.Errorf("invalid protocol %q", protocol)
 		}
 	}

@@ -1,4 +1,4 @@
-// Copyright (C) 2019-2023 Nicola Murino
+// Copyright (C) 2019 Nicola Murino
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published
@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"net/netip"
 	"runtime/debug"
+	"strconv"
 	"strings"
 	"time"
 
@@ -35,7 +36,7 @@ import (
 )
 
 const (
-	sqlDatabaseVersion     = 28
+	sqlDatabaseVersion     = 32
 	defaultSQLQueryTimeout = 10 * time.Second
 	longSQLQueryTimeout    = 60 * time.Second
 )
@@ -958,63 +959,86 @@ func sqlCommonGetUsersInGroups(names []string, dbHandle sqlQuerier) ([]string, e
 	if len(names) == 0 {
 		return nil, nil
 	}
+	maxNames := len(sqlPlaceholders)
+	usernames := make([]string, 0, len(names))
+
 	ctx, cancel := context.WithTimeout(context.Background(), defaultSQLQueryTimeout)
 	defer cancel()
 
-	q := getUsersInGroupsQuery(len(names))
-	args := make([]any, 0, len(names))
-	for _, name := range names {
-		args = append(args, name)
-	}
+	for len(names) > 0 {
+		if maxNames > len(names) {
+			maxNames = len(names)
+		}
 
-	usernames := make([]string, 0, len(names))
-	rows, err := dbHandle.QueryContext(ctx, q, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
+		q := getUsersInGroupsQuery(maxNames)
+		args := make([]any, 0, maxNames)
+		for _, name := range names[:maxNames] {
+			args = append(args, name)
+		}
 
-	for rows.Next() {
-		var username string
-		err = rows.Scan(&username)
+		rows, err := dbHandle.QueryContext(ctx, q, args...)
+		if err != nil {
+			return nil, err
+		}
+		defer rows.Close()
+
+		for rows.Next() {
+			var username string
+			err = rows.Scan(&username)
+			if err != nil {
+				return usernames, err
+			}
+			usernames = append(usernames, username)
+		}
+		err = rows.Err()
 		if err != nil {
 			return usernames, err
 		}
-		usernames = append(usernames, username)
+		names = names[maxNames:]
 	}
-	return usernames, rows.Err()
+	return usernames, nil
 }
 
 func sqlCommonGetGroupsWithNames(names []string, dbHandle sqlQuerier) ([]Group, error) {
 	if len(names) == 0 {
 		return nil, nil
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), defaultSQLQueryTimeout)
-	defer cancel()
-
-	q := getGroupsWithNamesQuery(len(names))
-	args := make([]any, 0, len(names))
-	for _, name := range names {
-		args = append(args, name)
-	}
+	maxNames := len(sqlPlaceholders)
 	groups := make([]Group, 0, len(names))
-	rows, err := dbHandle.QueryContext(ctx, q, args...)
-	if err != nil {
-		return groups, err
-	}
-	defer rows.Close()
+	for len(names) > 0 {
+		if maxNames > len(names) {
+			maxNames = len(names)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), defaultSQLQueryTimeout)
+		defer cancel()
 
-	for rows.Next() {
-		group, err := getGroupFromDbRow(rows)
+		q := getGroupsWithNamesQuery(maxNames)
+		args := make([]any, 0, maxNames)
+		for _, name := range names[:maxNames] {
+			args = append(args, name)
+		}
+		rows, err := dbHandle.QueryContext(ctx, q, args...)
 		if err != nil {
 			return groups, err
 		}
-		groups = append(groups, group)
+		defer rows.Close()
+
+		for rows.Next() {
+			group, err := getGroupFromDbRow(rows)
+			if err != nil {
+				return groups, err
+			}
+			groups = append(groups, group)
+		}
+		err = rows.Err()
+		if err != nil {
+			return groups, err
+		}
+		names = names[maxNames:]
 	}
-	err = rows.Err()
-	if err != nil {
-		return groups, err
-	}
+	ctx, cancel := context.WithTimeout(context.Background(), defaultSQLQueryTimeout)
+	defer cancel()
+
 	return getGroupsWithVirtualFolders(ctx, groups, dbHandle)
 }
 
@@ -1225,6 +1249,32 @@ func sqlCommonUpdateQuota(username string, filesAdd int, sizeAdd int64, reset bo
 	return err
 }
 
+func sqlCommonGetAdminSignature(username string, dbHandle *sql.DB) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), defaultSQLQueryTimeout)
+	defer cancel()
+
+	q := getAdminSignatureQuery()
+	var updatedAt int64
+	err := dbHandle.QueryRowContext(ctx, q, username).Scan(&updatedAt)
+	if err != nil {
+		return "", err
+	}
+	return strconv.FormatInt(updatedAt, 10), nil
+}
+
+func sqlCommonGetUserSignature(username string, dbHandle *sql.DB) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), defaultSQLQueryTimeout)
+	defer cancel()
+
+	q := getUserSignatureQuery()
+	var updatedAt int64
+	err := dbHandle.QueryRowContext(ctx, q, username).Scan(&updatedAt)
+	if err != nil {
+		return "", err
+	}
+	return strconv.FormatInt(updatedAt, 10), nil
+}
+
 func sqlCommonGetUsedQuota(username string, dbHandle *sql.DB) (int, int64, int64, int64, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), defaultSQLQueryTimeout)
 	defer cancel()
@@ -1386,7 +1436,7 @@ func sqlCommonUpdateUserPassword(username, password string, dbHandle *sql.DB) er
 	defer cancel()
 
 	q := getUpdateUserPasswordQuery()
-	res, err := dbHandle.ExecContext(ctx, q, password, username)
+	res, err := dbHandle.ExecContext(ctx, q, password, util.GetTimeAsMsSinceEpoch(time.Now()), username)
 	if err != nil {
 		return err
 	}
@@ -1535,6 +1585,9 @@ func sqlCommonGetRecentlyUpdatedUsers(after int64, dbHandle sqlQuerier) ([]User,
 		}
 	}
 	groupNames = util.RemoveDuplicates(groupNames, false)
+	if len(groupNames) == 0 {
+		return users, nil
+	}
 	groups, err := sqlCommonGetGroupsWithNames(groupNames, dbHandle)
 	if err != nil {
 		return users, err
@@ -1553,15 +1606,23 @@ func sqlCommonGetRecentlyUpdatedUsers(after int64, dbHandle sqlQuerier) ([]User,
 	return users, nil
 }
 
+func sqlGetMaxUsersForQuotaCheckRange() int {
+	maxUsers := 50
+	if maxUsers > len(sqlPlaceholders) {
+		maxUsers = len(sqlPlaceholders)
+	}
+	return maxUsers
+}
+
 func sqlCommonGetUsersForQuotaCheck(toFetch map[string]bool, dbHandle sqlQuerier) ([]User, error) {
-	users := make([]User, 0, 30)
+	maxUsers := sqlGetMaxUsersForQuotaCheckRange()
+	users := make([]User, 0, maxUsers)
 
 	usernames := make([]string, 0, len(toFetch))
 	for k := range toFetch {
 		usernames = append(usernames, k)
 	}
 
-	maxUsers := 30
 	for len(usernames) > 0 {
 		if maxUsers > len(usernames) {
 			maxUsers = len(usernames)
@@ -2302,19 +2363,6 @@ func sqlCommonGetFolderByName(ctx context.Context, name string, dbHandle sqlQuer
 	return folders[0], nil
 }
 
-func sqlCommonAddOrUpdateFolder(ctx context.Context, baseFolder *vfs.BaseVirtualFolder, usedQuotaSize int64,
-	usedQuotaFiles int, lastQuotaUpdate int64, dbHandle sqlQuerier,
-) error {
-	fsConfig, err := json.Marshal(baseFolder.FsConfig)
-	if err != nil {
-		return err
-	}
-	q := getUpsertFolderQuery()
-	_, err = dbHandle.ExecContext(ctx, q, baseFolder.MappedPath, usedQuotaSize, usedQuotaFiles,
-		lastQuotaUpdate, baseFolder.Name, baseFolder.Description, fsConfig)
-	return err
-}
-
 func sqlCommonAddFolder(folder *vfs.BaseVirtualFolder, dbHandle sqlQuerier) error {
 	err := ValidateFolder(folder)
 	if err != nil {
@@ -2518,10 +2566,6 @@ func generateGroupVirtualFoldersMapping(ctx context.Context, group *Group, dbHan
 	}
 	for idx := range group.VirtualFolders {
 		vfolder := &group.VirtualFolders[idx]
-		err = sqlCommonAddOrUpdateFolder(ctx, &vfolder.BaseVirtualFolder, 0, 0, 0, dbHandle)
-		if err != nil {
-			return err
-		}
 		err = sqlCommonAddGroupFolderMapping(ctx, group, vfolder, dbHandle)
 		if err != nil {
 			return err
@@ -2537,10 +2581,6 @@ func generateUserVirtualFoldersMapping(ctx context.Context, user *User, dbHandle
 	}
 	for idx := range user.VirtualFolders {
 		vfolder := &user.VirtualFolders[idx]
-		err := sqlCommonAddOrUpdateFolder(ctx, &vfolder.BaseVirtualFolder, 0, 0, 0, dbHandle)
-		if err != nil {
-			return err
-		}
 		err = sqlCommonAddUserFolderMapping(ctx, user, vfolder, dbHandle)
 		if err != nil {
 			return err
@@ -3225,27 +3265,30 @@ func sqlCommonAddSession(session Session, dbHandle *sql.DB) error {
 	return err
 }
 
-func sqlCommonGetSession(key string, dbHandle sqlQuerier) (Session, error) {
+func sqlCommonGetSession(key string, sessionType SessionType, dbHandle sqlQuerier) (Session, error) {
 	var session Session
 	ctx, cancel := context.WithTimeout(context.Background(), defaultSQLQueryTimeout)
 	defer cancel()
 
 	q := getSessionQuery()
 	var data []byte // type hint, some driver will use string instead of []byte if the type is any
-	err := dbHandle.QueryRowContext(ctx, q, key).Scan(&session.Key, &data, &session.Type, &session.Timestamp)
+	err := dbHandle.QueryRowContext(ctx, q, key, sessionType).Scan(&session.Key, &data, &session.Type, &session.Timestamp)
 	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return session, util.NewRecordNotFoundError(err.Error())
+		}
 		return session, err
 	}
 	session.Data = data
 	return session, nil
 }
 
-func sqlCommonDeleteSession(key string, dbHandle *sql.DB) error {
+func sqlCommonDeleteSession(key string, sessionType SessionType, dbHandle *sql.DB) error {
 	ctx, cancel := context.WithTimeout(context.Background(), defaultSQLQueryTimeout)
 	defer cancel()
 
 	q := getDeleteSessionQuery()
-	res, err := dbHandle.ExecContext(ctx, q, key)
+	res, err := dbHandle.ExecContext(ctx, q, key, sessionType)
 	if err != nil {
 		return err
 	}

@@ -1,4 +1,4 @@
-// Copyright (C) 2019-2023 Nicola Murino
+// Copyright (C) 2019 Nicola Murino
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published
@@ -25,6 +25,7 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -37,7 +38,6 @@ import (
 	"github.com/drakkan/sftpgo/v2/internal/httpclient"
 	"github.com/drakkan/sftpgo/v2/internal/logger"
 	"github.com/drakkan/sftpgo/v2/internal/plugin"
-	"github.com/drakkan/sftpgo/v2/internal/util"
 )
 
 var (
@@ -86,13 +86,14 @@ func InitializeActionHandler(handler ActionHandler) {
 func ExecutePreAction(conn *BaseConnection, operation, filePath, virtualPath string, fileSize int64, openFlags int) (int, error) {
 	var event *notifier.FsEvent
 	hasNotifiersPlugin := plugin.Handler.HasNotifiers()
-	hasHook := util.Contains(Config.Actions.ExecuteOn, operation)
+	hasHook := slices.Contains(Config.Actions.ExecuteOn, operation)
 	hasRules := eventManager.hasFsRules()
 	if !hasHook && !hasNotifiersPlugin && !hasRules {
 		return 0, nil
 	}
+	dateTime := time.Now()
 	event = newActionNotification(&conn.User, operation, filePath, virtualPath, "", "", "",
-		conn.protocol, conn.GetRemoteIP(), conn.ID, fileSize, openFlags, conn.getNotificationStatus(nil), 0)
+		conn.protocol, conn.GetRemoteIP(), conn.ID, fileSize, openFlags, conn.getNotificationStatus(nil), 0, dateTime, nil)
 	if hasNotifiersPlugin {
 		plugin.Handler.NotifyFsEvent(event)
 	}
@@ -107,11 +108,13 @@ func ExecutePreAction(conn *BaseConnection, operation, filePath, virtualPath str
 			VirtualTargetPath: event.VirtualTargetPath,
 			FsTargetPath:      event.TargetPath,
 			ObjectName:        path.Base(event.VirtualPath),
+			Extension:         path.Ext(event.VirtualPath),
 			FileSize:          event.FileSize,
 			Protocol:          event.Protocol,
 			IP:                event.IP,
 			Role:              event.Role,
-			Timestamp:         event.Timestamp,
+			Timestamp:         dateTime,
+			Email:             conn.User.Email,
 			Object:            nil,
 		}
 		executedSync, err := eventManager.handleFsEvent(params)
@@ -127,16 +130,17 @@ func ExecutePreAction(conn *BaseConnection, operation, filePath, virtualPath str
 
 // ExecuteActionNotification executes the defined hook, if any, for the specified action
 func ExecuteActionNotification(conn *BaseConnection, operation, filePath, virtualPath, target, virtualTarget, sshCmd string,
-	fileSize int64, err error, elapsed int64,
+	fileSize int64, err error, elapsed int64, metadata map[string]string,
 ) error {
 	hasNotifiersPlugin := plugin.Handler.HasNotifiers()
-	hasHook := util.Contains(Config.Actions.ExecuteOn, operation)
+	hasHook := slices.Contains(Config.Actions.ExecuteOn, operation)
 	hasRules := eventManager.hasFsRules()
 	if !hasHook && !hasNotifiersPlugin && !hasRules {
 		return nil
 	}
+	dateTime := time.Now()
 	notification := newActionNotification(&conn.User, operation, filePath, virtualPath, target, virtualTarget, sshCmd,
-		conn.protocol, conn.GetRemoteIP(), conn.ID, fileSize, 0, conn.getNotificationStatus(err), elapsed)
+		conn.protocol, conn.GetRemoteIP(), conn.ID, fileSize, 0, conn.getNotificationStatus(err), elapsed, dateTime, metadata)
 	if hasNotifiersPlugin {
 		plugin.Handler.NotifyFsEvent(notification)
 	}
@@ -151,13 +155,16 @@ func ExecuteActionNotification(conn *BaseConnection, operation, filePath, virtua
 			VirtualTargetPath: notification.VirtualTargetPath,
 			FsTargetPath:      notification.TargetPath,
 			ObjectName:        path.Base(notification.VirtualPath),
+			Extension:         path.Ext(notification.VirtualPath),
 			FileSize:          notification.FileSize,
 			Elapsed:           notification.Elapsed,
 			Protocol:          notification.Protocol,
 			IP:                notification.IP,
 			Role:              notification.Role,
-			Timestamp:         notification.Timestamp,
+			Timestamp:         dateTime,
+			Email:             conn.User.Email,
 			Object:            nil,
+			Metadata:          metadata,
 		}
 		if err != nil {
 			params.AddError(fmt.Errorf("%q failed: %w", params.Event, err))
@@ -168,7 +175,7 @@ func ExecuteActionNotification(conn *BaseConnection, operation, filePath, virtua
 		}
 	}
 	if hasHook {
-		if util.Contains(Config.Actions.ExecuteSync, operation) {
+		if slices.Contains(Config.Actions.ExecuteSync, operation) {
 			_, err := actionHandler.Handle(notification)
 			return err
 		}
@@ -192,6 +199,8 @@ func newActionNotification(
 	operation, filePath, virtualPath, target, virtualTarget, sshCmd, protocol, ip, sessionID string,
 	fileSize int64,
 	openFlags, status int, elapsed int64,
+	datetime time.Time,
+	metadata map[string]string,
 ) *notifier.FsEvent {
 	var bucket, endpoint string
 
@@ -232,15 +241,16 @@ func newActionNotification(
 		SessionID:         sessionID,
 		OpenFlags:         openFlags,
 		Role:              user.Role,
-		Timestamp:         time.Now().UnixNano(),
+		Timestamp:         datetime.UnixNano(),
 		Elapsed:           elapsed,
+		Metadata:          metadata,
 	}
 }
 
 type defaultActionHandler struct{}
 
 func (h *defaultActionHandler) Handle(event *notifier.FsEvent) (int, error) {
-	if !util.Contains(Config.Actions.ExecuteOn, event.Action) {
+	if !slices.Contains(Config.Actions.ExecuteOn, event.Action) {
 		return 0, nil
 	}
 
@@ -314,7 +324,7 @@ func (h *defaultActionHandler) handleCommand(event *notifier.FsEvent) error {
 }
 
 func notificationAsEnvVars(event *notifier.FsEvent) []string {
-	return []string{
+	result := []string{
 		fmt.Sprintf("SFTPGO_ACTION=%s", event.Action),
 		fmt.Sprintf("SFTPGO_ACTION_USERNAME=%s", event.Username),
 		fmt.Sprintf("SFTPGO_ACTION_PATH=%s", event.Path),
@@ -335,4 +345,11 @@ func notificationAsEnvVars(event *notifier.FsEvent) []string {
 		fmt.Sprintf("SFTPGO_ACTION_TIMESTAMP=%d", event.Timestamp),
 		fmt.Sprintf("SFTPGO_ACTION_ROLE=%s", event.Role),
 	}
+	if len(event.Metadata) > 0 {
+		data, err := json.Marshal(event.Metadata)
+		if err == nil {
+			result = append(result, fmt.Sprintf("SFTPGO_ACTION_METADATA=%s", data))
+		}
+	}
+	return result
 }

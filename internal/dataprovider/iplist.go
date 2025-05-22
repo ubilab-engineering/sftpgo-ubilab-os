@@ -1,4 +1,4 @@
-// Copyright (C) 2019-2023 Nicola Murino
+// Copyright (C) 2019 Nicola Murino
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published
@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -85,7 +86,7 @@ var (
 
 // CheckIPListType returns an error if the provided IP list type is not valid
 func CheckIPListType(t IPListType) error {
-	if !util.Contains(supportedIPListType, t) {
+	if !slices.Contains(supportedIPListType, t) {
 		return util.NewValidationError(fmt.Sprintf("invalid list type %d", t))
 	}
 	return nil
@@ -214,7 +215,7 @@ func (e *IPListEntry) validate() error {
 		// parse as IP
 		parsed, err := netip.ParseAddr(e.IPOrNet)
 		if err != nil {
-			return util.NewValidationError(fmt.Sprintf("invalid IP %q", e.IPOrNet))
+			return util.NewI18nError(util.NewValidationError(fmt.Sprintf("invalid IP %q", e.IPOrNet)), util.I18nErrorIPInvalid)
 		}
 		if parsed.Is4() {
 			e.IPOrNet += "/32"
@@ -226,7 +227,7 @@ func (e *IPListEntry) validate() error {
 	}
 	prefix, err := netip.ParsePrefix(e.IPOrNet)
 	if err != nil {
-		return util.NewValidationError(fmt.Sprintf("invalid network %q: %v", e.IPOrNet, err))
+		return util.NewI18nError(util.NewValidationError(fmt.Sprintf("invalid network %q: %v", e.IPOrNet, err)), util.I18nErrorNetInvalid)
 	}
 	prefix = prefix.Masked()
 	if prefix.Addr().Is4In6() {
@@ -235,7 +236,7 @@ func (e *IPListEntry) validate() error {
 	// TODO: to remove when the in memory ranger switch to netip
 	_, _, err = net.ParseCIDR(e.IPOrNet)
 	if err != nil {
-		return util.NewValidationError(fmt.Sprintf("invalid network: %v", err))
+		return util.NewI18nError(util.NewValidationError(fmt.Sprintf("invalid network: %v", err)), util.I18nErrorNetInvalid)
 	}
 	if prefix.Addr().Is4() || prefix.Addr().Is4In6() {
 		e.IPType = ipTypeV4
@@ -416,6 +417,10 @@ func (l *IPList) IsListed(ip, protocol string) (bool, int, error) {
 	if l.isInMemory.Load() {
 		l.mu.RLock()
 		defer l.mu.RUnlock()
+
+		if l.Ranges.Len() == 0 {
+			return false, 0, nil
+		}
 
 		parsedIP := net.ParseIP(ip)
 		if parsedIP == nil {

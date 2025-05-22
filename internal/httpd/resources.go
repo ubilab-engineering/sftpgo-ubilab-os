@@ -1,4 +1,4 @@
-// Copyright (C) 2019-2023 Nicola Murino
+// Copyright (C) 2019 Nicola Murino
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published
@@ -13,7 +13,6 @@
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 //go:build !bundle
-// +build !bundle
 
 package httpd
 
@@ -23,6 +22,6 @@ import (
 	"github.com/go-chi/chi/v5"
 )
 
-func serveStaticDir(router chi.Router, path, fsDirPath string) {
-	fileServer(router, path, http.Dir(fsDirPath))
+func serveStaticDir(router chi.Router, path, fsDirPath string, disableDirectoryIndex bool) {
+	fileServer(router, path, http.Dir(fsDirPath), disableDirectoryIndex)
 }

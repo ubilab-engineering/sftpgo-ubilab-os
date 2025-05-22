@@ -1,4 +1,4 @@
-// Copyright (C) 2019-2023 Nicola Murino
+// Copyright (C) 2019 Nicola Murino
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published
@@ -24,6 +24,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"testing"
 	"time"
 
@@ -109,6 +110,12 @@ func (MockOsFs) IsUploadResumeSupported() bool {
 	return false
 }
 
+// IsConditionalUploadResumeSupported returns if resuming uploads is supported
+// for the specified size
+func (MockOsFs) IsConditionalUploadResumeSupported(_ int64) bool {
+	return false
+}
+
 // IsAtomicUploadSupported returns true if atomic upload is supported
 func (fs MockOsFs) IsAtomicUploadSupported() bool {
 	return fs.isAtomicUploadSupported
@@ -139,7 +146,7 @@ func (fs MockOsFs) Remove(name string, _ bool) error {
 }
 
 // Rename renames (moves) source to target
-func (fs MockOsFs) Rename(source, target string) (int, int64, error) {
+func (fs MockOsFs) Rename(source, target string, _ int) (int, int64, error) {
 	if fs.err != nil {
 		return -1, -1, fs.err
 	}
@@ -149,7 +156,7 @@ func (fs MockOsFs) Rename(source, target string) (int, int64, error) {
 
 func newMockOsFs(err, statErr error, atomicUpload bool, connectionID, rootDir string) vfs.Fs {
 	return &MockOsFs{
-		Fs:                      vfs.NewOsFs(connectionID, rootDir, ""),
+		Fs:                      vfs.NewOsFs(connectionID, rootDir, "", nil),
 		err:                     err,
 		statErr:                 statErr,
 		isAtomicUploadSupported: atomicUpload,
@@ -183,7 +190,7 @@ func TestUploadResumeInvalidOffset(t *testing.T) {
 			Username: "testuser",
 		},
 	}
-	fs := vfs.NewOsFs("", os.TempDir(), "")
+	fs := vfs.NewOsFs("", os.TempDir(), "", nil)
 	conn := common.NewBaseConnection("", common.ProtocolSFTP, "", "", user)
 	baseTransfer := common.NewBaseTransfer(file, conn, nil, file.Name(), file.Name(), testfile,
 		common.TransferUpload, 10, 0, 0, 0, false, fs, dataprovider.TransferQuota{})
@@ -214,7 +221,7 @@ func TestReadWriteErrors(t *testing.T) {
 			Username: "testuser",
 		},
 	}
-	fs := vfs.NewOsFs("", os.TempDir(), "")
+	fs := vfs.NewOsFs("", os.TempDir(), "", nil)
 	conn := common.NewBaseConnection("", common.ProtocolSFTP, "", "", user)
 	baseTransfer := common.NewBaseTransfer(file, conn, nil, file.Name(), file.Name(), testfile, common.TransferDownload,
 		0, 0, 0, 0, false, fs, dataprovider.TransferQuota{})
@@ -233,7 +240,7 @@ func TestReadWriteErrors(t *testing.T) {
 	assert.NoError(t, err)
 	baseTransfer = common.NewBaseTransfer(nil, conn, nil, file.Name(), file.Name(), testfile, common.TransferDownload,
 		0, 0, 0, 0, false, fs, dataprovider.TransferQuota{})
-	transfer = newTransfer(baseTransfer, nil, r, nil)
+	transfer = newTransfer(baseTransfer, nil, vfs.NewPipeReader(r), nil)
 	err = transfer.Close()
 	assert.NoError(t, err)
 	_, err = transfer.ReadAt(buf, 0)
@@ -263,6 +270,7 @@ func TestReadWriteErrors(t *testing.T) {
 	err = os.Remove(testfile)
 	assert.NoError(t, err)
 	assert.Len(t, conn.GetTransfers(), 0)
+	assert.Equal(t, int32(0), common.Connections.GetTotalTransfers())
 }
 
 func TestUnsupportedListOP(t *testing.T) {
@@ -288,7 +296,7 @@ func TestTransferCancelFn(t *testing.T) {
 			Username: "testuser",
 		},
 	}
-	fs := vfs.NewOsFs("", os.TempDir(), "")
+	fs := vfs.NewOsFs("", os.TempDir(), "", nil)
 	conn := common.NewBaseConnection("", common.ProtocolSFTP, "", "", user)
 	baseTransfer := common.NewBaseTransfer(file, conn, cancelFn, file.Name(), file.Name(), testfile, common.TransferDownload,
 		0, 0, 0, 0, false, fs, dataprovider.TransferQuota{})
@@ -311,7 +319,7 @@ func TestTransferCancelFn(t *testing.T) {
 
 func TestUploadFiles(t *testing.T) {
 	common.Config.UploadMode = common.UploadModeAtomic
-	fs := vfs.NewOsFs("123", os.TempDir(), "")
+	fs := vfs.NewOsFs("123", os.TempDir(), "", nil)
 	u := dataprovider.User{}
 	c := Connection{
 		BaseConnection: common.NewBaseConnection("", common.ProtocolSFTP, "", "", u),
@@ -412,7 +420,7 @@ func TestSupportedSSHCommands(t *testing.T) {
 	assert.Equal(t, len(supportedSSHCommands), len(cmds))
 
 	for _, c := range cmds {
-		assert.True(t, util.Contains(supportedSSHCommands, c))
+		assert.True(t, slices.Contains(supportedSSHCommands, c))
 	}
 }
 
@@ -823,7 +831,7 @@ func TestRsyncOptions(t *testing.T) {
 	user := dataprovider.User{
 		BaseUser: sdk.BaseUser{
 			Permissions: permissions,
-			HomeDir:     os.TempDir(),
+			HomeDir:     filepath.Clean(os.TempDir()),
 		},
 	}
 	conn := &Connection{
@@ -836,7 +844,7 @@ func TestRsyncOptions(t *testing.T) {
 	}
 	cmd, err := sshCmd.getSystemCommand()
 	assert.NoError(t, err)
-	assert.True(t, util.Contains(cmd.cmd.Args, "--safe-links"),
+	assert.Equal(t, []string{"rsync", "--server", "-vlogDtprze.iLsfxC", "--safe-links", ".", user.HomeDir + string(os.PathSeparator)}, cmd.cmd.Args,
 		"--safe-links must be added if the user has the create symlinks permission")
 
 	permissions["/"] = []string{dataprovider.PermDownload, dataprovider.PermUpload, dataprovider.PermCreateDirs,
@@ -849,12 +857,18 @@ func TestRsyncOptions(t *testing.T) {
 	sshCmd = sshCommand{
 		command:    "rsync",
 		connection: conn,
+	}
+	_, err = sshCmd.getSystemCommand()
+	assert.Error(t, err)
+	sshCmd = sshCommand{
+		command:    "rsync",
+		connection: conn,
 		args:       []string{"--server", "-vlogDtprze.iLsfxC", ".", "/"},
 	}
 	cmd, err = sshCmd.getSystemCommand()
 	assert.NoError(t, err)
-	assert.True(t, util.Contains(cmd.cmd.Args, "--munge-links"),
-		"--munge-links must be added if the user has the create symlinks permission")
+	assert.Equal(t, []string{"rsync", "--server", "-vlogDtprze.iLsfxC", "--munge-links", ".", user.HomeDir + string(os.PathSeparator)}, cmd.cmd.Args,
+		"--munge-links must be added if the user hasn't the create symlinks permission")
 
 	sshCmd.connection.User.VirtualFolders = append(sshCmd.connection.User.VirtualFolders, vfs.VirtualFolder{
 		BaseVirtualFolder: vfs.BaseVirtualFolder{
@@ -1007,6 +1021,8 @@ func TestSystemCommandErrors(t *testing.T) {
 	transfer.MaxWriteSize = -1
 	_, err = transfer.copyFromReaderToWriter(sshCmd.connection.channel, dst)
 	assert.True(t, transfer.Connection.IsQuotaExceededError(err))
+	err = transfer.Close()
+	assert.Error(t, err)
 
 	baseTransfer = common.NewBaseTransfer(nil, sshCmd.connection.BaseConnection, nil, "", "", "",
 		common.TransferDownload, 0, 0, 0, 0, false, fs, dataprovider.TransferQuota{
@@ -1024,9 +1040,13 @@ func TestSystemCommandErrors(t *testing.T) {
 	if assert.Error(t, err) {
 		assert.Contains(t, err.Error(), common.ErrReadQuotaExceeded.Error())
 	}
+	err = transfer.Close()
+	assert.Error(t, err)
 
 	err = os.RemoveAll(homeDir)
 	assert.NoError(t, err)
+
+	assert.Equal(t, int32(0), common.Connections.GetTotalTransfers())
 }
 
 func TestCommandGetFsError(t *testing.T) {
@@ -1069,19 +1089,6 @@ func TestCommandGetFsError(t *testing.T) {
 	assert.Error(t, err)
 	err = scpCommand.handleDownload("")
 	assert.Error(t, err)
-}
-
-func TestGetConnectionInfo(t *testing.T) {
-	c := common.ConnectionStatus{
-		Username:      "test_user",
-		ConnectionID:  "123",
-		ClientVersion: "client",
-		RemoteAddress: "127.0.0.1:1234",
-		Protocol:      common.ProtocolSSH,
-		Command:       "sha1sum /test_file_ftp.dat",
-	}
-	info := c.GetConnectionInfo()
-	assert.Contains(t, info, "sha1sum /test_file_ftp.dat")
 }
 
 func TestSCPFileMode(t *testing.T) {
@@ -1213,7 +1220,7 @@ func TestSCPParseUploadMessage(t *testing.T) {
 		StdErrBuffer: bytes.NewBuffer(stdErrBuf),
 		ReadError:    nil,
 	}
-	fs := vfs.NewOsFs("", os.TempDir(), "")
+	fs := vfs.NewOsFs("", os.TempDir(), "", nil)
 	connection := &Connection{
 		BaseConnection: common.NewBaseConnection("", common.ProtocolSFTP, "", "", dataprovider.User{
 			BaseUser: sdk.BaseUser{
@@ -1301,6 +1308,17 @@ func TestSCPProtocolMessages(t *testing.T) {
 	if assert.Error(t, err) {
 		assert.Equal(t, protocolErrorMsg, err.Error())
 	}
+
+	mockSSHChannel = MockChannel{
+		Buffer:       bytes.NewBuffer(respBuffer),
+		StdErrBuffer: bytes.NewBuffer(stdErrBuf),
+		ReadError:    nil,
+		WriteError:   writeErr,
+	}
+	scpCommand.connection.channel = &mockSSHChannel
+
+	err = scpCommand.downloadDirs(nil, nil)
+	assert.ErrorIs(t, err, writeErr)
 }
 
 func TestSCPTestDownloadProtocolMessages(t *testing.T) {
@@ -1470,7 +1488,7 @@ func TestSCPRecursiveDownloadErrors(t *testing.T) {
 		err := client.Close()
 		assert.NoError(t, err)
 	}()
-	fs := vfs.NewOsFs("123", os.TempDir(), "")
+	fs := vfs.NewOsFs("123", os.TempDir(), "", nil)
 	connection := &Connection{
 		BaseConnection: common.NewBaseConnection("", common.ProtocolSCP, "", "", dataprovider.User{
 			BaseUser: sdk.BaseUser{
@@ -1593,7 +1611,7 @@ func TestSCPDownloadFileData(t *testing.T) {
 		ReadError:    nil,
 		WriteError:   writeErr,
 	}
-	fs := vfs.NewOsFs("", os.TempDir(), "")
+	fs := vfs.NewOsFs("", os.TempDir(), "", nil)
 	connection := &Connection{
 		BaseConnection: common.NewBaseConnection("", common.ProtocolSCP, "", "", dataprovider.User{BaseUser: sdk.BaseUser{HomeDir: os.TempDir()}}),
 		channel:        &mockSSHChannelReadErr,
@@ -1645,7 +1663,7 @@ func TestSCPUploadFiledata(t *testing.T) {
 			Username: "testuser",
 		},
 	}
-	fs := vfs.NewOsFs("", os.TempDir(), "")
+	fs := vfs.NewOsFs("", os.TempDir(), "", nil)
 	connection := &Connection{
 		BaseConnection: common.NewBaseConnection("", common.ProtocolSCP, "", "", user),
 		channel:        &mockSSHChannel,
@@ -1712,6 +1730,7 @@ func TestSCPUploadFiledata(t *testing.T) {
 	if assert.Error(t, err) {
 		assert.EqualError(t, err, common.ErrTransferClosed.Error())
 	}
+	transfer.Connection.RemoveTransfer(transfer)
 
 	mockSSHChannel = MockChannel{
 		Buffer:       bytes.NewBuffer(buf),
@@ -1722,10 +1741,13 @@ func TestSCPUploadFiledata(t *testing.T) {
 
 	transfer.Connection.AddTransfer(transfer)
 	err = scpCommand.getUploadFileData(2, transfer)
-	assert.True(t, errors.Is(err, os.ErrClosed))
+	assert.ErrorContains(t, err, os.ErrClosed.Error())
+	transfer.Connection.RemoveTransfer(transfer)
 
 	err = os.Remove(testfile)
 	assert.NoError(t, err)
+
+	assert.Equal(t, int32(0), common.Connections.GetTotalTransfers())
 }
 
 func TestUploadError(t *testing.T) {
@@ -1736,7 +1758,7 @@ func TestUploadError(t *testing.T) {
 			Username: "testuser",
 		},
 	}
-	fs := vfs.NewOsFs("", os.TempDir(), "")
+	fs := vfs.NewOsFs("", os.TempDir(), "", nil)
 	connection := &Connection{
 		BaseConnection: common.NewBaseConnection("", common.ProtocolSCP, "", "", user),
 	}
@@ -1794,7 +1816,7 @@ func TestTransferFailingReader(t *testing.T) {
 	require.NoError(t, err)
 	buf := make([]byte, 32)
 	_, err = transfer.ReadAt(buf, 0)
-	assert.EqualError(t, err, sftp.ErrSSHFxOpUnsupported.Error())
+	assert.ErrorIs(t, err, sftp.ErrSSHFxOpUnsupported)
 	if c, ok := transfer.(io.Closer); ok {
 		err = c.Close()
 		assert.NoError(t, err)
@@ -1807,16 +1829,16 @@ func TestTransferFailingReader(t *testing.T) {
 	baseTransfer := common.NewBaseTransfer(nil, connection.BaseConnection, nil, fsPath, fsPath, filepath.Base(fsPath),
 		common.TransferUpload, 0, 0, 0, 0, false, fs, dataprovider.TransferQuota{})
 	errRead := errors.New("read is not allowed")
-	tr := newTransfer(baseTransfer, nil, r, errRead)
+	tr := newTransfer(baseTransfer, nil, vfs.NewPipeReader(r), errRead)
 	_, err = tr.ReadAt(buf, 0)
-	assert.EqualError(t, err, errRead.Error())
+	assert.ErrorIs(t, err, sftp.ErrSSHFxFailure)
 
 	err = tr.Close()
 	assert.NoError(t, err)
 
 	tr = newTransfer(baseTransfer, nil, nil, errRead)
 	_, err = tr.ReadAt(buf, 0)
-	assert.EqualError(t, err, errRead.Error())
+	assert.ErrorIs(t, err, sftp.ErrSSHFxFailure)
 
 	err = tr.Close()
 	assert.NoError(t, err)
@@ -1826,42 +1848,6 @@ func TestTransferFailingReader(t *testing.T) {
 	assert.Len(t, connection.GetTransfers(), 0)
 }
 
-func TestConnectionStatusStruct(t *testing.T) {
-	var transfers []common.ConnectionTransfer
-	transferUL := common.ConnectionTransfer{
-		OperationType: "upload",
-		StartTime:     util.GetTimeAsMsSinceEpoch(time.Now()),
-		Size:          123,
-		VirtualPath:   "/test.upload",
-	}
-	transferDL := common.ConnectionTransfer{
-		OperationType: "download",
-		StartTime:     util.GetTimeAsMsSinceEpoch(time.Now()),
-		Size:          123,
-		VirtualPath:   "/test.download",
-	}
-	transfers = append(transfers, transferUL)
-	transfers = append(transfers, transferDL)
-	c := common.ConnectionStatus{
-		Username:       "test",
-		ConnectionID:   "123",
-		ClientVersion:  "fakeClient-1.0.0",
-		RemoteAddress:  "127.0.0.1:1234",
-		ConnectionTime: util.GetTimeAsMsSinceEpoch(time.Now()),
-		LastActivity:   util.GetTimeAsMsSinceEpoch(time.Now()),
-		Protocol:       "SFTP",
-		Transfers:      transfers,
-	}
-	durationString := c.GetConnectionDuration()
-	assert.NotEqual(t, 0, len(durationString))
-
-	transfersString := c.GetTransfersAsString()
-	assert.NotEqual(t, 0, len(transfersString))
-
-	connInfo := c.GetConnectionInfo()
-	assert.NotEqual(t, 0, len(connInfo))
-}
-
 func TestConfigsFromProvider(t *testing.T) {
 	err := dataprovider.UpdateConfigs(nil, "", "", "")
 	assert.NoError(t, err)
@@ -1869,17 +1855,17 @@ func TestConfigsFromProvider(t *testing.T) {
 	err = c.loadFromProvider()
 	assert.NoError(t, err)
 	assert.Len(t, c.HostKeyAlgorithms, 0)
-	assert.Len(t, c.Moduli, 0)
 	assert.Len(t, c.KexAlgorithms, 0)
 	assert.Len(t, c.Ciphers, 0)
 	assert.Len(t, c.MACs, 0)
+	assert.Len(t, c.PublicKeyAlgorithms, 0)
 	configs := dataprovider.Configs{
 		SFTPD: &dataprovider.SFTPDConfigs{
-			HostKeyAlgos:  []string{ssh.KeyAlgoRSA},
-			Moduli:        []string{"/etc/ssh/moduli"},
-			KexAlgorithms: []string{kexDHGroupExchangeSHA256},
-			Ciphers:       []string{"aes128-cbc", "aes192-cbc", "aes256-cbc"},
-			MACs:          []string{"hmac-sha2-512-etm@openssh.com"},
+			HostKeyAlgos:   []string{ssh.KeyAlgoRSA},
+			KexAlgorithms:  []string{ssh.InsecureKeyExchangeDHGEXSHA1},
+			Ciphers:        []string{ssh.InsecureCipherAES128CBC, ssh.InsecureCipherAES192CBC, ssh.InsecureCipherAES256CBC},
+			MACs:           []string{ssh.HMACSHA512ETM},
+			PublicKeyAlgos: []string{ssh.InsecureKeyAlgoDSA}, //nolint:staticcheck
 		},
 	}
 	err = dataprovider.UpdateConfigs(&configs, "", "", "")
@@ -1890,11 +1876,12 @@ func TestConfigsFromProvider(t *testing.T) {
 	expectedKEXs := append(preferredKexAlgos, configs.SFTPD.KexAlgorithms...)
 	expectedCiphers := append(preferredCiphers, configs.SFTPD.Ciphers...)
 	expectedMACs := append(preferredMACs, configs.SFTPD.MACs...)
+	expectedPublicKeyAlgos := append(preferredPublicKeyAlgos, configs.SFTPD.PublicKeyAlgos...)
 	assert.Equal(t, expectedHostKeyAlgos, c.HostKeyAlgorithms)
 	assert.Equal(t, expectedKEXs, c.KexAlgorithms)
 	assert.Equal(t, expectedCiphers, c.Ciphers)
 	assert.Equal(t, expectedMACs, c.MACs)
-	assert.Equal(t, configs.SFTPD.Moduli, c.Moduli)
+	assert.Equal(t, expectedPublicKeyAlgos, c.PublicKeyAlgorithms)
 
 	err = dataprovider.UpdateConfigs(nil, "", "", "")
 	assert.NoError(t, err)
@@ -1906,58 +1893,33 @@ func TestSupportedSecurityOptions(t *testing.T) {
 		MACs:          supportedMACs,
 		Ciphers:       supportedCiphers,
 	}
+	var defaultKexs []string
+	for _, k := range supportedKexAlgos {
+		defaultKexs = append(defaultKexs, k)
+		if k == ssh.KeyExchangeCurve25519 {
+			defaultKexs = append(defaultKexs, keyExchangeCurve25519SHA256LibSSH)
+		}
+	}
 	serverConfig := &ssh.ServerConfig{}
 	err := c.configureSecurityOptions(serverConfig)
 	assert.NoError(t, err)
 	assert.Equal(t, supportedCiphers, serverConfig.Ciphers)
 	assert.Equal(t, supportedMACs, serverConfig.MACs)
-	assert.Equal(t, supportedKexAlgos, serverConfig.KeyExchanges)
+	assert.Equal(t, defaultKexs, serverConfig.KeyExchanges)
 	c.KexAlgorithms = append(c.KexAlgorithms, "not a kex")
 	err = c.configureSecurityOptions(serverConfig)
 	assert.Error(t, err)
-	c.KexAlgorithms = supportedKexAlgos
+	c.KexAlgorithms = append(supportedKexAlgos, "diffie-hellman-group18-sha512")
 	c.MACs = []string{
-		" hmac-sha2-256-etm@openssh.com ", "hmac-sha2-256",
-		" hmac-sha2-512-etm@openssh.com", "hmac-sha2-512 ",
+		" hmac-sha2-256-etm@openssh.com ", " hmac-sha2-512-etm@openssh.com",
+		"hmac-sha2-256", "hmac-sha2-512 ",
 		"hmac-sha1 ", " hmac-sha1-96",
 	}
 	err = c.configureSecurityOptions(serverConfig)
 	assert.NoError(t, err)
 	assert.Equal(t, supportedCiphers, serverConfig.Ciphers)
 	assert.Equal(t, supportedMACs, serverConfig.MACs)
-	assert.Equal(t, supportedKexAlgos, serverConfig.KeyExchanges)
-	c.KexAlgorithms = append(preferredKexAlgos, kexDHGroupExchangeSHA256) // removed because no moduli is provided
-	err = c.configureSecurityOptions(serverConfig)
-	assert.NoError(t, err)
-	assert.Equal(t, supportedCiphers, serverConfig.Ciphers)
-	assert.Equal(t, supportedMACs, serverConfig.MACs)
-	assert.Equal(t, preferredKexAlgos, serverConfig.KeyExchanges)
-}
-
-func TestLoadModuli(t *testing.T) {
-	dhGEXSha1 := "diffie-hellman-group-exchange-sha1"
-	dhGEXSha256 := "diffie-hellman-group-exchange-sha256"
-	c := Configuration{}
-	c.Moduli = []string{".", "missing file"}
-	c.loadModuli(configDir)
-	assert.NotContains(t, supportedKexAlgos, dhGEXSha1)
-	assert.NotContains(t, supportedKexAlgos, dhGEXSha256)
-	assert.NotContains(t, preferredKexAlgos, dhGEXSha1)
-	assert.NotContains(t, preferredKexAlgos, dhGEXSha256)
-	assert.Len(t, supportedKexAlgos, 10)
-	moduli := []byte("20220414072358 2 6 100 2047 5 F19C2D09AD49978F8A0C1B84168A4011A26F9CD516815934764A319FDC5975FA514AAF11B747D8CA6B3919532BEFB68FA118079473895674F3770F71FBB742F176883841EB3DE679BEF53C6AFE437A662F228B03C1E34B5A0D3909F608CEAA16C1F8131DE11E67878EFD918A89205E5E4DE323054010CA4711F25D466BB7727A016DD3F9F53BDBCE093055A4F2497ADEFB5A2500F9C5C3B0BCD88C6489F4C1CBC7CFB67BA6EABA0195794E4188CE9060F431041AD52FB9BAC4DF7FA536F585FBE67746CD57BFAD67567E9706C24D95C49BE95B759657C6BB5151E2AEA32F4CD557C40298A5C402101520EE8AAB8DFEED6FFC11AAF8036D6345923CFB5D1B922F")
-	moduliFile := filepath.Join(os.TempDir(), "moduli")
-	err := os.WriteFile(moduliFile, moduli, 0600)
-	assert.NoError(t, err)
-	c.Moduli = []string{moduliFile}
-	c.loadModuli(configDir)
-	assert.Contains(t, supportedKexAlgos, dhGEXSha1)
-	assert.Contains(t, supportedKexAlgos, dhGEXSha256)
-	assert.NotContains(t, preferredKexAlgos, dhGEXSha1)
-	assert.Contains(t, preferredKexAlgos, dhGEXSha256)
-	assert.Len(t, supportedKexAlgos, 12)
-	err = os.Remove(moduliFile)
-	assert.NoError(t, err)
+	assert.Equal(t, defaultKexs, serverConfig.KeyExchanges)
 }
 
 func TestLoadHostKeys(t *testing.T) {
@@ -1984,6 +1946,13 @@ func TestLoadHostKeys(t *testing.T) {
 	c.HostKeys = []string{nonDefaultKeyName, rsaKeyName, ecdsaKeyName, ed25519KeyName}
 	err = c.checkAndLoadHostKeys(configDir, serverConfig)
 	assert.Error(t, err)
+	c.HostKeyAlgorithms = []string{ssh.KeyAlgoRSASHA256}
+	c.HostKeys = []string{ecdsaKeyName}
+	err = c.checkAndLoadHostKeys(configDir, serverConfig)
+	assert.Error(t, err)
+	c.HostKeyAlgorithms = preferredHostKeyAlgos
+	err = c.checkAndLoadHostKeys(configDir, serverConfig)
+	assert.NoError(t, err)
 	assert.FileExists(t, rsaKeyName)
 	assert.FileExists(t, ecdsaKeyName)
 	assert.FileExists(t, ed25519KeyName)
@@ -2088,6 +2057,7 @@ func TestRecoverer(t *testing.T) {
 	err = scpCmd.handle()
 	assert.EqualError(t, err, common.ErrGenericFailure.Error())
 	assert.Len(t, common.Connections.GetStats(""), 0)
+	assert.Equal(t, int32(0), common.Connections.GetTotalTransfers())
 }
 
 func TestListernerAcceptErrors(t *testing.T) {
@@ -2158,29 +2128,6 @@ func newFakeListener(err error) net.Listener {
 	}
 }
 
-func TestFolderPrefix(t *testing.T) {
-	c := Configuration{
-		FolderPrefix: "files",
-	}
-	c.checkFolderPrefix()
-	assert.Equal(t, "/files", c.FolderPrefix)
-	c.FolderPrefix = ""
-	c.checkFolderPrefix()
-	assert.Empty(t, c.FolderPrefix)
-	c.FolderPrefix = "/"
-	c.checkFolderPrefix()
-	assert.Empty(t, c.FolderPrefix)
-	c.FolderPrefix = "/."
-	c.checkFolderPrefix()
-	assert.Empty(t, c.FolderPrefix)
-	c.FolderPrefix = "."
-	c.checkFolderPrefix()
-	assert.Empty(t, c.FolderPrefix)
-	c.FolderPrefix = ".."
-	c.checkFolderPrefix()
-	assert.Empty(t, c.FolderPrefix)
-}
-
 func TestLoadRevokedUserCertsFile(t *testing.T) {
 	r := revokedCertificates{
 		certs: map[string]bool{},
@@ -2241,6 +2188,7 @@ func TestMaxUserSessions(t *testing.T) {
 	}
 	common.Connections.Remove(connection.GetID())
 	assert.Len(t, common.Connections.GetStats(""), 0)
+	assert.Equal(t, int32(0), common.Connections.GetTotalTransfers())
 }
 
 func TestCanReadSymlink(t *testing.T) {
@@ -2276,23 +2224,66 @@ func TestCanReadSymlink(t *testing.T) {
 
 func TestAuthenticationErrors(t *testing.T) {
 	loginMethod := dataprovider.SSHLoginMethodPassword
-	err := newAuthenticationError(fmt.Errorf("cannot validate credentials: %w", util.NewRecordNotFoundError("not found")), loginMethod)
+	username := "test user"
+	err := newAuthenticationError(fmt.Errorf("cannot validate credentials: %w", util.NewRecordNotFoundError("not found")),
+		loginMethod, username)
 	assert.ErrorIs(t, err, sftpAuthError)
 	assert.ErrorIs(t, err, util.ErrNotFound)
 	var sftpAuthErr *authenticationError
 	if assert.ErrorAs(t, err, &sftpAuthErr) {
 		assert.Equal(t, loginMethod, sftpAuthErr.getLoginMethod())
+		assert.Equal(t, username, sftpAuthErr.getUsername())
 	}
-	err = newAuthenticationError(fmt.Errorf("cannot validate credentials: %w", fs.ErrPermission), loginMethod)
+	err = newAuthenticationError(fmt.Errorf("cannot validate credentials: %w", fs.ErrPermission), loginMethod, username)
 	assert.ErrorIs(t, err, sftpAuthError)
 	assert.NotErrorIs(t, err, util.ErrNotFound)
-	err = newAuthenticationError(fmt.Errorf("cert has wrong type %d", ssh.HostCert), loginMethod)
+	err = newAuthenticationError(fmt.Errorf("cert has wrong type %d", ssh.HostCert), loginMethod, username)
 	assert.ErrorIs(t, err, sftpAuthError)
 	assert.NotErrorIs(t, err, util.ErrNotFound)
-	err = newAuthenticationError(errors.New("ssh: certificate signed by unrecognized authority"), loginMethod)
+	err = newAuthenticationError(errors.New("ssh: certificate signed by unrecognized authority"), loginMethod, username)
 	assert.ErrorIs(t, err, sftpAuthError)
 	assert.NotErrorIs(t, err, util.ErrNotFound)
-	err = newAuthenticationError(nil, loginMethod)
+	err = newAuthenticationError(nil, loginMethod, username)
 	assert.ErrorIs(t, err, sftpAuthError)
 	assert.NotErrorIs(t, err, util.ErrNotFound)
+}
+
+func TestRsyncArguments(t *testing.T) {
+	assert.False(t, canAcceptRsyncArgs(nil))
+	args := []string{"-e", "--server"}
+	assert.False(t, canAcceptRsyncArgs(args))
+	args = []string{"--server", "--sender", "-vlogDtpre.iLsfxCIvu", ".", "."}
+	assert.True(t, canAcceptRsyncArgs(args))
+	args = []string{"--server", "--sender", "--server", "-vlogDtpre.iLsfxCIvu", ".", "."}
+	assert.False(t, canAcceptRsyncArgs(args))
+	args = []string{"--server", "..", "/"}
+	assert.False(t, canAcceptRsyncArgs(args))
+	args = []string{"--server", ".", "/"}
+	assert.False(t, canAcceptRsyncArgs(args))
+	args = []string{"--server", "--sender", "-vlogDtpre.iLsfxCIvu", ".", "."}
+	assert.True(t, canAcceptRsyncArgs(args))
+	args = []string{"--server", "--sender", "-vlogDtpre.iLsfxCIvu", "--delete", ".", "/"}
+	assert.True(t, canAcceptRsyncArgs(args))
+	args = []string{"--server", "-vlogDtpre.iLsfxCIvu", "--delete", ".", "/"}
+	assert.True(t, canAcceptRsyncArgs(args))
+	args = []string{"--server", "-vlogDtpre.iLsfxCIvu", "--delete", "/", ".", "/"}
+	assert.False(t, canAcceptRsyncArgs(args))
+	args = []string{"--server", "--sender", "-vlogDtpre.iLsfxCIvu", ".", "path1", "path2"}
+	assert.False(t, canAcceptRsyncArgs(args))
+	args = []string{"--server", "--sender", "-vlogDtpre.iLsfxCIvu", "."}
+	assert.False(t, canAcceptRsyncArgs(args))
+	args = []string{"--sender", "-vlogDtpre.iLsfxCIvu", "--delete", ".", "/"}
+	assert.False(t, canAcceptRsyncArgs(args))
+	args = []string{"--server", "-vlogDtpre.", "--delete", ".", "/"}
+	assert.False(t, canAcceptRsyncArgs(args))
+	args = []string{"--server", "--sender", "-vlogDtpre.", "--delete", ".", "/"}
+	assert.False(t, canAcceptRsyncArgs(args))
+	args = []string{"--server", "--sender", "-e.iLsfxCIvu", ".", "/"}
+	assert.True(t, canAcceptRsyncArgs(args))
+	args = []string{"--server", "-vlogDtpre.iLsfxCIvu", "--delete", "/"}
+	assert.False(t, canAcceptRsyncArgs(args))
+	args = []string{"--server", "-vlogDtpre.iLsfxCIvu", "--delete", "--safe-links"}
+	assert.False(t, canAcceptRsyncArgs(args))
+	args = []string{"--server", "-vlogDtpre.iLsfxCIvu", "--unsupported-option", ".", "/"}
+	assert.False(t, canAcceptRsyncArgs(args))
 }

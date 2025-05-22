@@ -1,4 +1,4 @@
-// Copyright (C) 2019-2023 Nicola Murino
+// Copyright (C) 2019 Nicola Murino
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published
@@ -26,10 +26,12 @@ import (
 	"math"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -67,17 +69,59 @@ import (
 )
 
 const (
-	httpAddr            = "127.0.0.1:9999"
-	httpProxyAddr       = "127.0.0.1:7777"
-	sftpServerAddr      = "127.0.0.1:4022"
-	smtpServerAddr      = "127.0.0.1:2525"
-	webDavServerPort    = 9191
-	defaultUsername     = "test_common_sftp"
-	defaultPassword     = "test_password"
-	defaultSFTPUsername = "test_common_sftpfs_user"
-	osWindows           = "windows"
-	testFileName        = "test_file_common_sftp.dat"
-	testDir             = "test_dir_common"
+	httpAddr              = "127.0.0.1:9999"
+	httpProxyAddr         = "127.0.0.1:7777"
+	sftpServerAddr        = "127.0.0.1:4022"
+	smtpServerAddr        = "127.0.0.1:2525"
+	webDavServerPort      = 9191
+	httpFsPort            = 34567
+	defaultUsername       = "test_common_sftp"
+	defaultPassword       = "test_password"
+	defaultSFTPUsername   = "test_common_sftpfs_user"
+	defaultHTTPFsUsername = "httpfs_ftp_user"
+	httpFsWellKnowDir     = "/wellknow"
+	osWindows             = "windows"
+	testFileName          = "test_file_common_sftp.dat"
+	testDir               = "test_dir_common"
+	testPubKey            = "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQC03jj0D+djk7pxIf/0OhrxrchJTRZklofJ1NoIu4752Sq02mdXmarMVsqJ1cAjV5LBVy3D1F5U6XW4rppkXeVtd04Pxb09ehtH0pRRPaoHHlALiJt8CoMpbKYMA8b3KXPPriGxgGomvtU2T2RMURSwOZbMtpsugfjYSWenyYX+VORYhylWnSXL961LTyC21ehd6d6QnW9G7E5hYMITMY9TuQZz3bROYzXiTsgN0+g6Hn7exFQp50p45StUMfV/SftCMdCxlxuyGny2CrN/vfjO7xxOo2uv7q1qm10Q46KPWJQv+pgZ/OfL+EDjy07n5QVSKHlbx+2nT4Q0EgOSQaCTYwn3YjtABfIxWwgAFdyj6YlPulCL22qU4MYhDcA6PSBwDdf8hvxBfvsiHdM+JcSHvv8/VeJhk6CmnZxGY0fxBupov27z3yEO8nAg8k+6PaUiW1MSUfuGMF/ktB8LOstXsEPXSszuyXiOv4DaryOXUiSn7bmRqKcEFlJusO6aZP0= nicola@p1"
+	testPrivateKey        = `-----BEGIN OPENSSH PRIVATE KEY-----
+b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAABlwAAAAdzc2gtcn
+NhAAAAAwEAAQAAAYEAtN449A/nY5O6cSH/9Doa8a3ISU0WZJaHydTaCLuO+dkqtNpnV5mq
+zFbKidXAI1eSwVctw9ReVOl1uK6aZF3lbXdOD8W9PXobR9KUUT2qBx5QC4ibfAqDKWymDA
+PG9ylzz64hsYBqJr7VNk9kTFEUsDmWzLabLoH42Elnp8mF/lTkWIcpVp0ly/etS08gttXo
+XenekJ1vRuxOYWDCEzGPU7kGc920TmM14k7IDdPoOh5+3sRUKedKeOUrVDH1f0n7QjHQsZ
+cbshp8tgqzf734zu8cTqNrr+6taptdEOOij1iUL/qYGfzny/hA48tO5+UFUih5W8ftp0+E
+NBIDkkGgk2MJ92I7QAXyMVsIABXco+mJT7pQi9tqlODGIQ3AOj0gcA3X/Ib8QX77Ih3TPi
+XEh77/P1XiYZOgpp2cRmNH8QbqaL9u898hDvJwIPJPuj2lIltTElH7hjBf5LQfCzrLV7BD
+10rM7sl4jr+A2q8jl1Ikp+25kainBBZSbrDummT9AAAFgDU/VLk1P1S5AAAAB3NzaC1yc2
+EAAAGBALTeOPQP52OTunEh//Q6GvGtyElNFmSWh8nU2gi7jvnZKrTaZ1eZqsxWyonVwCNX
+ksFXLcPUXlTpdbiummRd5W13Tg/FvT16G0fSlFE9qgceUAuIm3wKgylspgwDxvcpc8+uIb
+GAaia+1TZPZExRFLA5lsy2my6B+NhJZ6fJhf5U5FiHKVadJcv3rUtPILbV6F3p3pCdb0bs
+TmFgwhMxj1O5BnPdtE5jNeJOyA3T6Doeft7EVCnnSnjlK1Qx9X9J+0Ix0LGXG7IafLYKs3
++9+M7vHE6ja6/urWqbXRDjoo9YlC/6mBn858v4QOPLTuflBVIoeVvH7adPhDQSA5JBoJNj
+CfdiO0AF8jFbCAAV3KPpiU+6UIvbapTgxiENwDo9IHAN1/yG/EF++yId0z4lxIe+/z9V4m
+GToKadnEZjR/EG6mi/bvPfIQ7ycCDyT7o9pSJbUxJR+4YwX+S0Hws6y1ewQ9dKzO7JeI6/
+gNqvI5dSJKftuZGopwQWUm6w7ppk/QAAAAMBAAEAAAGAHKnC+Nq0XtGAkIFE4N18e6SAwy
+0WSWaZqmCzFQM0S2AhJnweOIG/0ZZHjsRzKKauOTmppQk40dgVsejpytIek9R+aH172gxJ
+2n4Cx0UwduRU5x8FFQlNc/kl722B0JWfJuB/snOZXv6LJ4o5aObIkozt2w9tVFeAqjYn2S
+1UsNOfRHBXGsTYwpRDwFWP56nKo2d2wBBTHDhCy6fb2dLW1fvSi/YspueOGIlHpvlYKi2/
+CWqvs9xVrwcScMtiDoQYq0khhO0efLCxvg/o+W9CLMVM2ms4G1zoSUQKN0oYWWQJyW4+VI
+YneWO8UpN0J3ElXKi7bhgAat7dBaM1g9IrAzk153DiEFZNsPxGOgL/+YdQN7zUBx/z7EkI
+jyv80RV7fpUXvcq2p+qNl6UVig3VSzRrnsaJkUWu/A0u59ha7ocv6NxDIXjxpIDJme16GF
+quiGVBQNnYJymS/vFEbGf6bgf7iRmMCRUMG4nqLA6fPYP9uAtch+CmDfVLZC/fIdC5AAAA
+wQCDissV4zH6bfqgxJSuYNk8Vbb+19cF3b7gH1rVlB3zxpCAgcRgMHC+dP1z2NRx7UW9MR
+nye6kjpkzZZ0OigLqo7TtEq8uTglD9o6W7mRXqhy5A/ySOmqPL3ernHHQhGuoNODYAHkOU
+u2Rh8HXi+VLwKZcLInPOYJvcuLG4DxN8WfeVvlMHwhAOaTNNOtL4XZDHQeIPc4qHmJymmv
+sV7GuyQ6yW5C10uoGdxRPd90Bh4z4h2bKfZFjvEBbSBVkqrlAAAADBAN/zNtNayd/dX7Cr
+Nb4sZuzCh+CW4BH8GOePZWNCATwBbNXBVb5cR+dmuTqYm+Ekz0VxVQRA1TvKncluJOQpoa
+Xj8r0xdIgqkehnfDPMKtYVor06B9Fl1jrXtXU0Vrr6QcBWruSVyK1ZxqcmcNK/+KolVepe
+A6vcl/iKaG4U7su166nxLST06M2EgcSVsFJHpKn5+WAXC+X0Gx8kNjWIIb3GpiChdc0xZD
+mq02xZthVJrTCVw/e7gfDoB2QRsNV8HwAAAMEAzsCghZVp+0YsYg9oOrw4tEqcbEXEMhwY
+0jW8JNL8Spr1Ibp5Dw6bRSk5azARjmJtnMJhJ3oeHfF0eoISqcNuQXGndGQbVM9YzzAzc1
+NbbCNsVroqKlChT5wyPNGS+phi2bPARBno7WSDvshTZ7dAVEP2c9MJW0XwoSevwKlhgSdt
+RLFFQ/5nclJSdzPBOmQouC0OBcMFSrYtMeknJ4VvueVvve5HcHFaEsaMc7ABAGaLYaBQOm
+iixITGvaNZh/tjAAAACW5pY29sYUBwMQE=
+-----END OPENSSH PRIVATE KEY-----`
 )
 
 var (
@@ -181,13 +225,14 @@ func TestMain(m *testing.M) {
 	waitTCPListening(sftpdConf.Bindings[0].GetAddress())
 	waitTCPListening(httpdConf.Bindings[0].GetAddress())
 	waitTCPListening(webDavConf.Bindings[0].GetAddress())
+	startHTTPFs()
 
 	go func() {
 		// start a test HTTP server to receive action notifications
-		http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		http.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
 			fmt.Fprintf(w, "OK\n")
 		})
-		http.HandleFunc("/404", func(w http.ResponseWriter, r *http.Request) {
+		http.HandleFunc("/404", func(w http.ResponseWriter, _ *http.Request) {
 			w.WriteHeader(http.StatusNotFound)
 			fmt.Fprintf(w, "Not found\n")
 		})
@@ -229,7 +274,7 @@ func TestMain(m *testing.M) {
 	}()
 
 	go func() {
-		if err := smtpd.ListenAndServe(smtpServerAddr, func(remoteAddr net.Addr, from string, to []string, data []byte) error {
+		if err := smtpd.ListenAndServe(smtpServerAddr, func(_ net.Addr, from string, to []string, data []byte) error {
 			lastReceivedEmail.set(from, to, data)
 			return nil
 		}, "SFTPGo test", "localhost"); err != nil {
@@ -289,7 +334,7 @@ func TestBaseConnection(t *testing.T) {
 		assert.NoError(t, err)
 		err = f.Close()
 		assert.NoError(t, err)
-		linkName := testFileName + ".link"
+		linkName := testFileName + ".link" //nolint:goconst
 		err = client.Rename(testFileName, testFileName)
 		if assert.Error(t, err) {
 			assert.Contains(t, err.Error(), "the rename source and target cannot be the same")
@@ -394,7 +439,7 @@ func TestRelativeSymlinks(t *testing.T) {
 		defer conn.Close()
 		defer client.Close()
 
-		linkName := testFileName + "_link"
+		linkName := testFileName + "_link" //nolint:goconst
 		err = client.Symlink("non-existent-file", linkName)
 		assert.NoError(t, err)
 		err = client.Remove(linkName)
@@ -479,6 +524,45 @@ func TestCheckFsAfterUpdate(t *testing.T) {
 		defer conn.Close()
 		defer client.Close()
 		err = checkBasicSFTP(client)
+		assert.NoError(t, err)
+	}
+
+	_, err = httpdtest.RemoveUser(user, http.StatusOK)
+	assert.NoError(t, err)
+	err = os.RemoveAll(user.GetHomeDir())
+	assert.NoError(t, err)
+}
+
+func TestLoginAccessTime(t *testing.T) {
+	u := getTestUser()
+	u.Filters.AccessTime = []sdk.TimePeriod{
+		{
+			DayOfWeek: int(time.Now().Add(-25 * time.Hour).UTC().Weekday()),
+			From:      "00:00",
+			To:        "23:59",
+		},
+	}
+	user, _, err := httpdtest.AddUser(u, http.StatusCreated)
+	assert.NoError(t, err)
+	_, _, err = getSftpClient(user)
+	assert.Error(t, err)
+
+	user.Filters.AccessTime = []sdk.TimePeriod{
+		{
+			DayOfWeek: int(time.Now().UTC().Weekday()),
+			From:      "00:00",
+			To:        "23:59",
+		},
+	}
+	user, _, err = httpdtest.UpdateUser(user, http.StatusOK, "")
+	assert.NoError(t, err)
+
+	conn, client, err := getSftpClient(user)
+	if assert.NoError(t, err) {
+		defer conn.Close()
+		defer client.Close()
+
+		err := checkBasicSFTP(client)
 		assert.NoError(t, err)
 	}
 
@@ -1009,7 +1093,7 @@ func TestHiddenRoot(t *testing.T) {
 		assert.ErrorIs(t, err, os.ErrPermission)
 		err = writeSFTPFile("ftp123", 4096, client)
 		assert.ErrorIs(t, err, os.ErrPermission)
-		err = client.Rename(testFileName, testFileName+"_rename")
+		err = client.Rename(testFileName, testFileName+"_rename") //nolint:goconst
 		assert.ErrorIs(t, err, os.ErrPermission)
 		err = writeSFTPFile(path.Join("/ftp", testFileName), 4096, client)
 		assert.NoError(t, err)
@@ -1058,33 +1142,42 @@ func TestFileNotAllowedErrors(t *testing.T) {
 }
 
 func TestRootDirVirtualFolder(t *testing.T) {
+	mappedPath1 := filepath.Join(os.TempDir(), "mapped1")
+	f1 := vfs.BaseVirtualFolder{
+		Name:       filepath.Base(mappedPath1),
+		MappedPath: mappedPath1,
+		FsConfig: vfs.Filesystem{
+			Provider: sdk.CryptedFilesystemProvider,
+			CryptConfig: vfs.CryptFsConfig{
+				Passphrase: kms.NewPlainSecret("cryptsecret"),
+			},
+		},
+	}
+	mappedPath2 := filepath.Join(os.TempDir(), "mapped2")
+	f2 := vfs.BaseVirtualFolder{
+		Name:       filepath.Base(mappedPath2),
+		MappedPath: mappedPath2,
+	}
+	folder1, _, err := httpdtest.AddFolder(f1, http.StatusCreated)
+	assert.NoError(t, err)
+	folder2, _, err := httpdtest.AddFolder(f2, http.StatusCreated)
+	assert.NoError(t, err)
+
 	u := getTestUser()
 	u.QuotaFiles = 1000
 	u.UploadDataTransfer = 1000
 	u.DownloadDataTransfer = 5000
-	mappedPath1 := filepath.Join(os.TempDir(), "mapped1")
-	folderName1 := filepath.Base(mappedPath1)
 	u.VirtualFolders = append(u.VirtualFolders, vfs.VirtualFolder{
 		BaseVirtualFolder: vfs.BaseVirtualFolder{
-			Name:       folderName1,
-			MappedPath: mappedPath1,
-			FsConfig: vfs.Filesystem{
-				Provider: sdk.CryptedFilesystemProvider,
-				CryptConfig: vfs.CryptFsConfig{
-					Passphrase: kms.NewPlainSecret("cryptsecret"),
-				},
-			},
+			Name: folder1.Name,
 		},
 		VirtualPath: "/",
 		QuotaFiles:  1000,
 	})
-	mappedPath2 := filepath.Join(os.TempDir(), "mapped2")
-	folderName2 := filepath.Base(mappedPath2)
 	vdirPath2 := "/vmapped"
 	u.VirtualFolders = append(u.VirtualFolders, vfs.VirtualFolder{
 		BaseVirtualFolder: vfs.BaseVirtualFolder{
-			Name:       folderName2,
-			MappedPath: mappedPath2,
+			Name: folder2.Name,
 		},
 		VirtualPath: vdirPath2,
 		QuotaFiles:  -1,
@@ -1119,7 +1212,7 @@ func TestRootDirVirtualFolder(t *testing.T) {
 		user, _, err := httpdtest.GetUserByUsername(user.Username, http.StatusOK)
 		assert.NoError(t, err)
 		assert.Equal(t, 0, user.UsedQuotaFiles)
-		folder, _, err := httpdtest.GetFolderByName(folderName1, http.StatusOK)
+		folder, _, err := httpdtest.GetFolderByName(folder1.Name, http.StatusOK)
 		assert.NoError(t, err)
 		assert.Equal(t, 1, folder.UsedQuotaFiles)
 
@@ -1133,7 +1226,7 @@ func TestRootDirVirtualFolder(t *testing.T) {
 		user, _, err = httpdtest.GetUserByUsername(user.Username, http.StatusOK)
 		assert.NoError(t, err)
 		assert.Equal(t, 1, user.UsedQuotaFiles)
-		folder, _, err = httpdtest.GetFolderByName(folderName1, http.StatusOK)
+		folder, _, err = httpdtest.GetFolderByName(folder1.Name, http.StatusOK)
 		assert.NoError(t, err)
 		assert.Equal(t, 1, folder.UsedQuotaFiles)
 
@@ -1151,39 +1244,47 @@ func TestRootDirVirtualFolder(t *testing.T) {
 	assert.NoError(t, err)
 	err = os.RemoveAll(user.GetHomeDir())
 	assert.NoError(t, err)
-	_, err = httpdtest.RemoveFolder(vfs.BaseVirtualFolder{Name: folderName1}, http.StatusOK)
+	_, err = httpdtest.RemoveFolder(vfs.BaseVirtualFolder{Name: folder1.Name}, http.StatusOK)
 	assert.NoError(t, err)
 	err = os.RemoveAll(mappedPath1)
 	assert.NoError(t, err)
-	_, err = httpdtest.RemoveFolder(vfs.BaseVirtualFolder{Name: folderName2}, http.StatusOK)
+	_, err = httpdtest.RemoveFolder(vfs.BaseVirtualFolder{Name: folder2.Name}, http.StatusOK)
 	assert.NoError(t, err)
 	err = os.RemoveAll(mappedPath2)
 	assert.NoError(t, err)
 }
 
 func TestTruncateQuotaLimits(t *testing.T) {
+	mappedPath1 := filepath.Join(os.TempDir(), "mapped1")
+	f1 := vfs.BaseVirtualFolder{
+		Name:       filepath.Base(mappedPath1),
+		MappedPath: mappedPath1,
+	}
+	folder1, _, err := httpdtest.AddFolder(f1, http.StatusCreated)
+	assert.NoError(t, err)
+	mappedPath2 := filepath.Join(os.TempDir(), "mapped2")
+	f2 := vfs.BaseVirtualFolder{
+		Name:       filepath.Base(mappedPath2),
+		MappedPath: mappedPath2,
+	}
+	folder2, _, err := httpdtest.AddFolder(f2, http.StatusCreated)
+	assert.NoError(t, err)
 	u := getTestUser()
 	u.QuotaSize = 20
 	u.UploadDataTransfer = 1000
 	u.DownloadDataTransfer = 5000
-	mappedPath1 := filepath.Join(os.TempDir(), "mapped1")
-	folderName1 := filepath.Base(mappedPath1)
 	vdirPath1 := "/vmapped1"
 	u.VirtualFolders = append(u.VirtualFolders, vfs.VirtualFolder{
 		BaseVirtualFolder: vfs.BaseVirtualFolder{
-			Name:       folderName1,
-			MappedPath: mappedPath1,
+			Name: folder1.Name,
 		},
 		VirtualPath: vdirPath1,
 		QuotaFiles:  10,
 	})
-	mappedPath2 := filepath.Join(os.TempDir(), "mapped2")
-	folderName2 := filepath.Base(mappedPath2)
 	vdirPath2 := "/vmapped2"
 	u.VirtualFolders = append(u.VirtualFolders, vfs.VirtualFolder{
 		BaseVirtualFolder: vfs.BaseVirtualFolder{
-			Name:       folderName2,
-			MappedPath: mappedPath2,
+			Name: folder2.Name,
 		},
 		VirtualPath: vdirPath2,
 		QuotaFiles:  -1,
@@ -1327,21 +1428,21 @@ func TestTruncateQuotaLimits(t *testing.T) {
 					assert.NoError(t, err)
 					expectedQuotaFiles := 0
 					expectedQuotaSize := int64(2)
-					fold, _, err := httpdtest.GetFolderByName(folderName1, http.StatusOK)
+					fold, _, err := httpdtest.GetFolderByName(folder1.Name, http.StatusOK)
 					assert.NoError(t, err)
 					assert.Equal(t, expectedQuotaSize, fold.UsedQuotaSize)
 					assert.Equal(t, expectedQuotaFiles, fold.UsedQuotaFiles)
 					err = f.Close()
 					assert.NoError(t, err)
 					expectedQuotaFiles = 1
-					fold, _, err = httpdtest.GetFolderByName(folderName1, http.StatusOK)
+					fold, _, err = httpdtest.GetFolderByName(folder1.Name, http.StatusOK)
 					assert.NoError(t, err)
 					assert.Equal(t, expectedQuotaSize, fold.UsedQuotaSize)
 					assert.Equal(t, expectedQuotaFiles, fold.UsedQuotaFiles)
 				}
 				err = client.Truncate(vfileName1, 1)
 				assert.NoError(t, err)
-				fold, _, err := httpdtest.GetFolderByName(folderName1, http.StatusOK)
+				fold, _, err := httpdtest.GetFolderByName(folder1.Name, http.StatusOK)
 				assert.NoError(t, err)
 				assert.Equal(t, int64(1), fold.UsedQuotaSize)
 				assert.Equal(t, 1, fold.UsedQuotaFiles)
@@ -1356,17 +1457,17 @@ func TestTruncateQuotaLimits(t *testing.T) {
 					assert.NoError(t, err)
 					expectedQuotaFiles := 0
 					expectedQuotaSize := int64(3)
-					fold, _, err := httpdtest.GetFolderByName(folderName2, http.StatusOK)
+					fold, _, err := httpdtest.GetFolderByName(folder2.Name, http.StatusOK)
 					assert.NoError(t, err)
-					assert.Equal(t, expectedQuotaSize, fold.UsedQuotaSize)
-					assert.Equal(t, expectedQuotaFiles, fold.UsedQuotaFiles)
+					assert.Equal(t, int64(0), fold.UsedQuotaSize)
+					assert.Equal(t, 0, fold.UsedQuotaFiles)
 					err = f.Close()
 					assert.NoError(t, err)
 					expectedQuotaFiles = 1
-					fold, _, err = httpdtest.GetFolderByName(folderName2, http.StatusOK)
+					fold, _, err = httpdtest.GetFolderByName(folder2.Name, http.StatusOK)
 					assert.NoError(t, err)
-					assert.Equal(t, expectedQuotaSize, fold.UsedQuotaSize)
-					assert.Equal(t, expectedQuotaFiles, fold.UsedQuotaFiles)
+					assert.Equal(t, int64(0), fold.UsedQuotaSize)
+					assert.Equal(t, 0, fold.UsedQuotaFiles)
 					user, _, err = httpdtest.GetUserByUsername(user.Username, http.StatusOK)
 					assert.NoError(t, err)
 					assert.Equal(t, expectedQuotaFiles, user.UsedQuotaFiles)
@@ -1395,11 +1496,11 @@ func TestTruncateQuotaLimits(t *testing.T) {
 	assert.NoError(t, err)
 	err = os.RemoveAll(localUser.GetHomeDir())
 	assert.NoError(t, err)
-	_, err = httpdtest.RemoveFolder(vfs.BaseVirtualFolder{Name: folderName1}, http.StatusOK)
+	_, err = httpdtest.RemoveFolder(folder1, http.StatusOK)
 	assert.NoError(t, err)
 	err = os.RemoveAll(mappedPath1)
 	assert.NoError(t, err)
-	_, err = httpdtest.RemoveFolder(vfs.BaseVirtualFolder{Name: folderName2}, http.StatusOK)
+	_, err = httpdtest.RemoveFolder(folder2, http.StatusOK)
 	assert.NoError(t, err)
 	err = os.RemoveAll(mappedPath2)
 	assert.NoError(t, err)
@@ -1421,10 +1522,27 @@ func TestVirtualFoldersQuotaRenameOverwrite(t *testing.T) {
 	mappedPath3 := filepath.Join(os.TempDir(), "vdir3")
 	folderName3 := filepath.Base(mappedPath3)
 	vdirPath3 := "/vdir3"
+	f1 := vfs.BaseVirtualFolder{
+		Name:       folderName1,
+		MappedPath: mappedPath1,
+	}
+	_, _, err := httpdtest.AddFolder(f1, http.StatusCreated)
+	assert.NoError(t, err)
+	f2 := vfs.BaseVirtualFolder{
+		Name:       folderName2,
+		MappedPath: mappedPath2,
+	}
+	_, _, err = httpdtest.AddFolder(f2, http.StatusCreated)
+	assert.NoError(t, err)
+	f3 := vfs.BaseVirtualFolder{
+		Name:       folderName3,
+		MappedPath: mappedPath3,
+	}
+	_, _, err = httpdtest.AddFolder(f3, http.StatusCreated)
+	assert.NoError(t, err)
 	u.VirtualFolders = append(u.VirtualFolders, vfs.VirtualFolder{
 		BaseVirtualFolder: vfs.BaseVirtualFolder{
-			Name:       folderName1,
-			MappedPath: mappedPath1,
+			Name: folderName1,
 		},
 		VirtualPath: vdirPath1,
 		QuotaFiles:  2,
@@ -1432,8 +1550,7 @@ func TestVirtualFoldersQuotaRenameOverwrite(t *testing.T) {
 	})
 	u.VirtualFolders = append(u.VirtualFolders, vfs.VirtualFolder{
 		BaseVirtualFolder: vfs.BaseVirtualFolder{
-			MappedPath: mappedPath2,
-			Name:       folderName2,
+			Name: folderName2,
 		},
 		VirtualPath: vdirPath2,
 		QuotaFiles:  0,
@@ -1441,8 +1558,7 @@ func TestVirtualFoldersQuotaRenameOverwrite(t *testing.T) {
 	})
 	u.VirtualFolders = append(u.VirtualFolders, vfs.VirtualFolder{
 		BaseVirtualFolder: vfs.BaseVirtualFolder{
-			Name:       folderName3,
-			MappedPath: mappedPath3,
+			Name: folderName3,
 		},
 		VirtualPath: vdirPath3,
 		QuotaFiles:  2,
@@ -1477,7 +1593,7 @@ func TestVirtualFoldersQuotaRenameOverwrite(t *testing.T) {
 		assert.NoError(t, err)
 		err = writeSFTPFile(path.Join(vdirPath3, testFileName+"1"), testFileSize, client)
 		assert.NoError(t, err)
-		err = client.Rename(testFileName, path.Join(vdirPath1, testFileName+".rename"))
+		err = client.Rename(testFileName, path.Join(vdirPath1, testFileName+".rename")) //nolint:goconst
 		assert.Error(t, err)
 		// we overwrite an existing file and we have unlimited size
 		err = client.Rename(testFileName, path.Join(vdirPath1, testFileName))
@@ -1544,12 +1660,6 @@ func TestVirtualFoldersQuotaRenameOverwrite(t *testing.T) {
 func TestQuotaRenameOverwrite(t *testing.T) {
 	u := getTestUser()
 	u.QuotaFiles = 100
-	u.Filters.DataTransferLimits = []sdk.DataTransferLimit{
-		{
-			Sources:           []string{"10.8.0.0/8"},
-			TotalDataTransfer: 1,
-		},
-	}
 	user, _, err := httpdtest.AddUser(u, http.StatusCreated)
 	assert.NoError(t, err)
 	conn, client, err := getSftpClient(user)
@@ -1613,10 +1723,21 @@ func TestVirtualFoldersQuotaValues(t *testing.T) {
 	mappedPath2 := filepath.Join(os.TempDir(), "vdir2")
 	vdirPath2 := "/vdir2"
 	folderName2 := filepath.Base(mappedPath2)
+	f1 := vfs.BaseVirtualFolder{
+		Name:       folderName1,
+		MappedPath: mappedPath1,
+	}
+	_, _, err := httpdtest.AddFolder(f1, http.StatusCreated)
+	assert.NoError(t, err)
+	f2 := vfs.BaseVirtualFolder{
+		Name:       folderName2,
+		MappedPath: mappedPath2,
+	}
+	_, _, err = httpdtest.AddFolder(f2, http.StatusCreated)
+	assert.NoError(t, err)
 	u.VirtualFolders = append(u.VirtualFolders, vfs.VirtualFolder{
 		BaseVirtualFolder: vfs.BaseVirtualFolder{
-			Name:       folderName1,
-			MappedPath: mappedPath1,
+			Name: folderName1,
 		},
 		VirtualPath: vdirPath1,
 		// quota is included in the user's one
@@ -1625,8 +1746,7 @@ func TestVirtualFoldersQuotaValues(t *testing.T) {
 	})
 	u.VirtualFolders = append(u.VirtualFolders, vfs.VirtualFolder{
 		BaseVirtualFolder: vfs.BaseVirtualFolder{
-			Name:       folderName2,
-			MappedPath: mappedPath2,
+			Name: folderName2,
 		},
 		VirtualPath: vdirPath2,
 		// quota is unlimited and excluded from user's one
@@ -1659,8 +1779,8 @@ func TestVirtualFoldersQuotaValues(t *testing.T) {
 		assert.Equal(t, expectedQuotaSize, user.UsedQuotaSize)
 		f, _, err := httpdtest.GetFolderByName(folderName1, http.StatusOK)
 		assert.NoError(t, err)
-		assert.Equal(t, testFileSize, f.UsedQuotaSize)
-		assert.Equal(t, 1, f.UsedQuotaFiles)
+		assert.Equal(t, int64(0), f.UsedQuotaSize)
+		assert.Equal(t, 0, f.UsedQuotaFiles)
 		f, _, err = httpdtest.GetFolderByName(folderName2, http.StatusOK)
 		assert.NoError(t, err)
 		assert.Equal(t, testFileSize, f.UsedQuotaSize)
@@ -1703,10 +1823,21 @@ func TestQuotaRenameInsideSameVirtualFolder(t *testing.T) {
 	mappedPath2 := filepath.Join(os.TempDir(), "vdir2")
 	vdirPath2 := "/vdir2"
 	folderName2 := filepath.Base(mappedPath2)
+	f1 := vfs.BaseVirtualFolder{
+		Name:       folderName1,
+		MappedPath: mappedPath1,
+	}
+	_, _, err := httpdtest.AddFolder(f1, http.StatusCreated)
+	assert.NoError(t, err)
+	f2 := vfs.BaseVirtualFolder{
+		Name:       folderName2,
+		MappedPath: mappedPath2,
+	}
+	_, _, err = httpdtest.AddFolder(f2, http.StatusCreated)
+	assert.NoError(t, err)
 	u.VirtualFolders = append(u.VirtualFolders, vfs.VirtualFolder{
 		BaseVirtualFolder: vfs.BaseVirtualFolder{
-			Name:       folderName1,
-			MappedPath: mappedPath1,
+			Name: folderName1,
 		},
 		VirtualPath: vdirPath1,
 		// quota is included in the user's one
@@ -1715,8 +1846,7 @@ func TestQuotaRenameInsideSameVirtualFolder(t *testing.T) {
 	})
 	u.VirtualFolders = append(u.VirtualFolders, vfs.VirtualFolder{
 		BaseVirtualFolder: vfs.BaseVirtualFolder{
-			Name:       folderName2,
-			MappedPath: mappedPath2,
+			Name: folderName2,
 		},
 		VirtualPath: vdirPath2,
 		// quota is unlimited and excluded from user's one
@@ -1757,8 +1887,8 @@ func TestQuotaRenameInsideSameVirtualFolder(t *testing.T) {
 		assert.Equal(t, testFileSize+testFileSize1, user.UsedQuotaSize)
 		f, _, err := httpdtest.GetFolderByName(folderName1, http.StatusOK)
 		assert.NoError(t, err)
-		assert.Equal(t, testFileSize+testFileSize1, f.UsedQuotaSize)
-		assert.Equal(t, 2, f.UsedQuotaFiles)
+		assert.Equal(t, int64(0), f.UsedQuotaSize)
+		assert.Equal(t, 0, f.UsedQuotaFiles)
 		f, _, err = httpdtest.GetFolderByName(folderName2, http.StatusOK)
 		assert.NoError(t, err)
 		assert.Equal(t, testFileSize+testFileSize1, f.UsedQuotaSize)
@@ -1782,8 +1912,8 @@ func TestQuotaRenameInsideSameVirtualFolder(t *testing.T) {
 		assert.Equal(t, testFileSize+testFileSize1, user.UsedQuotaSize)
 		f, _, err = httpdtest.GetFolderByName(folderName1, http.StatusOK)
 		assert.NoError(t, err)
-		assert.Equal(t, testFileSize+testFileSize1, f.UsedQuotaSize)
-		assert.Equal(t, 2, f.UsedQuotaFiles)
+		assert.Equal(t, int64(0), f.UsedQuotaSize)
+		assert.Equal(t, 0, f.UsedQuotaFiles)
 		// rename a file inside vdir2, it isn't included inside user quota, so we have:
 		// - vdir1/dir1/testFileName.rename
 		// - vdir1/dir2/testFileName1
@@ -1801,8 +1931,8 @@ func TestQuotaRenameInsideSameVirtualFolder(t *testing.T) {
 		assert.Equal(t, 2, f.UsedQuotaFiles)
 		f, _, err = httpdtest.GetFolderByName(folderName1, http.StatusOK)
 		assert.NoError(t, err)
-		assert.Equal(t, testFileSize+testFileSize1, f.UsedQuotaSize)
-		assert.Equal(t, 2, f.UsedQuotaFiles)
+		assert.Equal(t, int64(0), f.UsedQuotaSize)
+		assert.Equal(t, 0, f.UsedQuotaFiles)
 		// rename a file inside vdir2 overwriting an existing, we now have:
 		// - vdir1/dir1/testFileName.rename
 		// - vdir1/dir2/testFileName1
@@ -1819,8 +1949,8 @@ func TestQuotaRenameInsideSameVirtualFolder(t *testing.T) {
 		assert.Equal(t, 1, f.UsedQuotaFiles)
 		f, _, err = httpdtest.GetFolderByName(folderName1, http.StatusOK)
 		assert.NoError(t, err)
-		assert.Equal(t, testFileSize+testFileSize1, f.UsedQuotaSize)
-		assert.Equal(t, 2, f.UsedQuotaFiles)
+		assert.Equal(t, int64(0), f.UsedQuotaSize)
+		assert.Equal(t, 0, f.UsedQuotaFiles)
 		// rename a file inside vdir1 overwriting an existing, we now have:
 		// - vdir1/dir1/testFileName.rename (initial testFileName1)
 		// - vdir2/dir1/testFileName.rename (initial testFileName1)
@@ -1832,8 +1962,8 @@ func TestQuotaRenameInsideSameVirtualFolder(t *testing.T) {
 		assert.Equal(t, testFileSize1, user.UsedQuotaSize)
 		f, _, err = httpdtest.GetFolderByName(folderName1, http.StatusOK)
 		assert.NoError(t, err)
-		assert.Equal(t, testFileSize1, f.UsedQuotaSize)
-		assert.Equal(t, 1, f.UsedQuotaFiles)
+		assert.Equal(t, int64(0), f.UsedQuotaSize)
+		assert.Equal(t, 0, f.UsedQuotaFiles)
 		f, _, err = httpdtest.GetFolderByName(folderName2, http.StatusOK)
 		assert.NoError(t, err)
 		assert.Equal(t, testFileSize1, f.UsedQuotaSize)
@@ -1853,8 +1983,8 @@ func TestQuotaRenameInsideSameVirtualFolder(t *testing.T) {
 		assert.Equal(t, testFileSize1, user.UsedQuotaSize)
 		f, _, err = httpdtest.GetFolderByName(folderName1, http.StatusOK)
 		assert.NoError(t, err)
-		assert.Equal(t, testFileSize1, f.UsedQuotaSize)
-		assert.Equal(t, 1, f.UsedQuotaFiles)
+		assert.Equal(t, int64(0), f.UsedQuotaSize)
+		assert.Equal(t, 0, f.UsedQuotaFiles)
 		f, _, err = httpdtest.GetFolderByName(folderName2, http.StatusOK)
 		assert.NoError(t, err)
 		assert.Equal(t, testFileSize1, f.UsedQuotaSize)
@@ -1883,10 +2013,21 @@ func TestQuotaRenameBetweenVirtualFolder(t *testing.T) {
 	mappedPath2 := filepath.Join(os.TempDir(), "vdir2")
 	folderName2 := filepath.Base(mappedPath2)
 	vdirPath2 := "/vdir2"
+	f1 := vfs.BaseVirtualFolder{
+		Name:       folderName1,
+		MappedPath: mappedPath1,
+	}
+	_, _, err := httpdtest.AddFolder(f1, http.StatusCreated)
+	assert.NoError(t, err)
+	f2 := vfs.BaseVirtualFolder{
+		Name:       folderName2,
+		MappedPath: mappedPath2,
+	}
+	_, _, err = httpdtest.AddFolder(f2, http.StatusCreated)
+	assert.NoError(t, err)
 	u.VirtualFolders = append(u.VirtualFolders, vfs.VirtualFolder{
 		BaseVirtualFolder: vfs.BaseVirtualFolder{
-			Name:       folderName1,
-			MappedPath: mappedPath1,
+			Name: folderName1,
 		},
 		VirtualPath: vdirPath1,
 		// quota is included in the user's one
@@ -1895,8 +2036,7 @@ func TestQuotaRenameBetweenVirtualFolder(t *testing.T) {
 	})
 	u.VirtualFolders = append(u.VirtualFolders, vfs.VirtualFolder{
 		BaseVirtualFolder: vfs.BaseVirtualFolder{
-			Name:       folderName2,
-			MappedPath: mappedPath2,
+			Name: folderName2,
 		},
 		VirtualPath: vdirPath2,
 		// quota is unlimited and excluded from user's one
@@ -1949,8 +2089,8 @@ func TestQuotaRenameBetweenVirtualFolder(t *testing.T) {
 		assert.Equal(t, testFileSize, user.UsedQuotaSize)
 		f, _, err := httpdtest.GetFolderByName(folderName1, http.StatusOK)
 		assert.NoError(t, err)
-		assert.Equal(t, testFileSize, f.UsedQuotaSize)
-		assert.Equal(t, 1, f.UsedQuotaFiles)
+		assert.Equal(t, int64(0), f.UsedQuotaSize)
+		assert.Equal(t, 0, f.UsedQuotaFiles)
 		f, _, err = httpdtest.GetFolderByName(folderName2, http.StatusOK)
 		assert.NoError(t, err)
 		assert.Equal(t, testFileSize+testFileSize1+testFileSize1, f.UsedQuotaSize)
@@ -1968,8 +2108,8 @@ func TestQuotaRenameBetweenVirtualFolder(t *testing.T) {
 		assert.Equal(t, testFileSize*2, user.UsedQuotaSize)
 		f, _, err = httpdtest.GetFolderByName(folderName1, http.StatusOK)
 		assert.NoError(t, err)
-		assert.Equal(t, testFileSize*2, f.UsedQuotaSize)
-		assert.Equal(t, 2, f.UsedQuotaFiles)
+		assert.Equal(t, int64(0), f.UsedQuotaSize)
+		assert.Equal(t, 0, f.UsedQuotaFiles)
 		f, _, err = httpdtest.GetFolderByName(folderName2, http.StatusOK)
 		assert.NoError(t, err)
 		assert.Equal(t, testFileSize1*2, f.UsedQuotaSize)
@@ -1986,8 +2126,8 @@ func TestQuotaRenameBetweenVirtualFolder(t *testing.T) {
 		assert.Equal(t, testFileSize, user.UsedQuotaSize)
 		f, _, err = httpdtest.GetFolderByName(folderName1, http.StatusOK)
 		assert.NoError(t, err)
-		assert.Equal(t, testFileSize, f.UsedQuotaSize)
-		assert.Equal(t, 1, f.UsedQuotaFiles)
+		assert.Equal(t, int64(0), f.UsedQuotaSize)
+		assert.Equal(t, 0, f.UsedQuotaFiles)
 		f, _, err = httpdtest.GetFolderByName(folderName2, http.StatusOK)
 		assert.NoError(t, err)
 		assert.Equal(t, testFileSize1+testFileSize, f.UsedQuotaSize)
@@ -2003,8 +2143,8 @@ func TestQuotaRenameBetweenVirtualFolder(t *testing.T) {
 		assert.Equal(t, testFileSize1, user.UsedQuotaSize)
 		f, _, err = httpdtest.GetFolderByName(folderName1, http.StatusOK)
 		assert.NoError(t, err)
-		assert.Equal(t, testFileSize1, f.UsedQuotaSize)
-		assert.Equal(t, 1, f.UsedQuotaFiles)
+		assert.Equal(t, int64(0), f.UsedQuotaSize)
+		assert.Equal(t, 0, f.UsedQuotaFiles)
 		f, _, err = httpdtest.GetFolderByName(folderName2, http.StatusOK)
 		assert.NoError(t, err)
 		assert.Equal(t, testFileSize, f.UsedQuotaSize)
@@ -2034,8 +2174,8 @@ func TestQuotaRenameBetweenVirtualFolder(t *testing.T) {
 		assert.Equal(t, testFileSize1*3+testFileSize*2, user.UsedQuotaSize)
 		f, _, err = httpdtest.GetFolderByName(folderName1, http.StatusOK)
 		assert.NoError(t, err)
-		assert.Equal(t, testFileSize1*3+testFileSize*2, f.UsedQuotaSize)
-		assert.Equal(t, 5, f.UsedQuotaFiles)
+		assert.Equal(t, int64(0), f.UsedQuotaSize)
+		assert.Equal(t, 0, f.UsedQuotaFiles)
 		f, _, err = httpdtest.GetFolderByName(folderName2, http.StatusOK)
 		assert.NoError(t, err)
 		assert.Equal(t, int64(0), f.UsedQuotaSize)
@@ -2049,8 +2189,8 @@ func TestQuotaRenameBetweenVirtualFolder(t *testing.T) {
 		assert.Equal(t, testFileSize1*2+testFileSize, user.UsedQuotaSize)
 		f, _, err = httpdtest.GetFolderByName(folderName1, http.StatusOK)
 		assert.NoError(t, err)
-		assert.Equal(t, testFileSize1*2+testFileSize, f.UsedQuotaSize)
-		assert.Equal(t, 3, f.UsedQuotaFiles)
+		assert.Equal(t, int64(0), f.UsedQuotaSize)
+		assert.Equal(t, 0, f.UsedQuotaFiles)
 		f, _, err = httpdtest.GetFolderByName(folderName2, http.StatusOK)
 		assert.NoError(t, err)
 		assert.Equal(t, testFileSize+testFileSize1, f.UsedQuotaSize)
@@ -2079,10 +2219,21 @@ func TestQuotaRenameFromVirtualFolder(t *testing.T) {
 	mappedPath2 := filepath.Join(os.TempDir(), "vdir2")
 	folderName2 := filepath.Base(mappedPath2)
 	vdirPath2 := "/vdir2"
+	f1 := vfs.BaseVirtualFolder{
+		Name:       folderName1,
+		MappedPath: mappedPath1,
+	}
+	_, _, err := httpdtest.AddFolder(f1, http.StatusCreated)
+	assert.NoError(t, err)
+	f2 := vfs.BaseVirtualFolder{
+		Name:       folderName2,
+		MappedPath: mappedPath2,
+	}
+	_, _, err = httpdtest.AddFolder(f2, http.StatusCreated)
+	assert.NoError(t, err)
 	u.VirtualFolders = append(u.VirtualFolders, vfs.VirtualFolder{
 		BaseVirtualFolder: vfs.BaseVirtualFolder{
-			Name:       folderName1,
-			MappedPath: mappedPath1,
+			Name: folderName1,
 		},
 		VirtualPath: vdirPath1,
 		// quota is included in the user's one
@@ -2091,8 +2242,7 @@ func TestQuotaRenameFromVirtualFolder(t *testing.T) {
 	})
 	u.VirtualFolders = append(u.VirtualFolders, vfs.VirtualFolder{
 		BaseVirtualFolder: vfs.BaseVirtualFolder{
-			Name:       folderName2,
-			MappedPath: mappedPath2,
+			Name: folderName2,
 		},
 		VirtualPath: vdirPath2,
 		// quota is unlimited and excluded from user's one
@@ -2145,8 +2295,8 @@ func TestQuotaRenameFromVirtualFolder(t *testing.T) {
 		assert.Equal(t, testFileSize+testFileSize1, user.UsedQuotaSize)
 		f, _, err := httpdtest.GetFolderByName(folderName1, http.StatusOK)
 		assert.NoError(t, err)
-		assert.Equal(t, testFileSize1, f.UsedQuotaSize)
-		assert.Equal(t, 1, f.UsedQuotaFiles)
+		assert.Equal(t, int64(0), f.UsedQuotaSize)
+		assert.Equal(t, 0, f.UsedQuotaFiles)
 		f, _, err = httpdtest.GetFolderByName(folderName2, http.StatusOK)
 		assert.NoError(t, err)
 		assert.Equal(t, testFileSize+testFileSize1, f.UsedQuotaSize)
@@ -2164,8 +2314,8 @@ func TestQuotaRenameFromVirtualFolder(t *testing.T) {
 		assert.Equal(t, testFileSize+testFileSize1+testFileSize1, user.UsedQuotaSize)
 		f, _, err = httpdtest.GetFolderByName(folderName1, http.StatusOK)
 		assert.NoError(t, err)
-		assert.Equal(t, testFileSize1, f.UsedQuotaSize)
-		assert.Equal(t, 1, f.UsedQuotaFiles)
+		assert.Equal(t, int64(0), f.UsedQuotaSize)
+		assert.Equal(t, 0, f.UsedQuotaFiles)
 		f, _, err = httpdtest.GetFolderByName(folderName2, http.StatusOK)
 		assert.NoError(t, err)
 		assert.Equal(t, testFileSize, f.UsedQuotaSize)
@@ -2228,8 +2378,8 @@ func TestQuotaRenameFromVirtualFolder(t *testing.T) {
 		assert.Equal(t, testFileSize*3+testFileSize1*3, user.UsedQuotaSize)
 		f, _, err = httpdtest.GetFolderByName(folderName1, http.StatusOK)
 		assert.NoError(t, err)
-		assert.Equal(t, testFileSize+testFileSize1, f.UsedQuotaSize)
-		assert.Equal(t, 2, f.UsedQuotaFiles)
+		assert.Equal(t, int64(0), f.UsedQuotaSize)
+		assert.Equal(t, 0, f.UsedQuotaFiles)
 		f, _, err = httpdtest.GetFolderByName(folderName2, http.StatusOK)
 		assert.NoError(t, err)
 		assert.Equal(t, int64(0), f.UsedQuotaSize)
@@ -2278,10 +2428,21 @@ func TestQuotaRenameToVirtualFolder(t *testing.T) {
 	mappedPath2 := filepath.Join(os.TempDir(), "vdir2")
 	folderName2 := filepath.Base(mappedPath2)
 	vdirPath2 := "/vdir2"
+	f1 := vfs.BaseVirtualFolder{
+		Name:       folderName1,
+		MappedPath: mappedPath1,
+	}
+	_, _, err := httpdtest.AddFolder(f1, http.StatusCreated)
+	assert.NoError(t, err)
+	f2 := vfs.BaseVirtualFolder{
+		Name:       folderName2,
+		MappedPath: mappedPath2,
+	}
+	_, _, err = httpdtest.AddFolder(f2, http.StatusCreated)
+	assert.NoError(t, err)
 	u.VirtualFolders = append(u.VirtualFolders, vfs.VirtualFolder{
 		BaseVirtualFolder: vfs.BaseVirtualFolder{
-			Name:       folderName1,
-			MappedPath: mappedPath1,
+			Name: folderName1,
 		},
 		VirtualPath: vdirPath1,
 		// quota is included in the user's one
@@ -2290,8 +2451,7 @@ func TestQuotaRenameToVirtualFolder(t *testing.T) {
 	})
 	u.VirtualFolders = append(u.VirtualFolders, vfs.VirtualFolder{
 		BaseVirtualFolder: vfs.BaseVirtualFolder{
-			Name:       folderName2,
-			MappedPath: mappedPath2,
+			Name: folderName2,
 		},
 		VirtualPath: vdirPath2,
 		// quota is unlimited and excluded from user's one
@@ -2339,8 +2499,8 @@ func TestQuotaRenameToVirtualFolder(t *testing.T) {
 		assert.Equal(t, testFileSize+testFileSize1, user.UsedQuotaSize)
 		f, _, err := httpdtest.GetFolderByName(folderName1, http.StatusOK)
 		assert.NoError(t, err)
-		assert.Equal(t, testFileSize1, f.UsedQuotaSize)
-		assert.Equal(t, 1, f.UsedQuotaFiles)
+		assert.Equal(t, int64(0), f.UsedQuotaSize)
+		assert.Equal(t, 0, f.UsedQuotaFiles)
 		// rename a file from user home dir to vdir2, vdir2 is not included in user quota so we have:
 		// - /vdir2/dir1/testFileName
 		// - /vdir1/dir1/testFileName1
@@ -2379,8 +2539,8 @@ func TestQuotaRenameToVirtualFolder(t *testing.T) {
 		assert.Equal(t, testFileSize+testFileSize1, user.UsedQuotaSize)
 		f, _, err = httpdtest.GetFolderByName(folderName1, http.StatusOK)
 		assert.NoError(t, err)
-		assert.Equal(t, testFileSize, f.UsedQuotaSize)
-		assert.Equal(t, 1, f.UsedQuotaFiles)
+		assert.Equal(t, int64(0), f.UsedQuotaSize)
+		assert.Equal(t, 0, f.UsedQuotaFiles)
 		f, _, err = httpdtest.GetFolderByName(folderName2, http.StatusOK)
 		assert.NoError(t, err)
 		assert.Equal(t, testFileSize, f.UsedQuotaSize)
@@ -2396,8 +2556,8 @@ func TestQuotaRenameToVirtualFolder(t *testing.T) {
 		assert.Equal(t, testFileSize, user.UsedQuotaSize)
 		f, _, err = httpdtest.GetFolderByName(folderName1, http.StatusOK)
 		assert.NoError(t, err)
-		assert.Equal(t, testFileSize, f.UsedQuotaSize)
-		assert.Equal(t, 1, f.UsedQuotaFiles)
+		assert.Equal(t, int64(0), f.UsedQuotaSize)
+		assert.Equal(t, 0, f.UsedQuotaFiles)
 		f, _, err = httpdtest.GetFolderByName(folderName2, http.StatusOK)
 		assert.NoError(t, err)
 		assert.Equal(t, testFileSize1, f.UsedQuotaSize)
@@ -2419,8 +2579,8 @@ func TestQuotaRenameToVirtualFolder(t *testing.T) {
 		assert.Equal(t, testFileSize*2+testFileSize1, user.UsedQuotaSize)
 		f, _, err = httpdtest.GetFolderByName(folderName1, http.StatusOK)
 		assert.NoError(t, err)
-		assert.Equal(t, testFileSize, f.UsedQuotaSize)
-		assert.Equal(t, 1, f.UsedQuotaFiles)
+		assert.Equal(t, int64(0), f.UsedQuotaSize)
+		assert.Equal(t, 0, f.UsedQuotaFiles)
 		f, _, err = httpdtest.GetFolderByName(folderName2, http.StatusOK)
 		assert.NoError(t, err)
 		assert.Equal(t, testFileSize1, f.UsedQuotaSize)
@@ -2437,8 +2597,8 @@ func TestQuotaRenameToVirtualFolder(t *testing.T) {
 		assert.Equal(t, testFileSize*2+testFileSize1, user.UsedQuotaSize)
 		f, _, err = httpdtest.GetFolderByName(folderName1, http.StatusOK)
 		assert.NoError(t, err)
-		assert.Equal(t, testFileSize*2+testFileSize1, f.UsedQuotaSize)
-		assert.Equal(t, 3, f.UsedQuotaFiles)
+		assert.Equal(t, int64(0), f.UsedQuotaSize)
+		assert.Equal(t, 0, f.UsedQuotaFiles)
 		f, _, err = httpdtest.GetFolderByName(folderName2, http.StatusOK)
 		assert.NoError(t, err)
 		assert.Equal(t, testFileSize1, f.UsedQuotaSize)
@@ -2463,8 +2623,8 @@ func TestQuotaRenameToVirtualFolder(t *testing.T) {
 		assert.Equal(t, testFileSize*2+testFileSize1, user.UsedQuotaSize)
 		f, _, err = httpdtest.GetFolderByName(folderName1, http.StatusOK)
 		assert.NoError(t, err)
-		assert.Equal(t, testFileSize*2+testFileSize1, f.UsedQuotaSize)
-		assert.Equal(t, 3, f.UsedQuotaFiles)
+		assert.Equal(t, int64(0), f.UsedQuotaSize)
+		assert.Equal(t, 0, f.UsedQuotaFiles)
 		f, _, err = httpdtest.GetFolderByName(folderName2, http.StatusOK)
 		assert.NoError(t, err)
 		assert.Equal(t, testFileSize1*2+testFileSize, f.UsedQuotaSize)
@@ -2570,10 +2730,21 @@ func TestVirtualFoldersLink(t *testing.T) {
 	mappedPath2 := filepath.Join(os.TempDir(), "vdir2")
 	folderName2 := filepath.Base(mappedPath2)
 	vdirPath2 := "/vdir2"
+	f1 := vfs.BaseVirtualFolder{
+		Name:       folderName1,
+		MappedPath: mappedPath1,
+	}
+	_, _, err := httpdtest.AddFolder(f1, http.StatusCreated)
+	assert.NoError(t, err)
+	f2 := vfs.BaseVirtualFolder{
+		Name:       folderName2,
+		MappedPath: mappedPath2,
+	}
+	_, _, err = httpdtest.AddFolder(f2, http.StatusCreated)
+	assert.NoError(t, err)
 	u.VirtualFolders = append(u.VirtualFolders, vfs.VirtualFolder{
 		BaseVirtualFolder: vfs.BaseVirtualFolder{
-			Name:       folderName1,
-			MappedPath: mappedPath1,
+			Name: folderName1,
 		},
 		VirtualPath: vdirPath1,
 		// quota is included in the user's one
@@ -2582,8 +2753,7 @@ func TestVirtualFoldersLink(t *testing.T) {
 	})
 	u.VirtualFolders = append(u.VirtualFolders, vfs.VirtualFolder{
 		BaseVirtualFolder: vfs.BaseVirtualFolder{
-			Name:       folderName2,
-			MappedPath: mappedPath2,
+			Name: folderName2,
 		},
 		VirtualPath: vdirPath2,
 		// quota is unlimited and excluded from user's one
@@ -2618,7 +2788,7 @@ func TestVirtualFoldersLink(t *testing.T) {
 		assert.NoError(t, err)
 		err = client.Symlink(path.Join(vdirPath2, testFileName), path.Join(vdirPath2, testDir, testFileName+".link"))
 		assert.NoError(t, err)
-		err = client.Symlink(path.Join("/", testFileName), path.Join(vdirPath1, testFileName+".link1"))
+		err = client.Symlink(path.Join("/", testFileName), path.Join(vdirPath1, testFileName+".link1")) //nolint:goconst
 		if assert.Error(t, err) {
 			assert.Contains(t, err.Error(), "SSH_FX_OP_UNSUPPORTED")
 		}
@@ -2689,18 +2859,116 @@ func TestCrossFolderRename(t *testing.T) {
 	baseUser, resp, err := httpdtest.AddUser(getTestUser(), http.StatusCreated)
 	assert.NoError(t, err, string(resp))
 
+	f1 := vfs.BaseVirtualFolder{
+		Name:       folder1,
+		MappedPath: filepath.Join(os.TempDir(), folder1),
+		FsConfig: vfs.Filesystem{
+			Provider: sdk.CryptedFilesystemProvider,
+			CryptConfig: vfs.CryptFsConfig{
+				Passphrase: kms.NewPlainSecret(defaultPassword),
+			},
+		},
+	}
+	_, _, err = httpdtest.AddFolder(f1, http.StatusCreated)
+	assert.NoError(t, err)
+	f2 := vfs.BaseVirtualFolder{
+		Name:       folder2,
+		MappedPath: filepath.Join(os.TempDir(), folder2),
+		FsConfig: vfs.Filesystem{
+			Provider: sdk.CryptedFilesystemProvider,
+			CryptConfig: vfs.CryptFsConfig{
+				Passphrase: kms.NewPlainSecret(defaultPassword),
+			},
+		},
+	}
+	_, _, err = httpdtest.AddFolder(f2, http.StatusCreated)
+	assert.NoError(t, err)
+	f3 := vfs.BaseVirtualFolder{
+		Name:       folder3,
+		MappedPath: filepath.Join(os.TempDir(), folder3),
+		FsConfig: vfs.Filesystem{
+			Provider: sdk.CryptedFilesystemProvider,
+			CryptConfig: vfs.CryptFsConfig{
+				Passphrase: kms.NewPlainSecret(defaultPassword + "mod"),
+			},
+		},
+	}
+	_, _, err = httpdtest.AddFolder(f3, http.StatusCreated)
+	assert.NoError(t, err)
+	f4 := vfs.BaseVirtualFolder{
+		Name:       folder4,
+		MappedPath: filepath.Join(os.TempDir(), folder4),
+		FsConfig: vfs.Filesystem{
+			Provider: sdk.SFTPFilesystemProvider,
+			SFTPConfig: vfs.SFTPFsConfig{
+				BaseSFTPFsConfig: sdk.BaseSFTPFsConfig{
+					Endpoint: sftpServerAddr,
+					Username: baseUser.Username,
+					Prefix:   path.Join("/", folder4),
+				},
+				Password: kms.NewPlainSecret(defaultPassword),
+			},
+		},
+	}
+	_, _, err = httpdtest.AddFolder(f4, http.StatusCreated)
+	assert.NoError(t, err)
+	f5 := vfs.BaseVirtualFolder{
+		Name:       folder5,
+		MappedPath: filepath.Join(os.TempDir(), folder5),
+		FsConfig: vfs.Filesystem{
+			Provider: sdk.SFTPFilesystemProvider,
+			SFTPConfig: vfs.SFTPFsConfig{
+				BaseSFTPFsConfig: sdk.BaseSFTPFsConfig{
+					Endpoint: sftpServerAddr,
+					Username: baseUser.Username,
+					Prefix:   path.Join("/", folder5),
+				},
+				Password: kms.NewPlainSecret(defaultPassword),
+			},
+		},
+	}
+	_, _, err = httpdtest.AddFolder(f5, http.StatusCreated)
+	assert.NoError(t, err)
+	f6 := vfs.BaseVirtualFolder{
+		Name:       folder6,
+		MappedPath: filepath.Join(os.TempDir(), folder6),
+		FsConfig: vfs.Filesystem{
+			Provider: sdk.SFTPFilesystemProvider,
+			SFTPConfig: vfs.SFTPFsConfig{
+				BaseSFTPFsConfig: sdk.BaseSFTPFsConfig{
+					Endpoint: "127.0.0.1:4024",
+					Username: baseUser.Username,
+					Prefix:   path.Join("/", folder6),
+				},
+				Password: kms.NewPlainSecret(defaultPassword),
+			},
+		},
+	}
+	_, _, err = httpdtest.AddFolder(f6, http.StatusCreated)
+	assert.NoError(t, err)
+	f7 := vfs.BaseVirtualFolder{
+		Name:       folder7,
+		MappedPath: filepath.Join(os.TempDir(), folder7),
+		FsConfig: vfs.Filesystem{
+			Provider: sdk.SFTPFilesystemProvider,
+			SFTPConfig: vfs.SFTPFsConfig{
+				BaseSFTPFsConfig: sdk.BaseSFTPFsConfig{
+					Endpoint: sftpServerAddr,
+					Username: baseUser.Username,
+					Prefix:   path.Join("/", folder4),
+				},
+				Password: kms.NewPlainSecret(defaultPassword),
+			},
+		},
+	}
+	_, _, err = httpdtest.AddFolder(f7, http.StatusCreated)
+	assert.NoError(t, err)
+
 	u := getCryptFsUser()
 	u.VirtualFolders = []vfs.VirtualFolder{
 		{
 			BaseVirtualFolder: vfs.BaseVirtualFolder{
-				Name:       folder1,
-				MappedPath: filepath.Join(os.TempDir(), folder1),
-				FsConfig: vfs.Filesystem{
-					Provider: sdk.CryptedFilesystemProvider,
-					CryptConfig: vfs.CryptFsConfig{
-						Passphrase: kms.NewPlainSecret(defaultPassword),
-					},
-				},
+				Name: folder1,
 			},
 			VirtualPath: path.Join("/", folder1),
 			QuotaSize:   -1,
@@ -2708,14 +2976,7 @@ func TestCrossFolderRename(t *testing.T) {
 		},
 		{
 			BaseVirtualFolder: vfs.BaseVirtualFolder{
-				Name:       folder2,
-				MappedPath: filepath.Join(os.TempDir(), folder2),
-				FsConfig: vfs.Filesystem{
-					Provider: sdk.CryptedFilesystemProvider,
-					CryptConfig: vfs.CryptFsConfig{
-						Passphrase: kms.NewPlainSecret(defaultPassword),
-					},
-				},
+				Name: folder2,
 			},
 			VirtualPath: path.Join("/", folder2),
 			QuotaSize:   -1,
@@ -2723,14 +2984,7 @@ func TestCrossFolderRename(t *testing.T) {
 		},
 		{
 			BaseVirtualFolder: vfs.BaseVirtualFolder{
-				Name:       folder3,
-				MappedPath: filepath.Join(os.TempDir(), folder3),
-				FsConfig: vfs.Filesystem{
-					Provider: sdk.CryptedFilesystemProvider,
-					CryptConfig: vfs.CryptFsConfig{
-						Passphrase: kms.NewPlainSecret(defaultPassword + "mod"),
-					},
-				},
+				Name: folder3,
 			},
 			VirtualPath: path.Join("/", folder3),
 			QuotaSize:   -1,
@@ -2738,19 +2992,7 @@ func TestCrossFolderRename(t *testing.T) {
 		},
 		{
 			BaseVirtualFolder: vfs.BaseVirtualFolder{
-				Name:       folder4,
-				MappedPath: filepath.Join(os.TempDir(), folder4),
-				FsConfig: vfs.Filesystem{
-					Provider: sdk.SFTPFilesystemProvider,
-					SFTPConfig: vfs.SFTPFsConfig{
-						BaseSFTPFsConfig: sdk.BaseSFTPFsConfig{
-							Endpoint: sftpServerAddr,
-							Username: baseUser.Username,
-							Prefix:   path.Join("/", folder4),
-						},
-						Password: kms.NewPlainSecret(defaultPassword),
-					},
-				},
+				Name: folder4,
 			},
 			VirtualPath: path.Join("/", folder4),
 			QuotaSize:   -1,
@@ -2758,19 +3000,7 @@ func TestCrossFolderRename(t *testing.T) {
 		},
 		{
 			BaseVirtualFolder: vfs.BaseVirtualFolder{
-				Name:       folder5,
-				MappedPath: filepath.Join(os.TempDir(), folder5),
-				FsConfig: vfs.Filesystem{
-					Provider: sdk.SFTPFilesystemProvider,
-					SFTPConfig: vfs.SFTPFsConfig{
-						BaseSFTPFsConfig: sdk.BaseSFTPFsConfig{
-							Endpoint: sftpServerAddr,
-							Username: baseUser.Username,
-							Prefix:   path.Join("/", folder5),
-						},
-						Password: kms.NewPlainSecret(defaultPassword),
-					},
-				},
+				Name: folder5,
 			},
 			VirtualPath: path.Join("/", folder5),
 			QuotaSize:   -1,
@@ -2778,19 +3008,7 @@ func TestCrossFolderRename(t *testing.T) {
 		},
 		{
 			BaseVirtualFolder: vfs.BaseVirtualFolder{
-				Name:       folder6,
-				MappedPath: filepath.Join(os.TempDir(), folder6),
-				FsConfig: vfs.Filesystem{
-					Provider: sdk.SFTPFilesystemProvider,
-					SFTPConfig: vfs.SFTPFsConfig{
-						BaseSFTPFsConfig: sdk.BaseSFTPFsConfig{
-							Endpoint: "127.0.0.1:4024",
-							Username: baseUser.Username,
-							Prefix:   path.Join("/", folder6),
-						},
-						Password: kms.NewPlainSecret(defaultPassword),
-					},
-				},
+				Name: folder6,
 			},
 			VirtualPath: path.Join("/", folder6),
 			QuotaSize:   -1,
@@ -2798,19 +3016,7 @@ func TestCrossFolderRename(t *testing.T) {
 		},
 		{
 			BaseVirtualFolder: vfs.BaseVirtualFolder{
-				Name:       folder7,
-				MappedPath: filepath.Join(os.TempDir(), folder7),
-				FsConfig: vfs.Filesystem{
-					Provider: sdk.SFTPFilesystemProvider,
-					SFTPConfig: vfs.SFTPFsConfig{
-						BaseSFTPFsConfig: sdk.BaseSFTPFsConfig{
-							Endpoint: sftpServerAddr,
-							Username: baseUser.Username,
-							Prefix:   path.Join("/", folder4),
-						},
-						Password: kms.NewPlainSecret(defaultPassword),
-					},
-				},
+				Name: folder7,
 			},
 			VirtualPath: path.Join("/", folder7),
 			QuotaSize:   -1,
@@ -2891,10 +3097,15 @@ func TestDirs(t *testing.T) {
 	mappedPath := filepath.Join(os.TempDir(), "vdir")
 	folderName := filepath.Base(mappedPath)
 	vdirPath := "/path/vdir"
+	f := vfs.BaseVirtualFolder{
+		Name:       folderName,
+		MappedPath: mappedPath,
+	}
+	_, _, err := httpdtest.AddFolder(f, http.StatusCreated)
+	assert.NoError(t, err)
 	u.VirtualFolders = append(u.VirtualFolders, vfs.VirtualFolder{
 		BaseVirtualFolder: vfs.BaseVirtualFolder{
-			Name:       folderName,
-			MappedPath: mappedPath,
+			Name: folderName,
 		},
 		VirtualPath: vdirPath,
 	})
@@ -3424,14 +3635,16 @@ func TestDelayedQuotaUpdater(t *testing.T) {
 func TestPasswordCaching(t *testing.T) {
 	user, _, err := httpdtest.AddUser(getTestUser(), http.StatusCreated)
 	assert.NoError(t, err)
-	found, match := dataprovider.CheckCachedPassword(user.Username, defaultPassword)
+	dbUser, err := dataprovider.UserExists(user.Username, "")
+	assert.NoError(t, err)
+	found, match := dataprovider.CheckCachedUserPassword(user.Username, defaultPassword, dbUser.Password)
 	assert.False(t, found)
 	assert.False(t, match)
 
 	user.Password = "wrong"
 	_, _, err = getSftpClient(user)
 	assert.Error(t, err)
-	found, match = dataprovider.CheckCachedPassword(user.Username, defaultPassword)
+	found, match = dataprovider.CheckCachedUserPassword(user.Username, defaultPassword, dbUser.Password)
 	assert.False(t, found)
 	assert.False(t, match)
 	user.Password = ""
@@ -3443,21 +3656,31 @@ func TestPasswordCaching(t *testing.T) {
 		err = checkBasicSFTP(client)
 		assert.NoError(t, err)
 	}
-	found, match = dataprovider.CheckCachedPassword(user.Username, defaultPassword)
+	found, match = dataprovider.CheckCachedUserPassword(user.Username, defaultPassword, dbUser.Password)
 	assert.True(t, found)
 	assert.True(t, match)
 
-	found, match = dataprovider.CheckCachedPassword(user.Username, defaultPassword+"_")
+	found, match = dataprovider.CheckCachedUserPassword(user.Username, defaultPassword+"_", dbUser.Password)
 	assert.True(t, found)
 	assert.False(t, match)
 
-	found, match = dataprovider.CheckCachedPassword(user.Username+"_", defaultPassword)
+	found, match = dataprovider.CheckCachedUserPassword(user.Username+"_", defaultPassword, dbUser.Password)
 	assert.False(t, found)
 	assert.False(t, match)
 
 	user, _, err = httpdtest.UpdateUser(user, http.StatusOK, "")
 	assert.NoError(t, err)
-	found, match = dataprovider.CheckCachedPassword(user.Username, defaultPassword)
+	// the password was not changed
+	found, match = dataprovider.CheckCachedUserPassword(user.Username, defaultPassword, dbUser.Password)
+	assert.True(t, found)
+	assert.True(t, match)
+	// the password hash will change
+	user.Password = defaultPassword
+	_, _, err = httpdtest.UpdateUser(user, http.StatusOK, "")
+	assert.NoError(t, err)
+	dbUser, err = dataprovider.UserExists(user.Username, "")
+	assert.NoError(t, err)
+	found, match = dataprovider.CheckCachedUserPassword(user.Username, defaultPassword, dbUser.Password)
 	assert.False(t, found)
 	assert.False(t, match)
 
@@ -3468,8 +3691,52 @@ func TestPasswordCaching(t *testing.T) {
 		err = checkBasicSFTP(client)
 		assert.NoError(t, err)
 	}
+	found, match = dataprovider.CheckCachedUserPassword(user.Username, defaultPassword, dbUser.Password)
+	assert.True(t, found)
+	assert.True(t, match)
+	//change password
+	newPassword := defaultPassword + "mod"
+	user.Password = newPassword
+	_, _, err = httpdtest.UpdateUser(user, http.StatusOK, "")
+	assert.NoError(t, err)
+	dbUser, err = dataprovider.UserExists(user.Username, "")
+	assert.NoError(t, err)
+	found, match = dataprovider.CheckCachedUserPassword(user.Username, newPassword, dbUser.Password)
+	assert.False(t, found)
+	assert.False(t, match)
 
-	found, match = dataprovider.CheckCachedPassword(user.Username, defaultPassword)
+	conn, client, err = getSftpClient(user)
+	if assert.NoError(t, err) {
+		defer conn.Close()
+		defer client.Close()
+		err = checkBasicSFTP(client)
+		assert.NoError(t, err)
+	}
+	found, match = dataprovider.CheckCachedUserPassword(user.Username, defaultPassword, dbUser.Password)
+	assert.True(t, found)
+	assert.False(t, match)
+	found, match = dataprovider.CheckCachedUserPassword(user.Username, newPassword, dbUser.Password)
+	assert.True(t, found)
+	assert.True(t, match)
+	// update the password
+	err = dataprovider.UpdateUserPassword(user.Username, defaultPassword, "", "", "")
+	assert.NoError(t, err)
+	dbUser, err = dataprovider.UserExists(user.Username, "")
+	assert.NoError(t, err)
+	// the stored hash does not match
+	found, match = dataprovider.CheckCachedUserPassword(user.Username, defaultPassword, dbUser.Password)
+	assert.False(t, found)
+	assert.False(t, match)
+
+	user.Password = defaultPassword
+	conn, client, err = getSftpClient(user)
+	if assert.NoError(t, err) {
+		defer conn.Close()
+		defer client.Close()
+		err = checkBasicSFTP(client)
+		assert.NoError(t, err)
+	}
+	found, match = dataprovider.CheckCachedUserPassword(user.Username, defaultPassword, dbUser.Password)
 	assert.True(t, found)
 	assert.True(t, match)
 
@@ -3477,7 +3744,7 @@ func TestPasswordCaching(t *testing.T) {
 	assert.NoError(t, err)
 	err = os.RemoveAll(user.GetHomeDir())
 	assert.NoError(t, err)
-	found, match = dataprovider.CheckCachedPassword(user.Username, defaultPassword)
+	found, match = dataprovider.CheckCachedUserPassword(user.Username, defaultPassword, dbUser.Password)
 	assert.False(t, found)
 	assert.False(t, match)
 }
@@ -3516,8 +3783,9 @@ func TestEventRule(t *testing.T) {
 		Options: dataprovider.BaseEventActionOptions{
 			EmailConfig: dataprovider.EventActionEmailConfig{
 				Recipients: []string{"test1@example.com", "test2@example.com"},
-				Subject:    `New "{{Event}}" from "{{Name}}" status {{StatusString}}`,
-				Body:       "Fs path {{FsPath}}, size: {{FileSize}}, protocol: {{Protocol}}, IP: {{IP}} Data: {{ObjectData}} {{ErrorString}}",
+				Bcc:        []string{"test3@example.com"},
+				Subject:    `New "{{.Event}}" from "{{.Name}}" status {{.StatusString}}`,
+				Body:       "Fs path {{.FsPath}}, size: {{.FileSize}}, protocol: {{.Protocol}}, IP: {{.IP}} Data: {{.ObjectData}} {{.ErrorString}}",
 			},
 		},
 	}
@@ -3527,8 +3795,8 @@ func TestEventRule(t *testing.T) {
 		Options: dataprovider.BaseEventActionOptions{
 			EmailConfig: dataprovider.EventActionEmailConfig{
 				Recipients: []string{"failure@example.com"},
-				Subject:    `Failed "{{Event}}" from "{{Name}}"`,
-				Body:       "Fs path {{FsPath}}, protocol: {{Protocol}}, IP: {{IP}} {{ErrorString}}",
+				Subject:    `Failed "{{.Event}}" from "{{.Name}}"`,
+				Body:       "Fs path {{.FsPath}}, protocol: {{.Protocol}}, IP: {{.IP}} {{.ErrorString}}",
 			},
 		},
 	}
@@ -3548,6 +3816,7 @@ func TestEventRule(t *testing.T) {
 		Conditions: dataprovider.EventConditions{
 			FsEvents: []string{"upload"},
 			Options: dataprovider.ConditionOptions{
+				EventStatuses: []int{1},
 				FsPaths: []dataprovider.ConditionPattern{
 					{
 						Pattern: "/subdir/*.dat",
@@ -3659,6 +3928,11 @@ func TestEventRule(t *testing.T) {
 	err = os.WriteFile(uploadScriptPath, getUploadScriptContent(movedPath, "", 0), 0755)
 	assert.NoError(t, err)
 
+	dataprovider.EnabledActionCommands = []string{uploadScriptPath}
+	defer func() {
+		dataprovider.EnabledActionCommands = nil
+	}()
+
 	action1.Type = dataprovider.ActionTypeCommand
 	action1.Options = dataprovider.BaseEventActionOptions{
 		CmdConfig: dataprovider.EventActionCommandConfig{
@@ -3667,7 +3941,7 @@ func TestEventRule(t *testing.T) {
 			EnvVars: []dataprovider.KeyValue{
 				{
 					Key:   "SFTPGO_ACTION_PATH",
-					Value: "{{FsPath}}",
+					Value: "{{.FsPath}}",
 				},
 				{
 					Key:   "CUSTOM_ENV_VAR",
@@ -3711,9 +3985,10 @@ func TestEventRule(t *testing.T) {
 			return lastReceivedEmail.get().From != ""
 		}, 3000*time.Millisecond, 100*time.Millisecond)
 		email := lastReceivedEmail.get()
-		assert.Len(t, email.To, 2)
-		assert.True(t, util.Contains(email.To, "test1@example.com"))
-		assert.True(t, util.Contains(email.To, "test2@example.com"))
+		assert.Len(t, email.To, 3)
+		assert.True(t, slices.Contains(email.To, "test1@example.com"))
+		assert.True(t, slices.Contains(email.To, "test2@example.com"))
+		assert.True(t, slices.Contains(email.To, "test3@example.com"))
 		assert.Contains(t, email.Data, fmt.Sprintf(`Subject: New "upload" from "%s" status OK`, user.Username))
 		// test the failure action, we download a file that exceeds the transfer quota limit
 		err = writeSFTPFileNoCheck(path.Join("subdir1", testFileName), 1*1024*1024+65535, client)
@@ -3731,9 +4006,10 @@ func TestEventRule(t *testing.T) {
 			return lastReceivedEmail.get().From != ""
 		}, 3000*time.Millisecond, 100*time.Millisecond)
 		email = lastReceivedEmail.get()
-		assert.Len(t, email.To, 2)
-		assert.True(t, util.Contains(email.To, "test1@example.com"))
-		assert.True(t, util.Contains(email.To, "test2@example.com"))
+		assert.Len(t, email.To, 3)
+		assert.True(t, slices.Contains(email.To, "test1@example.com"))
+		assert.True(t, slices.Contains(email.To, "test2@example.com"))
+		assert.True(t, slices.Contains(email.To, "test3@example.com"))
 		assert.Contains(t, email.Data, fmt.Sprintf(`Subject: New "download" from "%s" status KO`, user.Username))
 		assert.Contains(t, email.Data, `"download" failed`)
 		assert.Contains(t, email.Data, common.ErrReadQuotaExceeded.Error())
@@ -3751,7 +4027,7 @@ func TestEventRule(t *testing.T) {
 		}, 3000*time.Millisecond, 100*time.Millisecond)
 		email = lastReceivedEmail.get()
 		assert.Len(t, email.To, 1)
-		assert.True(t, util.Contains(email.To, "failure@example.com"))
+		assert.True(t, slices.Contains(email.To, "failure@example.com"))
 		assert.Contains(t, email.Data, fmt.Sprintf(`Subject: Failed "upload" from "%s"`, user.Username))
 		assert.Contains(t, email.Data, fmt.Sprintf(`action %q failed`, action1.Name))
 		// now test the download rule
@@ -3767,13 +4043,14 @@ func TestEventRule(t *testing.T) {
 			return lastReceivedEmail.get().From != ""
 		}, 3000*time.Millisecond, 100*time.Millisecond)
 		email = lastReceivedEmail.get()
-		assert.Len(t, email.To, 2)
-		assert.True(t, util.Contains(email.To, "test1@example.com"))
-		assert.True(t, util.Contains(email.To, "test2@example.com"))
+		assert.Len(t, email.To, 3)
+		assert.True(t, slices.Contains(email.To, "test1@example.com"))
+		assert.True(t, slices.Contains(email.To, "test2@example.com"))
+		assert.True(t, slices.Contains(email.To, "test3@example.com"))
 		assert.Contains(t, email.Data, fmt.Sprintf(`Subject: New "download" from "%s"`, user.Username))
 	}
 	// test upload action command with arguments
-	action1.Options.CmdConfig.Args = []string{"{{Event}}", "{{VirtualPath}}", "custom_arg"}
+	action1.Options.CmdConfig.Args = []string{"{{.Event}}", "{{.VirtualPath}}", "custom_arg"}
 	action1, _, err = httpdtest.UpdateEventAction(action1, http.StatusOK)
 	assert.NoError(t, err)
 	uploadLogFilePath := filepath.Join(os.TempDir(), "upload.log")
@@ -3794,8 +4071,13 @@ func TestEventRule(t *testing.T) {
 
 		err = os.Remove(uploadLogFilePath)
 		assert.NoError(t, err)
+		lastReceivedEmail.reset()
+		assert.Eventually(t, func() bool {
+			return lastReceivedEmail.get().From != ""
+		}, 3000*time.Millisecond, 100*time.Millisecond)
 	}
 
+	lastReceivedEmail.reset()
 	_, err = httpdtest.RemoveEventRule(rule1, http.StatusOK)
 	assert.NoError(t, err)
 	_, err = httpdtest.RemoveEventRule(rule2, http.StatusOK)
@@ -3804,9 +4086,10 @@ func TestEventRule(t *testing.T) {
 		return lastReceivedEmail.get().From != ""
 	}, 3000*time.Millisecond, 100*time.Millisecond)
 	email := lastReceivedEmail.get()
-	assert.Len(t, email.To, 2)
-	assert.True(t, util.Contains(email.To, "test1@example.com"))
-	assert.True(t, util.Contains(email.To, "test2@example.com"))
+	assert.Len(t, email.To, 3)
+	assert.True(t, slices.Contains(email.To, "test1@example.com"))
+	assert.True(t, slices.Contains(email.To, "test2@example.com"))
+	assert.True(t, slices.Contains(email.To, "test3@example.com"))
 	assert.Contains(t, email.Data, `Subject: New "delete" from "admin"`)
 	_, err = httpdtest.RemoveEventRule(rule3, http.StatusOK)
 	assert.NoError(t, err)
@@ -3829,7 +4112,108 @@ func TestEventRule(t *testing.T) {
 	require.NoError(t, err)
 }
 
-func TestEventRuleProviderEvents(t *testing.T) {
+func TestEventRuleStatues(t *testing.T) {
+	smtpCfg := smtp.Config{
+		Host:          "127.0.0.1",
+		Port:          2525,
+		From:          "notification@example.com",
+		TemplatesPath: "templates",
+	}
+	err := smtpCfg.Initialize(configDir, true)
+	require.NoError(t, err)
+
+	a1 := dataprovider.BaseEventAction{
+		Name: "a1",
+		Type: dataprovider.ActionTypeEmail,
+		Options: dataprovider.BaseEventActionOptions{
+			EmailConfig: dataprovider.EventActionEmailConfig{
+				Recipients: []string{"test6@example.com"},
+				Subject:    `New "{{.Event}}" error`,
+				Body:       "{{.ErrorString}}",
+			},
+		},
+	}
+	action1, _, err := httpdtest.AddEventAction(a1, http.StatusCreated)
+	assert.NoError(t, err)
+
+	r := dataprovider.EventRule{
+		Name:    "rule",
+		Status:  1,
+		Trigger: dataprovider.EventTriggerFsEvent,
+		Conditions: dataprovider.EventConditions{
+			FsEvents: []string{"upload"},
+			Options: dataprovider.ConditionOptions{
+				EventStatuses: []int{3},
+			},
+		},
+		Actions: []dataprovider.EventAction{
+			{
+				BaseEventAction: dataprovider.BaseEventAction{
+					Name: action1.Name,
+				},
+				Order: 1,
+			},
+		},
+	}
+	rule, resp, err := httpdtest.AddEventRule(r, http.StatusCreated)
+	assert.NoError(t, err, string(resp))
+
+	u := getTestUser()
+	u.UploadDataTransfer = 1
+	u.DownloadDataTransfer = 1
+	user, _, err := httpdtest.AddUser(u, http.StatusCreated)
+	assert.NoError(t, err)
+	conn, client, err := getSftpClient(user)
+	if assert.NoError(t, err) {
+		defer conn.Close()
+		defer client.Close()
+
+		testFileSize := int64(999999)
+		err = writeSFTPFile(testFileName, testFileSize, client)
+		assert.NoError(t, err)
+		f, err := client.Open(testFileName)
+		assert.NoError(t, err)
+		contents := make([]byte, testFileSize)
+		n, err := io.ReadFull(f, contents)
+		assert.NoError(t, err)
+		assert.Equal(t, int(testFileSize), n)
+		assert.Len(t, contents, int(testFileSize))
+		err = f.Close()
+		assert.NoError(t, err)
+
+		lastReceivedEmail.reset()
+		assert.Eventually(t, func() bool {
+			return lastReceivedEmail.get().From == ""
+		}, 600*time.Millisecond, 500*time.Millisecond)
+
+		err = writeSFTPFile(testFileName, testFileSize, client)
+		assert.Error(t, err)
+		lastReceivedEmail.reset()
+		assert.Eventually(t, func() bool {
+			return lastReceivedEmail.get().From != ""
+		}, 3000*time.Millisecond, 100*time.Millisecond)
+		email := lastReceivedEmail.get()
+		assert.Len(t, email.To, 1)
+		assert.True(t, slices.Contains(email.To, "test6@example.com"))
+		assert.Contains(t, email.Data, `Subject: New "upload" error`)
+		assert.Contains(t, email.Data, common.ErrQuotaExceeded.Error())
+	}
+
+	_, err = httpdtest.RemoveEventRule(rule, http.StatusOK)
+	assert.NoError(t, err)
+	_, err = httpdtest.RemoveEventAction(action1, http.StatusOK)
+	assert.NoError(t, err)
+	_, err = httpdtest.RemoveUser(user, http.StatusOK)
+	assert.NoError(t, err)
+	err = os.RemoveAll(user.GetHomeDir())
+	assert.NoError(t, err)
+
+	smtpCfg = smtp.Config{}
+	err = smtpCfg.Initialize(configDir, true)
+	require.NoError(t, err)
+}
+
+func TestEventRuleDisabledCommand(t *testing.T) {
 	if runtime.GOOS == osWindows {
 		t.Skip("this test is not available on Windows")
 	}
@@ -3857,7 +4241,7 @@ func TestEventRuleProviderEvents(t *testing.T) {
 				EnvVars: []dataprovider.KeyValue{
 					{
 						Key:   "SFTPGO_OBJECT_DATA",
-						Value: "{{ObjectData}}",
+						Value: "{{.ObjectData}}",
 					},
 				},
 			},
@@ -3869,8 +4253,8 @@ func TestEventRuleProviderEvents(t *testing.T) {
 		Options: dataprovider.BaseEventActionOptions{
 			EmailConfig: dataprovider.EventActionEmailConfig{
 				Recipients: []string{"test3@example.com"},
-				Subject:    `New "{{Event}}" from "{{Name}}"`,
-				Body:       "Object name: {{ObjectName}} object type: {{ObjectType}} Data: {{ObjectData}}",
+				Subject:    `New "{{.Event}}" from "{{.Name}}"`,
+				Body:       "Object name: {{.ObjectName}} object type: {{.ObjectType}} Data: {{.ObjectData}}",
 			},
 		},
 	}
@@ -3881,8 +4265,157 @@ func TestEventRuleProviderEvents(t *testing.T) {
 		Options: dataprovider.BaseEventActionOptions{
 			EmailConfig: dataprovider.EventActionEmailConfig{
 				Recipients: []string{"failure@example.com"},
-				Subject:    `Failed "{{Event}}" from "{{Name}}"`,
-				Body:       "Object name: {{ObjectName}} object type: {{ObjectType}}, IP: {{IP}}",
+				Subject:    `Failed "{{.Event}}" from "{{.Name}}"`,
+				Body:       "Object name: {{.ObjectName}} object type: {{.ObjectType}}, IP: {{.IP}}",
+			},
+		},
+	}
+	_, _, err = httpdtest.AddEventAction(a1, http.StatusBadRequest)
+	assert.NoError(t, err)
+	// Enable the command to allow saving
+	dataprovider.EnabledActionCommands = []string{a1.Options.CmdConfig.Cmd}
+	action1, _, err := httpdtest.AddEventAction(a1, http.StatusCreated)
+	assert.NoError(t, err)
+	action2, _, err := httpdtest.AddEventAction(a2, http.StatusCreated)
+	assert.NoError(t, err)
+	action3, _, err := httpdtest.AddEventAction(a3, http.StatusCreated)
+	assert.NoError(t, err)
+
+	r := dataprovider.EventRule{
+		Name:    "rule",
+		Status:  1,
+		Trigger: dataprovider.EventTriggerProviderEvent,
+		Conditions: dataprovider.EventConditions{
+			ProviderEvents: []string{"add"},
+			Options: dataprovider.ConditionOptions{
+				ProviderObjects: []string{"folder"},
+			},
+		},
+		Actions: []dataprovider.EventAction{
+			{
+				BaseEventAction: dataprovider.BaseEventAction{
+					Name: action1.Name,
+				},
+				Order: 1,
+				Options: dataprovider.EventActionOptions{
+					StopOnFailure: true,
+				},
+			},
+			{
+				BaseEventAction: dataprovider.BaseEventAction{
+					Name: action2.Name,
+				},
+				Order: 2,
+			},
+			{
+				BaseEventAction: dataprovider.BaseEventAction{
+					Name: action3.Name,
+				},
+				Order: 3,
+				Options: dataprovider.EventActionOptions{
+					IsFailureAction: true,
+					StopOnFailure:   true,
+				},
+			},
+		},
+	}
+	rule, _, err := httpdtest.AddEventRule(r, http.StatusCreated)
+	assert.NoError(t, err)
+	// restrict command execution
+	dataprovider.EnabledActionCommands = nil
+
+	lastReceivedEmail.reset()
+	// create a folder to trigger the rule
+	folder := vfs.BaseVirtualFolder{
+		Name:       "ftest failed command",
+		MappedPath: filepath.Join(os.TempDir(), "p"),
+	}
+	folder, _, err = httpdtest.AddFolder(folder, http.StatusCreated)
+	assert.NoError(t, err)
+
+	assert.NoFileExists(t, outPath)
+	assert.Eventually(t, func() bool {
+		return lastReceivedEmail.get().From != ""
+	}, 3000*time.Millisecond, 100*time.Millisecond)
+	email := lastReceivedEmail.get()
+	assert.Len(t, email.To, 1)
+	assert.True(t, slices.Contains(email.To, "failure@example.com"))
+	assert.Contains(t, email.Data, `Subject: Failed "add" from "admin"`)
+	assert.Contains(t, email.Data, fmt.Sprintf("Object name: %s object type: folder", folder.Name))
+	lastReceivedEmail.reset()
+
+	_, err = httpdtest.RemoveFolder(folder, http.StatusOK)
+	assert.NoError(t, err)
+
+	_, err = httpdtest.RemoveEventRule(rule, http.StatusOK)
+	assert.NoError(t, err)
+	_, err = httpdtest.RemoveEventAction(action1, http.StatusOK)
+	assert.NoError(t, err)
+	_, err = httpdtest.RemoveEventAction(action2, http.StatusOK)
+	assert.NoError(t, err)
+	_, err = httpdtest.RemoveEventAction(action3, http.StatusOK)
+	assert.NoError(t, err)
+}
+
+func TestEventRuleProviderEvents(t *testing.T) {
+	if runtime.GOOS == osWindows {
+		t.Skip("this test is not available on Windows")
+	}
+	smtpCfg := smtp.Config{
+		Host:          "127.0.0.1",
+		Port:          2525,
+		From:          "notification@example.com",
+		TemplatesPath: "templates",
+	}
+	err := smtpCfg.Initialize(configDir, true)
+	require.NoError(t, err)
+
+	saveObjectScriptPath := filepath.Join(os.TempDir(), "provider.sh")
+	outPath := filepath.Join(os.TempDir(), "provider_out.json")
+	err = os.WriteFile(saveObjectScriptPath, getSaveProviderObjectScriptContent(outPath, 0), 0755)
+	assert.NoError(t, err)
+
+	dataprovider.EnabledActionCommands = []string{saveObjectScriptPath}
+	defer func() {
+		dataprovider.EnabledActionCommands = nil
+	}()
+
+	a1 := dataprovider.BaseEventAction{
+		Name: "a1",
+		Type: dataprovider.ActionTypeCommand,
+		Options: dataprovider.BaseEventActionOptions{
+			CmdConfig: dataprovider.EventActionCommandConfig{
+				Cmd:     saveObjectScriptPath,
+				Timeout: 10,
+				EnvVars: []dataprovider.KeyValue{
+					{
+						Key:   "SFTPGO_OBJECT_DATA",
+						Value: "{{.ObjectData}}",
+					},
+				},
+			},
+		},
+	}
+	a2 := dataprovider.BaseEventAction{
+		Name: "a2",
+		Type: dataprovider.ActionTypeEmail,
+		Options: dataprovider.BaseEventActionOptions{
+			EmailConfig: dataprovider.EventActionEmailConfig{
+				Recipients: []string{"test3@example.com"},
+				Subject:    `New "{{.Event}}" from "{{.Name}}"`,
+				Body:       "Object name: {{.ObjectName}} object type: {{.ObjectType}} Data: {{.ObjectData}}",
+			},
+		},
+	}
+
+	a3 := dataprovider.BaseEventAction{
+		Name: "a3",
+		Type: dataprovider.ActionTypeEmail,
+		Options: dataprovider.BaseEventActionOptions{
+			EmailConfig: dataprovider.EventActionEmailConfig{
+				Recipients: []string{"failure@example.com"},
+				Subject:    `Failed "{{.Event}}" from "{{.Name}}"`,
+				Body:       "Object name: {{.ObjectName}} object type: {{.ObjectType}}, IP: {{.IP}}",
 			},
 		},
 	}
@@ -3961,7 +4494,7 @@ func TestEventRuleProviderEvents(t *testing.T) {
 		}, 3000*time.Millisecond, 100*time.Millisecond)
 		email := lastReceivedEmail.get()
 		assert.Len(t, email.To, 1)
-		assert.True(t, util.Contains(email.To, "test3@example.com"))
+		assert.True(t, slices.Contains(email.To, "test3@example.com"))
 		assert.Contains(t, email.Data, `Subject: New "update" from "admin"`)
 	}
 	// now delete the script to generate an error
@@ -3976,7 +4509,7 @@ func TestEventRuleProviderEvents(t *testing.T) {
 	}, 3000*time.Millisecond, 100*time.Millisecond)
 	email := lastReceivedEmail.get()
 	assert.Len(t, email.To, 1)
-	assert.True(t, util.Contains(email.To, "failure@example.com"))
+	assert.True(t, slices.Contains(email.To, "failure@example.com"))
 	assert.Contains(t, email.Data, `Subject: Failed "update" from "admin"`)
 	assert.Contains(t, email.Data, fmt.Sprintf("Object name: %s object type: folder", folder.Name))
 	lastReceivedEmail.reset()
@@ -4025,10 +4558,12 @@ func TestEventRuleFsActions(t *testing.T) {
 		Options: dataprovider.BaseEventActionOptions{
 			FsConfig: dataprovider.EventActionFilesystemConfig{
 				Type: dataprovider.FilesystemActionRename,
-				Renames: []dataprovider.KeyValue{
+				Renames: []dataprovider.RenameConfig{
 					{
-						Key:   "/{{VirtualDirPath}}/{{ObjectName}}",
-						Value: "/{{ObjectName}}_renamed",
+						KeyValue: dataprovider.KeyValue{
+							Key:   "/{{.VirtualDirPath}}/{{.ObjectName}}",
+							Value: "/{{.ObjectName}}_renamed",
+						},
 					},
 				},
 			},
@@ -4040,7 +4575,7 @@ func TestEventRuleFsActions(t *testing.T) {
 		Options: dataprovider.BaseEventActionOptions{
 			FsConfig: dataprovider.EventActionFilesystemConfig{
 				Type:    dataprovider.FilesystemActionDelete,
-				Deletes: []string{"/{{ObjectName}}_renamed"},
+				Deletes: []string{"/{{.ObjectName}}_renamed"},
 			},
 		},
 	}
@@ -4058,7 +4593,7 @@ func TestEventRuleFsActions(t *testing.T) {
 		Options: dataprovider.BaseEventActionOptions{
 			FsConfig: dataprovider.EventActionFilesystemConfig{
 				Type:  dataprovider.FilesystemActionExist,
-				Exist: []string{"/{{VirtualPath}}"},
+				Exist: []string{"/{{.VirtualPath}}"},
 			},
 		},
 	}
@@ -4221,7 +4756,7 @@ func TestEventRuleFsActions(t *testing.T) {
 		assert.NoError(t, err)
 		_, err = client.Stat(path.Join("basedir", testFileName))
 		assert.Error(t, err)
-		info, err := client.Stat(testFileName + "_renamed")
+		info, err := client.Stat(testFileName + "_renamed") //nolint:goconst
 		if assert.NoError(t, err) {
 			assert.Equal(t, size, info.Size())
 		}
@@ -4286,6 +4821,221 @@ func TestEventRuleFsActions(t *testing.T) {
 	assert.NoError(t, err)
 }
 
+func TestEventActionObjectBaseName(t *testing.T) {
+	a1 := dataprovider.BaseEventAction{
+		Name: "a1",
+		Type: dataprovider.ActionTypeFilesystem,
+		Options: dataprovider.BaseEventActionOptions{
+			FsConfig: dataprovider.EventActionFilesystemConfig{
+				Type: dataprovider.FilesystemActionRename,
+				Renames: []dataprovider.RenameConfig{
+					{
+						KeyValue: dataprovider.KeyValue{
+							Key:   "/{{.VirtualDirPath}}/{{.ObjectName}}",
+							Value: "/{{.ObjectBaseName}}",
+						},
+					},
+				},
+			},
+		},
+	}
+	action1, resp, err := httpdtest.AddEventAction(a1, http.StatusCreated)
+	assert.NoError(t, err, string(resp))
+
+	r1 := dataprovider.EventRule{
+		Name:    "r2",
+		Status:  1,
+		Trigger: dataprovider.EventTriggerFsEvent,
+		Conditions: dataprovider.EventConditions{
+			FsEvents: []string{"upload"},
+		},
+		Actions: []dataprovider.EventAction{
+			{
+				BaseEventAction: dataprovider.BaseEventAction{
+					Name: action1.Name,
+				},
+				Order: 1,
+				Options: dataprovider.EventActionOptions{
+					ExecuteSync: true,
+				},
+			},
+		},
+	}
+	rule1, _, err := httpdtest.AddEventRule(r1, http.StatusCreated)
+	assert.NoError(t, err)
+
+	user, _, err := httpdtest.AddUser(getTestUser(), http.StatusCreated)
+	assert.NoError(t, err)
+	conn, client, err := getSftpClient(user)
+	if assert.NoError(t, err) {
+		defer conn.Close()
+		defer client.Close()
+
+		testDir := "test dir name"
+		err = client.Mkdir(testDir)
+		fileSize := int64(32768)
+		assert.NoError(t, err)
+		err = writeSFTPFileNoCheck(path.Join(testDir, testFileName), fileSize, client)
+		assert.NoError(t, err)
+
+		_, err = client.Stat(path.Join(testDir, testFileName))
+		assert.ErrorIs(t, err, os.ErrNotExist)
+
+		_, err = client.Stat(strings.TrimSuffix(testFileName, path.Ext(testFileName)))
+		assert.NoError(t, err)
+	}
+
+	_, err = httpdtest.RemoveUser(user, http.StatusOK)
+	assert.NoError(t, err)
+	err = os.RemoveAll(user.GetHomeDir())
+	assert.NoError(t, err)
+	_, err = httpdtest.RemoveEventRule(rule1, http.StatusOK)
+	assert.NoError(t, err)
+	_, err = httpdtest.RemoveEventAction(action1, http.StatusOK)
+	assert.NoError(t, err)
+}
+
+func TestUploadEventRule(t *testing.T) {
+	smtpCfg := smtp.Config{
+		Host:          "127.0.0.1",
+		Port:          2525,
+		From:          "notification@example.com",
+		TemplatesPath: "templates",
+	}
+	err := smtpCfg.Initialize(configDir, true)
+	require.NoError(t, err)
+
+	a1 := dataprovider.BaseEventAction{
+		Name: "action1",
+		Type: dataprovider.ActionTypeEmail,
+		Options: dataprovider.BaseEventActionOptions{
+			EmailConfig: dataprovider.EventActionEmailConfig{
+				Recipients: []string{"test1@example.com"},
+				Subject:    `New "{{.Event}}" from "{{.Name}}" status {{.StatusString}}`,
+				Body:       "Fs path {{.FsPath}}, size: {{.FileSize}}, protocol: {{.Protocol}}, IP: {{.IP}} Data: {{.ObjectData}} {{.ErrorString}}",
+			},
+		},
+	}
+	action1, _, err := httpdtest.AddEventAction(a1, http.StatusCreated)
+	assert.NoError(t, err)
+
+	r1 := dataprovider.EventRule{
+		Name:    "test rule1",
+		Status:  1,
+		Trigger: dataprovider.EventTriggerFsEvent,
+		Conditions: dataprovider.EventConditions{
+			FsEvents: []string{"upload"},
+			Options: dataprovider.ConditionOptions{
+				FsPaths: []dataprovider.ConditionPattern{
+					{
+						Pattern:      "/**/*.filepart",
+						InverseMatch: true,
+					},
+				},
+			},
+		},
+		Actions: []dataprovider.EventAction{
+			{
+				BaseEventAction: dataprovider.BaseEventAction{
+					Name: action1.Name,
+				},
+				Order: 1,
+				Options: dataprovider.EventActionOptions{
+					ExecuteSync: true,
+				},
+			},
+		},
+	}
+	rule1, _, err := httpdtest.AddEventRule(r1, http.StatusCreated)
+	assert.NoError(t, err)
+
+	user, _, err := httpdtest.AddUser(getTestUser(), http.StatusCreated)
+	assert.NoError(t, err)
+
+	conn, client, err := getSftpClient(user)
+	if assert.NoError(t, err) {
+		defer conn.Close()
+		defer client.Close()
+
+		lastReceivedEmail.reset()
+		err = writeSFTPFileNoCheck("/test.filepart", 32768, client)
+		assert.NoError(t, err)
+		email := lastReceivedEmail.get()
+		assert.Empty(t, email.From)
+
+		lastReceivedEmail.reset()
+		err = writeSFTPFileNoCheck(testFileName, 32768, client)
+		assert.NoError(t, err)
+		email = lastReceivedEmail.get()
+		assert.Len(t, email.To, 1)
+		assert.Contains(t, email.Data, `Subject: New "upload"`)
+	}
+
+	r2 := dataprovider.EventRule{
+		Name:    "test rule2",
+		Status:  1,
+		Trigger: dataprovider.EventTriggerFsEvent,
+		Conditions: dataprovider.EventConditions{
+			FsEvents: []string{"rename"},
+			Options: dataprovider.ConditionOptions{
+				FsPaths: []dataprovider.ConditionPattern{
+					{
+						Pattern: "/**/*.filepart",
+					},
+				},
+			},
+		},
+		Actions: []dataprovider.EventAction{
+			{
+				BaseEventAction: dataprovider.BaseEventAction{
+					Name: action1.Name,
+				},
+				Order: 1,
+			},
+		},
+	}
+	rule2, _, err := httpdtest.AddEventRule(r2, http.StatusCreated)
+	assert.NoError(t, err)
+
+	conn, client, err = getSftpClient(user)
+	if assert.NoError(t, err) {
+		defer conn.Close()
+		defer client.Close()
+
+		tempName := "file.filepart"
+		lastReceivedEmail.reset()
+		err = writeSFTPFileNoCheck(tempName, 32768, client)
+		assert.NoError(t, err)
+		email := lastReceivedEmail.get()
+		assert.Empty(t, email.From)
+
+		lastReceivedEmail.reset()
+		err = client.Rename(tempName, testFileName)
+		assert.NoError(t, err)
+		assert.Eventually(t, func() bool {
+			return lastReceivedEmail.get().From != ""
+		}, 3000*time.Millisecond, 100*time.Millisecond)
+		email = lastReceivedEmail.get()
+		assert.Len(t, email.To, 1)
+		assert.Contains(t, email.Data, `Subject: New "rename"`)
+	}
+
+	_, err = httpdtest.RemoveEventRule(rule1, http.StatusOK)
+	assert.NoError(t, err)
+	_, err = httpdtest.RemoveEventRule(rule2, http.StatusOK)
+	assert.NoError(t, err)
+	_, err = httpdtest.RemoveEventAction(action1, http.StatusOK)
+	assert.NoError(t, err)
+	_, err = httpdtest.RemoveUser(user, http.StatusOK)
+	assert.NoError(t, err)
+	err = os.RemoveAll(user.GetHomeDir())
+	assert.NoError(t, err)
+
+	smtpCfg = smtp.Config{}
+	err = smtpCfg.Initialize(configDir, true)
+	require.NoError(t, err)
+}
+
 func TestEventRulePreDelete(t *testing.T) {
 	movePath := "recycle bin"
 	a1 := dataprovider.BaseEventAction{
@@ -4294,10 +5044,13 @@ func TestEventRulePreDelete(t *testing.T) {
 		Options: dataprovider.BaseEventActionOptions{
 			FsConfig: dataprovider.EventActionFilesystemConfig{
 				Type: dataprovider.FilesystemActionRename,
-				Renames: []dataprovider.KeyValue{
+				Renames: []dataprovider.RenameConfig{
 					{
-						Key:   "/{{VirtualPath}}",
-						Value: fmt.Sprintf("/%s/{{VirtualPath}}", movePath),
+						KeyValue: dataprovider.KeyValue{
+							Key:   "/{{.VirtualPath}}",
+							Value: fmt.Sprintf("/%s/{{.VirtualPath}}", movePath),
+						},
+						UpdateModTime: true,
 					},
 				},
 			},
@@ -4334,71 +5087,100 @@ func TestEventRulePreDelete(t *testing.T) {
 	}
 	rule1, _, err := httpdtest.AddEventRule(r1, http.StatusCreated)
 	assert.NoError(t, err)
+	f := vfs.BaseVirtualFolder{
+		Name:       movePath,
+		MappedPath: filepath.Join(os.TempDir(), movePath),
+	}
+	_, _, err = httpdtest.AddFolder(f, http.StatusCreated)
+	assert.NoError(t, err)
 	u := getTestUser()
 	u.QuotaFiles = 1000
 	u.VirtualFolders = []vfs.VirtualFolder{
 		{
 			BaseVirtualFolder: vfs.BaseVirtualFolder{
-				Name:       movePath,
-				MappedPath: filepath.Join(os.TempDir(), movePath),
+				Name: movePath,
 			},
 			VirtualPath: "/" + movePath,
 			QuotaFiles:  1000,
 		},
 	}
-	user, _, err := httpdtest.AddUser(u, http.StatusCreated)
+	localUser, _, err := httpdtest.AddUser(u, http.StatusCreated)
 	assert.NoError(t, err)
-	conn, client, err := getSftpClient(user)
-	if assert.NoError(t, err) {
-		defer conn.Close()
-		defer client.Close()
+	u = getTestSFTPUser()
+	u.QuotaFiles = 1000
+	sftpUser, _, err := httpdtest.AddUser(u, http.StatusCreated)
+	assert.NoError(t, err)
 
-		testDir := "sub dir"
-		err = client.MkdirAll(testDir)
-		assert.NoError(t, err)
-		err = writeSFTPFile(testFileName, 100, client)
-		assert.NoError(t, err)
-		err = writeSFTPFile(path.Join(testDir, testFileName), 100, client)
-		assert.NoError(t, err)
-		err = client.Remove(testFileName)
-		assert.NoError(t, err)
-		err = client.Remove(path.Join(testDir, testFileName))
-		assert.NoError(t, err)
-		// check files
-		_, err = client.Stat(testFileName)
-		assert.ErrorIs(t, err, os.ErrNotExist)
-		_, err = client.Stat(path.Join(testDir, testFileName))
-		assert.ErrorIs(t, err, os.ErrNotExist)
-		_, err = client.Stat(path.Join("/", movePath, testFileName))
-		assert.NoError(t, err)
-		_, err = client.Stat(path.Join("/", movePath, testDir, testFileName))
-		assert.NoError(t, err)
-		// check quota
-		user, _, err = httpdtest.GetUserByUsername(user.Username, http.StatusOK)
-		assert.NoError(t, err)
-		assert.Equal(t, 0, user.UsedQuotaFiles)
-		assert.Equal(t, int64(0), user.UsedQuotaSize)
-		folder, _, err := httpdtest.GetFolderByName(movePath, http.StatusOK)
-		assert.NoError(t, err)
-		assert.Equal(t, 2, folder.UsedQuotaFiles)
-		assert.Equal(t, int64(200), folder.UsedQuotaSize)
-		// pre-delete action is not executed in movePath
-		err = client.Remove(path.Join("/", movePath, testFileName))
-		assert.NoError(t, err)
-		// check quota
-		folder, _, err = httpdtest.GetFolderByName(movePath, http.StatusOK)
-		assert.NoError(t, err)
-		assert.Equal(t, 1, folder.UsedQuotaFiles)
-		assert.Equal(t, int64(100), folder.UsedQuotaSize)
+	for _, user := range []dataprovider.User{localUser, sftpUser} {
+		conn, client, err := getSftpClient(user)
+		if assert.NoError(t, err) {
+			defer conn.Close()
+			defer client.Close()
+
+			testDir := "sub dir"
+			err = client.MkdirAll(testDir)
+			assert.NoError(t, err)
+			err = writeSFTPFile(testFileName, 100, client)
+			assert.NoError(t, err)
+			err = writeSFTPFile(path.Join(testDir, testFileName), 100, client)
+			assert.NoError(t, err)
+			modTime := time.Now().Add(-36 * time.Hour)
+			err = client.Chtimes(testFileName, modTime, modTime)
+			assert.NoError(t, err)
+			err = client.Remove(testFileName)
+			assert.NoError(t, err)
+			err = client.Remove(path.Join(testDir, testFileName))
+			assert.NoError(t, err)
+			// check files
+			_, err = client.Stat(testFileName)
+			assert.ErrorIs(t, err, os.ErrNotExist)
+			_, err = client.Stat(path.Join(testDir, testFileName))
+			assert.ErrorIs(t, err, os.ErrNotExist)
+			info, err := client.Stat(path.Join("/", movePath, testFileName))
+			assert.NoError(t, err)
+			diff := math.Abs(time.Until(info.ModTime()).Seconds())
+			assert.LessOrEqual(t, diff, float64(2))
+
+			_, err = client.Stat(path.Join("/", movePath, testDir, testFileName))
+			assert.NoError(t, err)
+			// check quota
+			user, _, err = httpdtest.GetUserByUsername(user.Username, http.StatusOK)
+			assert.NoError(t, err)
+			if user.Username == localUser.Username {
+				assert.Equal(t, 0, user.UsedQuotaFiles)
+				assert.Equal(t, int64(0), user.UsedQuotaSize)
+				folder, _, err := httpdtest.GetFolderByName(movePath, http.StatusOK)
+				assert.NoError(t, err)
+				assert.Equal(t, 2, folder.UsedQuotaFiles)
+				assert.Equal(t, int64(200), folder.UsedQuotaSize)
+			} else {
+				assert.Equal(t, 1, user.UsedQuotaFiles)
+				assert.Equal(t, int64(100), user.UsedQuotaSize)
+			}
+			// pre-delete action is not executed in movePath
+			err = client.Remove(path.Join("/", movePath, testFileName))
+			assert.NoError(t, err)
+			if user.Username == localUser.Username {
+				// check quota
+				folder, _, err := httpdtest.GetFolderByName(movePath, http.StatusOK)
+				assert.NoError(t, err)
+				assert.Equal(t, 1, folder.UsedQuotaFiles)
+				assert.Equal(t, int64(100), folder.UsedQuotaSize)
+				err = os.RemoveAll(user.GetHomeDir())
+				assert.NoError(t, err)
+			}
+		}
 	}
 
 	_, err = httpdtest.RemoveEventRule(rule1, http.StatusOK)
 	assert.NoError(t, err)
 	_, err = httpdtest.RemoveEventAction(action1, http.StatusOK)
 	assert.NoError(t, err)
-	_, err = httpdtest.RemoveUser(user, http.StatusOK)
+	_, err = httpdtest.RemoveUser(sftpUser, http.StatusOK)
 	assert.NoError(t, err)
-	err = os.RemoveAll(user.GetHomeDir())
+	_, err = httpdtest.RemoveUser(localUser, http.StatusOK)
+	assert.NoError(t, err)
+	err = os.RemoveAll(localUser.GetHomeDir())
 	assert.NoError(t, err)
 	_, err = httpdtest.RemoveFolder(vfs.BaseVirtualFolder{Name: movePath}, http.StatusOK)
 	assert.NoError(t, err)
@@ -4426,10 +5208,12 @@ func TestEventRulePreDownloadUpload(t *testing.T) {
 		Options: dataprovider.BaseEventActionOptions{
 			FsConfig: dataprovider.EventActionFilesystemConfig{
 				Type: dataprovider.FilesystemActionRename,
-				Renames: []dataprovider.KeyValue{
+				Renames: []dataprovider.RenameConfig{
 					{
-						Key:   "/missing source",
-						Value: "/missing target",
+						KeyValue: dataprovider.KeyValue{
+							Key:   "/missing source",
+							Value: "/missing target",
+						},
 					},
 				},
 			},
@@ -4526,6 +5310,97 @@ func TestEventRulePreDownloadUpload(t *testing.T) {
 	assert.NoError(t, err)
 }
 
+func TestEventActionCommandEnvVars(t *testing.T) {
+	if runtime.GOOS == osWindows {
+		t.Skip("this test is not available on Windows")
+	}
+	envName := "MY_ENV"
+	uploadScriptPath := filepath.Join(os.TempDir(), "upload.sh")
+
+	dataprovider.EnabledActionCommands = []string{uploadScriptPath}
+	defer func() {
+		dataprovider.EnabledActionCommands = nil
+	}()
+
+	err := os.WriteFile(uploadScriptPath, getUploadScriptEnvContent(envName), 0755)
+	assert.NoError(t, err)
+	a1 := dataprovider.BaseEventAction{
+		Name: "action1",
+		Type: dataprovider.ActionTypeCommand,
+		Options: dataprovider.BaseEventActionOptions{
+			CmdConfig: dataprovider.EventActionCommandConfig{
+				Cmd:     uploadScriptPath,
+				Timeout: 10,
+				EnvVars: []dataprovider.KeyValue{
+					{
+						Key:   envName,
+						Value: "$",
+					},
+				},
+			},
+		},
+	}
+	action1, _, err := httpdtest.AddEventAction(a1, http.StatusCreated)
+	assert.NoError(t, err)
+
+	r1 := dataprovider.EventRule{
+		Name:    "test rule1",
+		Status:  1,
+		Trigger: dataprovider.EventTriggerFsEvent,
+		Conditions: dataprovider.EventConditions{
+			FsEvents: []string{"upload"},
+		},
+		Actions: []dataprovider.EventAction{
+			{
+				BaseEventAction: dataprovider.BaseEventAction{
+					Name: action1.Name,
+				},
+				Order: 1,
+				Options: dataprovider.EventActionOptions{
+					ExecuteSync: true,
+				},
+			},
+		},
+	}
+	rule1, _, err := httpdtest.AddEventRule(r1, http.StatusCreated)
+	assert.NoError(t, err)
+
+	user, _, err := httpdtest.AddUser(getTestUser(), http.StatusCreated)
+	assert.NoError(t, err)
+
+	conn, client, err := getSftpClient(user)
+	if assert.NoError(t, err) {
+		defer conn.Close()
+		defer client.Close()
+
+		err = writeSFTPFileNoCheck(testFileName, 100, client)
+		assert.Error(t, err)
+	}
+
+	os.Setenv(envName, "1")
+	defer os.Unsetenv(envName)
+
+	conn, client, err = getSftpClient(user)
+	if assert.NoError(t, err) {
+		defer conn.Close()
+		defer client.Close()
+
+		err = writeSFTPFileNoCheck(testFileName, 100, client)
+		assert.NoError(t, err)
+	}
+
+	_, err = httpdtest.RemoveEventRule(rule1, http.StatusOK)
+	assert.NoError(t, err)
+	_, err = httpdtest.RemoveEventAction(action1, http.StatusOK)
+	assert.NoError(t, err)
+	_, err = httpdtest.RemoveUser(user, http.StatusOK)
+	assert.NoError(t, err)
+	err = os.RemoveAll(user.GetHomeDir())
+	assert.NoError(t, err)
+	err = os.Remove(uploadScriptPath)
+	assert.NoError(t, err)
+}
+
 func TestFsActionCopy(t *testing.T) {
 	a1 := dataprovider.BaseEventAction{
 		Name: "a1",
@@ -4535,7 +5410,7 @@ func TestFsActionCopy(t *testing.T) {
 				Type: dataprovider.FilesystemActionCopy,
 				Copy: []dataprovider.KeyValue{
 					{
-						Key:   "/{{VirtualPath}}/",
+						Key:   "/{{.VirtualPath}}/",
 						Value: "/dircopy/",
 					},
 				},
@@ -4617,8 +5492,8 @@ func TestEventFsActionsGroupFilters(t *testing.T) {
 		Options: dataprovider.BaseEventActionOptions{
 			EmailConfig: dataprovider.EventActionEmailConfig{
 				Recipients: []string{"example@example.net"},
-				Subject:    `New "{{Event}}" from "{{Name}}" status {{StatusString}}`,
-				Body:       "Fs path {{FsPath}}, size: {{FileSize}}, protocol: {{Protocol}}, IP: {{IP}} {{ErrorString}}",
+				Subject:    `New "{{.Event}}" from "{{.Name}}" status {{.StatusString}}`,
+				Body:       "Fs path {{.FsPath}}, size: {{.FileSize}}, protocol: {{.Protocol}}, IP: {{.IP}} {{.ErrorString}}",
 			},
 		},
 	}
@@ -4732,6 +5607,138 @@ func TestEventFsActionsGroupFilters(t *testing.T) {
 	require.NoError(t, err)
 }
 
+func TestEventProviderActionGroupFilters(t *testing.T) {
+	smtpCfg := smtp.Config{
+		Host:          "127.0.0.1",
+		Port:          2525,
+		From:          "notification@example.com",
+		TemplatesPath: "templates",
+	}
+	err := smtpCfg.Initialize(configDir, true)
+	require.NoError(t, err)
+
+	a1 := dataprovider.BaseEventAction{
+		Name: "a1",
+		Type: dataprovider.ActionTypeEmail,
+		Options: dataprovider.BaseEventActionOptions{
+			EmailConfig: dataprovider.EventActionEmailConfig{
+				Recipients: []string{"example@example.net"},
+				Subject:    `New "{{.Event}}" from "{{.Name}}"`,
+				Body:       "IP: {{.IP}}",
+			},
+		},
+	}
+	action1, _, err := httpdtest.AddEventAction(a1, http.StatusCreated)
+	assert.NoError(t, err)
+
+	r1 := dataprovider.EventRule{
+		Name:    "rule1",
+		Status:  1,
+		Trigger: dataprovider.EventTriggerProviderEvent,
+		Conditions: dataprovider.EventConditions{
+			ProviderEvents: []string{"add", "update"},
+			Options: dataprovider.ConditionOptions{
+				GroupNames: []dataprovider.ConditionPattern{
+					{
+						Pattern: "group_*",
+					},
+				},
+				ProviderObjects: []string{"user"},
+			},
+		},
+		Actions: []dataprovider.EventAction{
+			{
+				BaseEventAction: dataprovider.BaseEventAction{
+					Name: action1.Name,
+				},
+				Order: 1,
+			},
+		},
+	}
+	rule1, _, err := httpdtest.AddEventRule(r1, http.StatusCreated)
+	assert.NoError(t, err)
+
+	g1 := dataprovider.Group{
+		BaseGroup: sdk.BaseGroup{
+			Name: "agroup_1",
+		},
+	}
+	group1, _, err := httpdtest.AddGroup(g1, http.StatusCreated)
+	assert.NoError(t, err)
+
+	g2 := dataprovider.Group{
+		BaseGroup: sdk.BaseGroup{
+			Name: "group_2",
+		},
+	}
+	group2, _, err := httpdtest.AddGroup(g2, http.StatusCreated)
+	assert.NoError(t, err)
+
+	u := getTestUser()
+	u.Groups = []sdk.GroupMapping{
+		{
+			Name: group2.Name,
+			Type: sdk.GroupTypePrimary,
+		},
+	}
+
+	lastReceivedEmail.reset()
+	user, _, err := httpdtest.AddUser(u, http.StatusCreated)
+	assert.NoError(t, err)
+	assert.Eventually(t, func() bool {
+		return lastReceivedEmail.get().From != ""
+	}, 1500*time.Millisecond, 100*time.Millisecond)
+	email := lastReceivedEmail.get()
+	assert.Len(t, email.To, 1)
+
+	user.Groups = []sdk.GroupMapping{
+		{
+			Name: group1.Name,
+			Type: sdk.GroupTypePrimary,
+		},
+	}
+
+	lastReceivedEmail.reset()
+	user, _, err = httpdtest.UpdateUser(user, http.StatusOK, "")
+	assert.NoError(t, err)
+	time.Sleep(300 * time.Millisecond)
+	email = lastReceivedEmail.get()
+	assert.Len(t, email.To, 0)
+
+	user.Groups = []sdk.GroupMapping{
+		{
+			Name: group2.Name,
+			Type: sdk.GroupTypePrimary,
+		},
+	}
+
+	lastReceivedEmail.reset()
+	user, _, err = httpdtest.UpdateUser(user, http.StatusOK, "")
+	assert.NoError(t, err)
+	assert.Eventually(t, func() bool {
+		return lastReceivedEmail.get().From != ""
+	}, 1500*time.Millisecond, 100*time.Millisecond)
+	email = lastReceivedEmail.get()
+	assert.Len(t, email.To, 1)
+
+	_, err = httpdtest.RemoveEventRule(rule1, http.StatusOK)
+	assert.NoError(t, err)
+	_, err = httpdtest.RemoveEventAction(action1, http.StatusOK)
+	assert.NoError(t, err)
+	_, err = httpdtest.RemoveUser(user, http.StatusOK)
+	assert.NoError(t, err)
+	err = os.RemoveAll(user.GetHomeDir())
+	assert.NoError(t, err)
+	_, err = httpdtest.RemoveGroup(group1, http.StatusOK)
+	assert.NoError(t, err)
+	_, err = httpdtest.RemoveGroup(group2, http.StatusOK)
+	assert.NoError(t, err)
+
+	smtpCfg = smtp.Config{}
+	err = smtpCfg.Initialize(configDir, true)
+	require.NoError(t, err)
+}
+
 func TestBackupAsAttachment(t *testing.T) {
 	smtpCfg := smtp.Config{
 		Host:          "127.0.0.1",
@@ -4752,9 +5759,9 @@ func TestBackupAsAttachment(t *testing.T) {
 		Options: dataprovider.BaseEventActionOptions{
 			EmailConfig: dataprovider.EventActionEmailConfig{
 				Recipients:  []string{"test@example.com"},
-				Subject:     `"{{Event}} {{StatusString}}"`,
-				Body:        "Domain: {{Name}}",
-				Attachments: []string{"/{{VirtualPath}}"},
+				Subject:     `"{{.Event}} {{.StatusString}}"`,
+				Body:        "Domain: {{.Name}}",
+				Attachments: []string{"/{{.VirtualPath}}"},
 			},
 		},
 	}
@@ -4790,7 +5797,7 @@ func TestBackupAsAttachment(t *testing.T) {
 
 	common.HandleCertificateEvent(common.EventParams{
 		Name:      "example.com",
-		Timestamp: time.Now().UnixNano(),
+		Timestamp: time.Now(),
 		Status:    1,
 		Event:     renewalEvent,
 	})
@@ -4799,7 +5806,7 @@ func TestBackupAsAttachment(t *testing.T) {
 	}, 3000*time.Millisecond, 100*time.Millisecond)
 	email := lastReceivedEmail.get()
 	assert.Len(t, email.To, 1)
-	assert.True(t, util.Contains(email.To, "test@example.com"))
+	assert.True(t, slices.Contains(email.To, "test@example.com"))
 	assert.Contains(t, email.Data, fmt.Sprintf(`Subject: "%s OK"`, renewalEvent))
 	assert.Contains(t, email.Data, `Domain: example.com`)
 	assert.Contains(t, email.Data, "Content-Type: application/json")
@@ -4833,11 +5840,11 @@ func TestEventActionHTTPMultipart(t *testing.T) {
 								Value: "application/json",
 							},
 						},
-						Body: `{"FilePath": "{{VirtualPath}}"}`,
+						Body: `{"FilePath": "{{.VirtualPath}}"}`,
 					},
 					{
 						Name:     "file",
-						Filepath: "/{{VirtualPath}}",
+						Filepath: "/{{.VirtualPath}}",
 					},
 				},
 			},
@@ -4913,8 +5920,8 @@ func TestEventActionCompress(t *testing.T) {
 			FsConfig: dataprovider.EventActionFilesystemConfig{
 				Type: dataprovider.FilesystemActionCompress,
 				Compress: dataprovider.EventActionFsCompress{
-					Name:  "/{{VirtualPath}}.zip",
-					Paths: []string{"/{{VirtualPath}}"},
+					Name:  "/{{.VirtualPath}}.zip",
+					Paths: []string{"/{{.VirtualPath}}"},
 				},
 			},
 		},
@@ -4987,7 +5994,7 @@ func TestEventActionCompress(t *testing.T) {
 			assert.NoError(t, err)
 			err = f.Close()
 			assert.NoError(t, err)
-			info, err := client.Stat(testFileName + ".zip")
+			info, err := client.Stat(testFileName + ".zip") //nolint:goconst
 			if assert.NoError(t, err) {
 				assert.Greater(t, info.Size(), int64(0))
 				// check quota
@@ -5084,7 +6091,7 @@ func TestEventActionCompressQuotaErrors(t *testing.T) {
 			EmailConfig: dataprovider.EventActionEmailConfig{
 				Recipients: []string{"test@example.com"},
 				Subject:    `"Compress failed"`,
-				Body:       "Error: {{ErrorString}}",
+				Body:       "Error: {{.ErrorString}}",
 			},
 		},
 	}
@@ -5169,7 +6176,7 @@ func TestEventActionCompressQuotaErrors(t *testing.T) {
 		}, 3*time.Second, 100*time.Millisecond)
 		email := lastReceivedEmail.get()
 		assert.Len(t, email.To, 1)
-		assert.True(t, util.Contains(email.To, "test@example.com"))
+		assert.True(t, slices.Contains(email.To, "test@example.com"))
 		assert.Contains(t, email.Data, `Subject: "Compress failed"`)
 		assert.Contains(t, email.Data, common.ErrQuotaExceeded.Error())
 		// update quota size so the user is already overquota
@@ -5184,7 +6191,7 @@ func TestEventActionCompressQuotaErrors(t *testing.T) {
 		}, 3*time.Second, 100*time.Millisecond)
 		email = lastReceivedEmail.get()
 		assert.Len(t, email.To, 1)
-		assert.True(t, util.Contains(email.To, "test@example.com"))
+		assert.True(t, slices.Contains(email.To, "test@example.com"))
 		assert.Contains(t, email.Data, `Subject: "Compress failed"`)
 		assert.Contains(t, email.Data, common.ErrQuotaExceeded.Error())
 		// remove the path to compress to trigger an error for size estimation
@@ -5198,7 +6205,7 @@ func TestEventActionCompressQuotaErrors(t *testing.T) {
 		}, 3*time.Second, 100*time.Millisecond)
 		email = lastReceivedEmail.get()
 		assert.Len(t, email.To, 1)
-		assert.True(t, util.Contains(email.To, "test@example.com"))
+		assert.True(t, slices.Contains(email.To, "test@example.com"))
 		assert.Contains(t, email.Data, `Subject: "Compress failed"`)
 		assert.Contains(t, email.Data, "unable to estimate archive size")
 	}
@@ -5228,8 +6235,8 @@ func TestEventActionCompressQuotaFolder(t *testing.T) {
 			FsConfig: dataprovider.EventActionFilesystemConfig{
 				Type: dataprovider.FilesystemActionCompress,
 				Compress: dataprovider.EventActionFsCompress{
-					Name:  "/{{VirtualPath}}.zip",
-					Paths: []string{"/{{VirtualPath}}", testDir},
+					Name:  "/{{.VirtualPath}}.zip",
+					Paths: []string{"/{{.VirtualPath}}", testDir},
 				},
 			},
 		},
@@ -5262,10 +6269,15 @@ func TestEventActionCompressQuotaFolder(t *testing.T) {
 	mappedPath := filepath.Join(os.TempDir(), "virtualpath")
 	folderName := filepath.Base(mappedPath)
 	vdirPath := "/virtualpath"
+	f := vfs.BaseVirtualFolder{
+		Name:       folderName,
+		MappedPath: mappedPath,
+	}
+	_, _, err = httpdtest.AddFolder(f, http.StatusCreated)
+	assert.NoError(t, err)
 	u.VirtualFolders = append(u.VirtualFolders, vfs.VirtualFolder{
 		BaseVirtualFolder: vfs.BaseVirtualFolder{
-			Name:       folderName,
-			MappedPath: mappedPath,
+			Name: folderName,
 		},
 		VirtualPath: vdirPath,
 		QuotaSize:   -1,
@@ -5322,8 +6334,8 @@ func TestEventActionCompressQuotaFolder(t *testing.T) {
 			assert.Equal(t, expectedQuotaSize, user.UsedQuotaSize)
 			vfolder, _, err := httpdtest.GetFolderByName(folderName, http.StatusOK)
 			assert.NoError(t, err)
-			assert.Equal(t, 2, vfolder.UsedQuotaFiles)
-			assert.Equal(t, info.Size()+int64(len(testFileContent)), vfolder.UsedQuotaSize)
+			assert.Equal(t, 0, vfolder.UsedQuotaFiles)
+			assert.Equal(t, int64(0), vfolder.UsedQuotaSize)
 		}
 	}
 
@@ -5349,8 +6361,8 @@ func TestEventActionCompressErrors(t *testing.T) {
 			FsConfig: dataprovider.EventActionFilesystemConfig{
 				Type: dataprovider.FilesystemActionCompress,
 				Compress: dataprovider.EventActionFsCompress{
-					Name:  "/{{VirtualPath}}.zip",
-					Paths: []string{"/{{VirtualPath}}.zip"}, // cannot compress itself
+					Name:  "/{{.VirtualPath}}.zip",
+					Paths: []string{"/{{.VirtualPath}}.zip"}, // cannot compress itself
 				},
 			},
 		},
@@ -5412,7 +6424,7 @@ func TestEventActionCompressErrors(t *testing.T) {
 	// try to overwrite a directory
 	testDir := "/adir"
 	action1.Options.FsConfig.Compress.Name = testDir
-	action1.Options.FsConfig.Compress.Paths = []string{"/{{VirtualPath}}"}
+	action1.Options.FsConfig.Compress.Paths = []string{"/{{.VirtualPath}}"}
 	_, _, err = httpdtest.UpdateEventAction(action1, http.StatusOK)
 	assert.NoError(t, err)
 	conn, client, err = getSftpClient(user)
@@ -5422,22 +6434,6 @@ func TestEventActionCompressErrors(t *testing.T) {
 
 		err = client.Mkdir(testDir)
 		assert.NoError(t, err)
-		f, err := client.Create(testFileName)
-		assert.NoError(t, err)
-		_, err = f.Write(testFileContent)
-		assert.NoError(t, err)
-		err = f.Close()
-		assert.Error(t, err)
-	}
-	// try to write to a missing directory
-	action1.Options.FsConfig.Compress.Name = "/subdir/missing/path/file.zip"
-	_, _, err = httpdtest.UpdateEventAction(action1, http.StatusOK)
-	assert.NoError(t, err)
-	conn, client, err = getSftpClient(user)
-	if assert.NoError(t, err) {
-		defer conn.Close()
-		defer client.Close()
-
 		f, err := client.Create(testFileName)
 		assert.NoError(t, err)
 		_, err = f.Write(testFileContent)
@@ -5473,8 +6469,8 @@ func TestEventActionEmailAttachments(t *testing.T) {
 			FsConfig: dataprovider.EventActionFilesystemConfig{
 				Type: dataprovider.FilesystemActionCompress,
 				Compress: dataprovider.EventActionFsCompress{
-					Name:  "/{{VirtualPath}}.zip",
-					Paths: []string{"/{{VirtualPath}}"},
+					Name:  "/archive/{{.VirtualPath}}.zip",
+					Paths: []string{"/{{.VirtualPath}}"},
 				},
 			},
 		},
@@ -5487,9 +6483,9 @@ func TestEventActionEmailAttachments(t *testing.T) {
 		Options: dataprovider.BaseEventActionOptions{
 			EmailConfig: dataprovider.EventActionEmailConfig{
 				Recipients:  []string{"test@example.com"},
-				Subject:     `"{{Event}}" from "{{Name}}"`,
-				Body:        "Fs path {{FsPath}}, size: {{FileSize}}, protocol: {{Protocol}}, IP: {{IP}}",
-				Attachments: []string{"/{{VirtualPath}}.zip"},
+				Subject:     `"{{.Event}}" from "{{.Name}}"`,
+				Body:        "Fs path {{.FsPath}}, size: {{.FileSize}}, protocol: {{.Protocol}}, IP: {{.IP}} {{.EscapedVirtualPath}}",
+				Attachments: []string{"/archive/{{.VirtualPath}}.zip"},
 			},
 		},
 	}
@@ -5545,8 +6541,9 @@ func TestEventActionEmailAttachments(t *testing.T) {
 			}, 1500*time.Millisecond, 100*time.Millisecond)
 			email := lastReceivedEmail.get()
 			assert.Len(t, email.To, 1)
-			assert.True(t, util.Contains(email.To, "test@example.com"))
+			assert.True(t, slices.Contains(email.To, "test@example.com"))
 			assert.Contains(t, email.Data, `Subject: "upload" from`)
+			assert.Contains(t, email.Data, url.QueryEscape("/"+testFileName))
 			assert.Contains(t, email.Data, "Content-Disposition: attachment")
 		}
 	}
@@ -5591,10 +6588,9 @@ func TestEventActionsRetentionReports(t *testing.T) {
 			RetentionConfig: dataprovider.EventActionDataRetentionConfig{
 				Folders: []dataprovider.FolderRetention{
 					{
-						Path:                  testDir,
-						Retention:             1,
-						DeleteEmptyDirs:       true,
-						IgnoreUserPermissions: true,
+						Path:            testDir,
+						Retention:       1,
+						DeleteEmptyDirs: true,
 					},
 				},
 			},
@@ -5608,8 +6604,8 @@ func TestEventActionsRetentionReports(t *testing.T) {
 		Options: dataprovider.BaseEventActionOptions{
 			EmailConfig: dataprovider.EventActionEmailConfig{
 				Recipients:  []string{"test@example.com"},
-				Subject:     `"{{Event}}" from "{{Name}}"`,
-				Body:        "Fs path {{FsPath}}, size: {{FileSize}}, protocol: {{Protocol}}, IP: {{IP}}",
+				Subject:     `"{{.Event}}" from "{{.Name}}"`,
+				Body:        "Fs path {{.FsPath}}, size: {{.FileSize}}, protocol: {{.Protocol}}, IP: {{.IP}}",
 				Attachments: []string{dataprovider.RetentionReportPlaceHolder},
 			},
 		},
@@ -5723,7 +6719,7 @@ func TestEventActionsRetentionReports(t *testing.T) {
 
 		email := lastReceivedEmail.get()
 		assert.Len(t, email.To, 1)
-		assert.True(t, util.Contains(email.To, "test@example.com"))
+		assert.True(t, slices.Contains(email.To, "test@example.com"))
 		assert.Contains(t, email.Data, fmt.Sprintf(`Subject: "upload" from "%s"`, user.Username))
 		assert.Contains(t, email.Data, "Content-Disposition: attachment")
 		_, err = client.Stat(testDir)
@@ -5836,8 +6832,8 @@ func TestEventRuleFirstUploadDownloadActions(t *testing.T) {
 		Options: dataprovider.BaseEventActionOptions{
 			EmailConfig: dataprovider.EventActionEmailConfig{
 				Recipients: []string{"test@example.com"},
-				Subject:    `"{{Event}}" from "{{Name}}"`,
-				Body:       "Fs path {{FsPath}}, size: {{FileSize}}, protocol: {{Protocol}}, IP: {{IP}}",
+				Subject:    `"{{.Event}}" from "{{.Name}}"`,
+				Body:       "Fs path {{.FsPath}}, size: {{.FileSize}}, protocol: {{.Protocol}}, IP: {{.IP}}",
 			},
 		},
 	}
@@ -5896,7 +6892,7 @@ func TestEventRuleFirstUploadDownloadActions(t *testing.T) {
 		}, 1500*time.Millisecond, 100*time.Millisecond)
 		email := lastReceivedEmail.get()
 		assert.Len(t, email.To, 1)
-		assert.True(t, util.Contains(email.To, "test@example.com"))
+		assert.True(t, slices.Contains(email.To, "test@example.com"))
 		assert.Contains(t, email.Data, fmt.Sprintf(`Subject: "first-upload" from "%s"`, user.Username))
 		lastReceivedEmail.reset()
 		// a new upload will not produce a new notification
@@ -5919,7 +6915,7 @@ func TestEventRuleFirstUploadDownloadActions(t *testing.T) {
 		}, 1500*time.Millisecond, 100*time.Millisecond)
 		email = lastReceivedEmail.get()
 		assert.Len(t, email.To, 1)
-		assert.True(t, util.Contains(email.To, "test@example.com"))
+		assert.True(t, slices.Contains(email.To, "test@example.com"))
 		assert.Contains(t, email.Data, fmt.Sprintf(`Subject: "first-download" from "%s"`, user.Username))
 		// download again
 		lastReceivedEmail.reset()
@@ -5967,9 +6963,10 @@ func TestEventRuleRenameEvent(t *testing.T) {
 		Type: dataprovider.ActionTypeEmail,
 		Options: dataprovider.BaseEventActionOptions{
 			EmailConfig: dataprovider.EventActionEmailConfig{
-				Recipients: []string{"test@example.com"},
-				Subject:    `"{{Event}}" from "{{Name}}"`,
-				Body:       `Fs path {{FsPath}}, Target path "{{VirtualTargetDirPath}}/{{TargetName}}", size: {{FileSize}}`,
+				Recipients:  []string{"test@example.com"},
+				Subject:     `"{{.Event}}" from "{{.Name}}"`,
+				ContentType: 1,
+				Body:        `<p>Fs path {{.FsPath}}, Name: {{.Name}}, Target path "{{.VirtualTargetDirPath}}/{{.TargetName}}", size: {{.FileSize}}</p>`,
 			},
 		},
 	}
@@ -5994,7 +6991,9 @@ func TestEventRuleRenameEvent(t *testing.T) {
 	rule1, _, err := httpdtest.AddEventRule(r1, http.StatusCreated)
 	assert.NoError(t, err)
 
-	user, _, err := httpdtest.AddUser(getTestUser(), http.StatusCreated)
+	u := getTestUser()
+	u.Username = "test <html > chars"
+	user, _, err := httpdtest.AddUser(u, http.StatusCreated)
 	assert.NoError(t, err)
 	conn, client, err := getSftpClient(user)
 	if assert.NoError(t, err) {
@@ -6014,9 +7013,11 @@ func TestEventRuleRenameEvent(t *testing.T) {
 		}, 1500*time.Millisecond, 100*time.Millisecond)
 		email := lastReceivedEmail.get()
 		assert.Len(t, email.To, 1)
-		assert.True(t, util.Contains(email.To, "test@example.com"))
+		assert.True(t, slices.Contains(email.To, "test@example.com"))
 		assert.Contains(t, email.Data, fmt.Sprintf(`Subject: "rename" from "%s"`, user.Username))
+		assert.Contains(t, email.Data, "Content-Type: text/html")
 		assert.Contains(t, email.Data, fmt.Sprintf("Target path %q", path.Join("/subdir", testFileName)))
+		assert.Contains(t, email.Data, "Name: test &lt;html &gt; chars,")
 	}
 
 	_, err = httpdtest.RemoveEventRule(rule1, http.StatusOK)
@@ -6047,9 +7048,9 @@ func TestEventRuleIDPLogin(t *testing.T) {
 	username := `test_"idp_"login`
 	custom1 := `cust"oa"1`
 	u := map[string]any{
-		"username": "{{Name}}",
+		"username": "{{.Name}}",
 		"status":   1,
-		"home_dir": filepath.Join(os.TempDir(), "{{IDPFieldcustom1}}"),
+		"home_dir": filepath.Join(os.TempDir(), "{{.IDPFieldcustom1}}"),
 		"permissions": map[string][]string{
 			"/": {dataprovider.PermAny},
 		},
@@ -6057,7 +7058,7 @@ func TestEventRuleIDPLogin(t *testing.T) {
 	userTmpl, err := json.Marshal(u)
 	require.NoError(t, err)
 	a := map[string]any{
-		"username":    "{{Name}}",
+		"username":    "{{.Name}}",
 		"status":      1,
 		"permissions": []string{dataprovider.PermAdminAny},
 	}
@@ -6083,8 +7084,8 @@ func TestEventRuleIDPLogin(t *testing.T) {
 		Options: dataprovider.BaseEventActionOptions{
 			EmailConfig: dataprovider.EventActionEmailConfig{
 				Recipients: []string{"test@example.com"},
-				Subject:    `"{{Event}} {{StatusString}}"`,
-				Body:       "{{Name}} Custom field: {{IDPFieldcustom1}}",
+				Subject:    `"{{.Event}} {{.StatusString}}"`,
+				Body:       "{{.Name}} Custom field: {{.IDPFieldcustom1}}",
 			},
 		},
 	}
@@ -6147,7 +7148,7 @@ func TestEventRuleIDPLogin(t *testing.T) {
 	}, 3000*time.Millisecond, 100*time.Millisecond)
 	email := lastReceivedEmail.get()
 	assert.Len(t, email.To, 1)
-	assert.True(t, util.Contains(email.To, "test@example.com"))
+	assert.True(t, slices.Contains(email.To, "test@example.com"))
 	assert.Contains(t, email.Data, fmt.Sprintf(`Subject: "%s OK"`, common.IDPLoginUser))
 	assert.Contains(t, email.Data, username)
 	assert.Contains(t, email.Data, custom1)
@@ -6211,7 +7212,7 @@ func TestEventRuleIDPLogin(t *testing.T) {
 	}, 3000*time.Millisecond, 100*time.Millisecond)
 	email = lastReceivedEmail.get()
 	assert.Len(t, email.To, 1)
-	assert.True(t, util.Contains(email.To, "test@example.com"))
+	assert.True(t, slices.Contains(email.To, "test@example.com"))
 	assert.Contains(t, email.Data, fmt.Sprintf(`Subject: "%s OK"`, common.IDPLoginAdmin))
 	assert.Contains(t, email.Data, username)
 	assert.Contains(t, email.Data, custom1)
@@ -6313,6 +7314,151 @@ func TestEventRuleIDPLogin(t *testing.T) {
 	require.NoError(t, err)
 }
 
+func TestEventRuleEmailField(t *testing.T) {
+	smtpCfg := smtp.Config{
+		Host:          "127.0.0.1",
+		Port:          2525,
+		From:          "notify@example.com",
+		TemplatesPath: "templates",
+	}
+	err := smtpCfg.Initialize(configDir, true)
+	require.NoError(t, err)
+	lastReceivedEmail.reset()
+
+	a1 := dataprovider.BaseEventAction{
+		Name: "action1",
+		Type: dataprovider.ActionTypeEmail,
+		Options: dataprovider.BaseEventActionOptions{
+			EmailConfig: dataprovider.EventActionEmailConfig{
+				Recipients: []string{"{{.Email}}"},
+				Subject:    `"{{.Event}}" from "{{.Name}}"`,
+				Body:       "Sample email body",
+			},
+		},
+	}
+	action1, _, err := httpdtest.AddEventAction(a1, http.StatusCreated)
+	assert.NoError(t, err)
+	a2 := dataprovider.BaseEventAction{
+		Name: "action2",
+		Type: dataprovider.ActionTypeEmail,
+		Options: dataprovider.BaseEventActionOptions{
+			EmailConfig: dataprovider.EventActionEmailConfig{
+				Recipients: []string{"failure@example.com"},
+				Subject:    `"Failure`,
+				Body:       "{{.ErrorString}}",
+			},
+		},
+	}
+	action2, _, err := httpdtest.AddEventAction(a2, http.StatusCreated)
+	assert.NoError(t, err)
+	r1 := dataprovider.EventRule{
+		Name:    "r1",
+		Status:  1,
+		Trigger: dataprovider.EventTriggerFsEvent,
+		Conditions: dataprovider.EventConditions{
+			FsEvents: []string{"mkdir"},
+		},
+		Actions: []dataprovider.EventAction{
+			{
+				BaseEventAction: dataprovider.BaseEventAction{
+					Name: action1.Name,
+				},
+			},
+		},
+	}
+	r2 := dataprovider.EventRule{
+		Name:    "test rule2",
+		Status:  1,
+		Trigger: dataprovider.EventTriggerProviderEvent,
+		Conditions: dataprovider.EventConditions{
+			ProviderEvents: []string{"add"},
+		},
+		Actions: []dataprovider.EventAction{
+			{
+				BaseEventAction: dataprovider.BaseEventAction{
+					Name: action1.Name,
+				},
+				Order: 1,
+			},
+			{
+				BaseEventAction: dataprovider.BaseEventAction{
+					Name: action2.Name,
+				},
+				Options: dataprovider.EventActionOptions{
+					IsFailureAction: true,
+				},
+			},
+		},
+	}
+	rule1, _, err := httpdtest.AddEventRule(r1, http.StatusCreated)
+	assert.NoError(t, err)
+	rule2, _, err := httpdtest.AddEventRule(r2, http.StatusCreated)
+	assert.NoError(t, err)
+	u := getTestUser()
+	u.Email = "user@example.com"
+	user, _, err := httpdtest.AddUser(u, http.StatusCreated)
+	assert.NoError(t, err)
+
+	assert.Eventually(t, func() bool {
+		return lastReceivedEmail.get().From != ""
+	}, 3000*time.Millisecond, 100*time.Millisecond)
+	email := lastReceivedEmail.get()
+	assert.Len(t, email.To, 1)
+	assert.True(t, slices.Contains(email.To, user.Email))
+	assert.Contains(t, email.Data, `Subject: "add" from "admin"`)
+
+	// if we add a user without email the notification will fail
+	lastReceivedEmail.reset()
+	u1 := getTestUser()
+	u1.Username += "_1"
+	user1, _, err := httpdtest.AddUser(u1, http.StatusCreated)
+	assert.NoError(t, err)
+	assert.Eventually(t, func() bool {
+		return lastReceivedEmail.get().From != ""
+	}, 3000*time.Millisecond, 100*time.Millisecond)
+	email = lastReceivedEmail.get()
+	assert.Len(t, email.To, 1)
+	assert.True(t, slices.Contains(email.To, "failure@example.com"))
+	assert.Contains(t, email.Data, `no recipient addresses set`)
+
+	conn, client, err := getSftpClient(user)
+	if assert.NoError(t, err) {
+		defer conn.Close()
+		defer client.Close()
+
+		lastReceivedEmail.reset()
+		err = client.Mkdir(testFileName)
+		assert.NoError(t, err)
+
+		assert.Eventually(t, func() bool {
+			return lastReceivedEmail.get().From != ""
+		}, 3000*time.Millisecond, 100*time.Millisecond)
+		email := lastReceivedEmail.get()
+		assert.Len(t, email.To, 1)
+		assert.True(t, slices.Contains(email.To, user.Email))
+		assert.Contains(t, email.Data, fmt.Sprintf(`Subject: "mkdir" from "%s"`, user.Username))
+	}
+
+	_, err = httpdtest.RemoveEventRule(rule1, http.StatusOK)
+	assert.NoError(t, err)
+	_, err = httpdtest.RemoveEventRule(rule2, http.StatusOK)
+	assert.NoError(t, err)
+	_, err = httpdtest.RemoveEventAction(action1, http.StatusOK)
+	assert.NoError(t, err)
+	_, err = httpdtest.RemoveEventAction(action2, http.StatusOK)
+	assert.NoError(t, err)
+	_, err = httpdtest.RemoveUser(user, http.StatusOK)
+	assert.NoError(t, err)
+	err = os.RemoveAll(user.GetHomeDir())
+	assert.NoError(t, err)
+	_, err = httpdtest.RemoveUser(user1, http.StatusOK)
+	assert.NoError(t, err)
+
+	smtpCfg = smtp.Config{}
+	err = smtpCfg.Initialize(configDir, true)
+	require.NoError(t, err)
+}
+
 func TestEventRuleCertificate(t *testing.T) {
 	smtpCfg := smtp.Config{
 		Host:          "127.0.0.1",
@@ -6329,9 +7475,10 @@ func TestEventRuleCertificate(t *testing.T) {
 		Type: dataprovider.ActionTypeEmail,
 		Options: dataprovider.BaseEventActionOptions{
 			EmailConfig: dataprovider.EventActionEmailConfig{
-				Recipients: []string{"test@example.com"},
-				Subject:    `"{{Event}} {{StatusString}}"`,
-				Body:       "Domain: {{Name}} Timestamp: {{Timestamp}} {{ErrorString}}",
+				Recipients:  []string{"test@example.com"},
+				Subject:     `"{{.Event}} {{.StatusString}}"`,
+				ContentType: 0,
+				Body:        "Domain: {{.Name}} Timestamp: {{.Timestamp}} {{.ErrorString}} Date time: {{.DateTime}}",
 			},
 		},
 	}
@@ -6386,7 +7533,7 @@ func TestEventRuleCertificate(t *testing.T) {
 
 	common.HandleCertificateEvent(common.EventParams{
 		Name:      "example.com",
-		Timestamp: time.Now().UnixNano(),
+		Timestamp: time.Now(),
 		Status:    1,
 		Event:     renewalEvent,
 	})
@@ -6395,14 +7542,16 @@ func TestEventRuleCertificate(t *testing.T) {
 	}, 3000*time.Millisecond, 100*time.Millisecond)
 	email := lastReceivedEmail.get()
 	assert.Len(t, email.To, 1)
-	assert.True(t, util.Contains(email.To, "test@example.com"))
+	assert.True(t, slices.Contains(email.To, "test@example.com"))
 	assert.Contains(t, email.Data, fmt.Sprintf(`Subject: "%s OK"`, renewalEvent))
+	assert.Contains(t, email.Data, "Content-Type: text/plain")
 	assert.Contains(t, email.Data, `Domain: example.com Timestamp`)
 
 	lastReceivedEmail.reset()
+	dateTime := time.Now()
 	params := common.EventParams{
 		Name:      "example.com",
-		Timestamp: time.Now().UnixNano(),
+		Timestamp: dateTime,
 		Status:    2,
 		Event:     renewalEvent,
 	}
@@ -6414,9 +7563,10 @@ func TestEventRuleCertificate(t *testing.T) {
 	}, 3000*time.Millisecond, 100*time.Millisecond)
 	email = lastReceivedEmail.get()
 	assert.Len(t, email.To, 1)
-	assert.True(t, util.Contains(email.To, "test@example.com"))
+	assert.True(t, slices.Contains(email.To, "test@example.com"))
 	assert.Contains(t, email.Data, fmt.Sprintf(`Subject: "%s KO"`, renewalEvent))
 	assert.Contains(t, email.Data, `Domain: example.com Timestamp`)
+	assert.Contains(t, email.Data, dateTime.UTC().Format("2006-01-02T15:04:05.000"))
 	assert.Contains(t, email.Data, errRenew.Error())
 
 	_, err = httpdtest.RemoveEventRule(rule1, http.StatusOK)
@@ -6430,7 +7580,7 @@ func TestEventRuleCertificate(t *testing.T) {
 	// ignored no more certificate rules
 	common.HandleCertificateEvent(common.EventParams{
 		Name:      "example.com",
-		Timestamp: time.Now().UnixNano(),
+		Timestamp: time.Now(),
 		Status:    1,
 		Event:     renewalEvent,
 	})
@@ -6466,8 +7616,8 @@ func TestEventRuleIPBlocked(t *testing.T) {
 		Options: dataprovider.BaseEventActionOptions{
 			EmailConfig: dataprovider.EventActionEmailConfig{
 				Recipients: []string{"test3@example.com", "test4@example.com"},
-				Subject:    `New "{{Event}}"`,
-				Body:       "IP: {{IP}} Timestamp: {{Timestamp}}",
+				Subject:    `New "{{.Event}}"`,
+				Body:       "IP: {{.IP}} Timestamp: {{.Timestamp}}",
 			},
 		},
 	}
@@ -6540,8 +7690,8 @@ func TestEventRuleIPBlocked(t *testing.T) {
 	}, 3000*time.Millisecond, 100*time.Millisecond)
 	email := lastReceivedEmail.get()
 	assert.Len(t, email.To, 2)
-	assert.True(t, util.Contains(email.To, "test3@example.com"))
-	assert.True(t, util.Contains(email.To, "test4@example.com"))
+	assert.True(t, slices.Contains(email.To, "test3@example.com"))
+	assert.True(t, slices.Contains(email.To, "test4@example.com"))
 	assert.Contains(t, email.Data, `Subject: New "IP Blocked"`)
 
 	err = dataprovider.DeleteEventRule(rule1.Name, "", "", "")
@@ -6563,6 +7713,206 @@ func TestEventRuleIPBlocked(t *testing.T) {
 
 	err = common.Initialize(oldConfig, 0)
 	assert.NoError(t, err)
+}
+
+func TestEventRuleRotateLog(t *testing.T) {
+	smtpCfg := smtp.Config{
+		Host:          "127.0.0.1",
+		Port:          2525,
+		From:          "notification@example.com",
+		TemplatesPath: "templates",
+	}
+	err := smtpCfg.Initialize(configDir, true)
+	require.NoError(t, err)
+
+	user, _, err := httpdtest.AddUser(getTestUser(), http.StatusCreated)
+	assert.NoError(t, err)
+
+	a1 := dataprovider.BaseEventAction{
+		Name: "a1",
+		Type: dataprovider.ActionTypeRotateLogs,
+	}
+	action1, _, err := httpdtest.AddEventAction(a1, http.StatusCreated)
+	assert.NoError(t, err)
+	a2 := dataprovider.BaseEventAction{
+		Name: "a2",
+		Type: dataprovider.ActionTypeEmail,
+		Options: dataprovider.BaseEventActionOptions{
+			EmailConfig: dataprovider.EventActionEmailConfig{
+				Recipients: []string{"success@example.net"},
+				Subject:    `OK`,
+				Body:       "OK action",
+			},
+		},
+	}
+	action2, _, err := httpdtest.AddEventAction(a2, http.StatusCreated)
+	assert.NoError(t, err)
+
+	r1 := dataprovider.EventRule{
+		Name:    "rule1",
+		Status:  1,
+		Trigger: dataprovider.EventTriggerFsEvent,
+		Conditions: dataprovider.EventConditions{
+			FsEvents: []string{"mkdir"},
+			Options: dataprovider.ConditionOptions{
+				Names: []dataprovider.ConditionPattern{
+					{
+						Pattern: user.Username,
+					},
+				},
+			},
+		},
+		Actions: []dataprovider.EventAction{
+			{
+				BaseEventAction: dataprovider.BaseEventAction{
+					Name: action1.Name,
+				},
+				Order: 1,
+			},
+			{
+				BaseEventAction: dataprovider.BaseEventAction{
+					Name: action2.Name,
+				},
+				Order: 2,
+			},
+		},
+	}
+	rule1, resp, err := httpdtest.AddEventRule(r1, http.StatusCreated)
+	assert.NoError(t, err, string(resp))
+	conn, client, err := getSftpClient(user)
+	if assert.NoError(t, err) {
+		defer conn.Close()
+		defer client.Close()
+
+		lastReceivedEmail.reset()
+		err := client.Mkdir("just a test dir")
+		assert.NoError(t, err)
+		// just check that the action is executed
+		assert.Eventually(t, func() bool {
+			return lastReceivedEmail.get().From != ""
+		}, 1500*time.Millisecond, 100*time.Millisecond)
+		email := lastReceivedEmail.get()
+		assert.Len(t, email.To, 1)
+		assert.Contains(t, email.To, "success@example.net")
+	}
+
+	_, err = httpdtest.RemoveEventRule(rule1, http.StatusOK)
+	assert.NoError(t, err)
+	_, err = httpdtest.RemoveEventAction(action1, http.StatusOK)
+	assert.NoError(t, err)
+	_, err = httpdtest.RemoveEventAction(action2, http.StatusOK)
+	assert.NoError(t, err)
+	_, err = httpdtest.RemoveUser(user, http.StatusOK)
+	assert.NoError(t, err)
+	err = os.RemoveAll(user.GetHomeDir())
+	assert.NoError(t, err)
+
+	smtpCfg = smtp.Config{}
+	err = smtpCfg.Initialize(configDir, true)
+	require.NoError(t, err)
+}
+
+func TestEventRuleInactivityCheck(t *testing.T) {
+	smtpCfg := smtp.Config{
+		Host:          "127.0.0.1",
+		Port:          2525,
+		From:          "notification@example.com",
+		TemplatesPath: "templates",
+	}
+	err := smtpCfg.Initialize(configDir, true)
+	require.NoError(t, err)
+
+	user, _, err := httpdtest.AddUser(getTestUser(), http.StatusCreated)
+	assert.NoError(t, err)
+
+	a1 := dataprovider.BaseEventAction{
+		Name: "a1",
+		Type: dataprovider.ActionTypeUserInactivityCheck,
+		Options: dataprovider.BaseEventActionOptions{
+			UserInactivityConfig: dataprovider.EventActionUserInactivity{
+				DisableThreshold: 10,
+				DeleteThreshold:  20,
+			},
+		},
+	}
+	action1, _, err := httpdtest.AddEventAction(a1, http.StatusCreated)
+	assert.NoError(t, err)
+	a2 := dataprovider.BaseEventAction{
+		Name: "a2",
+		Type: dataprovider.ActionTypeEmail,
+		Options: dataprovider.BaseEventActionOptions{
+			EmailConfig: dataprovider.EventActionEmailConfig{
+				Recipients: []string{"success@example.net"},
+				Subject:    `OK`,
+				Body:       "OK action",
+			},
+		},
+	}
+	action2, _, err := httpdtest.AddEventAction(a2, http.StatusCreated)
+	assert.NoError(t, err)
+
+	r1 := dataprovider.EventRule{
+		Name:    "rule1",
+		Status:  1,
+		Trigger: dataprovider.EventTriggerFsEvent,
+		Conditions: dataprovider.EventConditions{
+			FsEvents: []string{"mkdir"},
+			Options: dataprovider.ConditionOptions{
+				Names: []dataprovider.ConditionPattern{
+					{
+						Pattern: user.Username,
+					},
+				},
+			},
+		},
+		Actions: []dataprovider.EventAction{
+			{
+				BaseEventAction: dataprovider.BaseEventAction{
+					Name: action1.Name,
+				},
+				Order: 1,
+			},
+			{
+				BaseEventAction: dataprovider.BaseEventAction{
+					Name: action2.Name,
+				},
+				Order: 2,
+			},
+		},
+	}
+	rule1, resp, err := httpdtest.AddEventRule(r1, http.StatusCreated)
+	assert.NoError(t, err, string(resp))
+	conn, client, err := getSftpClient(user)
+	if assert.NoError(t, err) {
+		defer conn.Close()
+		defer client.Close()
+
+		lastReceivedEmail.reset()
+		err := client.Mkdir("just a test dir")
+		assert.NoError(t, err)
+		// just check that the action is executed
+		assert.Eventually(t, func() bool {
+			return lastReceivedEmail.get().From != ""
+		}, 1500*time.Millisecond, 100*time.Millisecond)
+		email := lastReceivedEmail.get()
+		assert.Len(t, email.To, 1)
+		assert.Contains(t, email.To, "success@example.net")
+	}
+
+	_, err = httpdtest.RemoveEventRule(rule1, http.StatusOK)
+	assert.NoError(t, err)
+	_, err = httpdtest.RemoveEventAction(action1, http.StatusOK)
+	assert.NoError(t, err)
+	_, err = httpdtest.RemoveEventAction(action2, http.StatusOK)
+	assert.NoError(t, err)
+	_, err = httpdtest.RemoveUser(user, http.StatusOK)
+	assert.NoError(t, err)
+	err = os.RemoveAll(user.GetHomeDir())
+	assert.NoError(t, err)
+
+	smtpCfg = smtp.Config{}
+	err = smtpCfg.Initialize(configDir, true)
+	require.NoError(t, err)
 }
 
 func TestEventRulePasswordExpiration(t *testing.T) {
@@ -6729,6 +8079,7 @@ func TestEventRulePasswordExpiration(t *testing.T) {
 	_, _, err = httpdtest.UpdateEventRule(rule1, http.StatusOK)
 	assert.NoError(t, err)
 	user.Email = "user@example.net"
+	user.Filters.AdditionalEmails = []string{"additional@example.net"}
 	_, _, err = httpdtest.UpdateUser(user, http.StatusOK, "")
 	assert.NoError(t, err)
 	conn, client, err = getSftpClient(user)
@@ -6744,8 +8095,9 @@ func TestEventRulePasswordExpiration(t *testing.T) {
 			return lastReceivedEmail.get().From != ""
 		}, 1500*time.Millisecond, 100*time.Millisecond)
 		email := lastReceivedEmail.get()
-		assert.Len(t, email.To, 1)
+		assert.Len(t, email.To, 2)
 		assert.Contains(t, email.To, user.Email)
+		assert.Contains(t, email.To, user.Filters.AdditionalEmails[0])
 		assert.Contains(t, email.Data, "your SFTPGo password expires in 5 days")
 		err = client.RemoveDirectory(dirName)
 		assert.NoError(t, err)
@@ -6895,10 +8247,15 @@ func TestGetQuotaError(t *testing.T) {
 	mappedPath := filepath.Join(os.TempDir(), "vdir")
 	folderName := filepath.Base(mappedPath)
 	vdirPath := "/vpath"
+	f := vfs.BaseVirtualFolder{
+		Name:       folderName,
+		MappedPath: mappedPath,
+	}
+	_, _, err := httpdtest.AddFolder(f, http.StatusCreated)
+	assert.NoError(t, err)
 	u.VirtualFolders = append(u.VirtualFolders, vfs.VirtualFolder{
 		BaseVirtualFolder: vfs.BaseVirtualFolder{
-			Name:       folderName,
-			MappedPath: mappedPath,
+			Name: folderName,
 		},
 		VirtualPath: vdirPath,
 		QuotaSize:   0,
@@ -6937,6 +8294,9 @@ func TestGetQuotaError(t *testing.T) {
 
 func TestRetentionAPI(t *testing.T) {
 	u := getTestUser()
+	u.Permissions["/"] = []string{dataprovider.PermListItems, dataprovider.PermUpload,
+		dataprovider.PermOverwrite, dataprovider.PermDownload, dataprovider.PermCreateDirs,
+		dataprovider.PermChtimes}
 	user, _, err := httpdtest.AddUser(u, http.StatusCreated)
 	assert.NoError(t, err)
 	uploadPath := path.Join(testDir, testFileName)
@@ -7012,7 +8372,7 @@ func TestRetentionAPI(t *testing.T) {
 		assert.NoError(t, err)
 	}
 
-	// remove delete permissions to the user
+	// remove delete permissions to the user, it will be automatically granted
 	user.Permissions["/"+testDir] = []string{dataprovider.PermListItems, dataprovider.PermUpload,
 		dataprovider.PermCreateDirs, dataprovider.PermChtimes}
 	user, _, err = httpdtest.UpdateUser(user, http.StatusOK, "")
@@ -7043,24 +8403,10 @@ func TestRetentionAPI(t *testing.T) {
 				DeleteEmptyDirs: true,
 			},
 			{
-				Path:                  path.Dir(innerUploadFilePath),
-				Retention:             0,
-				IgnoreUserPermissions: true,
+				Path:      path.Dir(innerUploadFilePath),
+				Retention: 0,
 			},
 		}
-		_, err = httpdtest.StartRetentionCheck(user.Username, folderRetention, http.StatusAccepted)
-		assert.NoError(t, err)
-
-		assert.Eventually(t, func() bool {
-			return len(common.RetentionChecks.Get("")) == 0
-		}, 1000*time.Millisecond, 50*time.Millisecond)
-
-		_, err = client.Stat(uploadPath)
-		assert.NoError(t, err)
-		_, err = client.Stat(innerUploadFilePath)
-		assert.NoError(t, err)
-
-		folderRetention[1].IgnoreUserPermissions = true
 		_, err = httpdtest.StartRetentionCheck(user.Username, folderRetention, http.StatusAccepted)
 		assert.NoError(t, err)
 
@@ -7076,10 +8422,9 @@ func TestRetentionAPI(t *testing.T) {
 		folderRetention = []dataprovider.FolderRetention{
 
 			{
-				Path:                  "/" + testDir,
-				Retention:             24,
-				DeleteEmptyDirs:       true,
-				IgnoreUserPermissions: true,
+				Path:            "/" + testDir,
+				Retention:       24,
+				DeleteEmptyDirs: true,
 			},
 		}
 
@@ -7111,10 +8456,9 @@ func TestRetentionAPI(t *testing.T) {
 		folderRetention := []dataprovider.FolderRetention{
 
 			{
-				Path:                  "/adir",
-				Retention:             24,
-				DeleteEmptyDirs:       true,
-				IgnoreUserPermissions: true,
+				Path:            "/adir",
+				Retention:       24,
+				DeleteEmptyDirs: true,
 			},
 		}
 
@@ -7154,6 +8498,87 @@ func TestRetentionAPI(t *testing.T) {
 	assert.NoError(t, err)
 }
 
+func TestPerUserTransferLimits(t *testing.T) {
+	oldMaxPerHostConns := common.Config.MaxPerHostConnections
+
+	common.Config.MaxPerHostConnections = 2
+
+	u := getTestUser()
+	u.UploadBandwidth = 32
+	user, _, err := httpdtest.AddUser(u, http.StatusCreated)
+	assert.NoError(t, err)
+	conn, client, err := getSftpClient(user)
+	if assert.NoError(t, err) {
+		defer conn.Close()
+		defer client.Close()
+
+		var wg sync.WaitGroup
+		numErrors := 0
+		for i := 0; i <= 2; i++ {
+			wg.Add(1)
+			go func(counter int) {
+				defer wg.Done()
+
+				time.Sleep(20 * time.Millisecond)
+				err := writeSFTPFile(fmt.Sprintf("%s_%d", testFileName, counter), 64*1024, client)
+				if err != nil {
+					numErrors++
+				}
+			}(i)
+		}
+		wg.Wait()
+
+		assert.Equal(t, 1, numErrors)
+	}
+	_, err = httpdtest.RemoveUser(user, http.StatusOK)
+	assert.NoError(t, err)
+	err = os.RemoveAll(user.GetHomeDir())
+	assert.NoError(t, err)
+
+	common.Config.MaxPerHostConnections = oldMaxPerHostConns
+}
+
+func TestMaxSessionsSameConnection(t *testing.T) {
+	u := getTestUser()
+	u.UploadBandwidth = 32
+	u.MaxSessions = 2
+	user, _, err := httpdtest.AddUser(u, http.StatusCreated)
+	assert.NoError(t, err)
+	conn, client, err := getSftpClient(user)
+	if assert.NoError(t, err) {
+		defer conn.Close()
+		defer client.Close()
+
+		var wg sync.WaitGroup
+		numErrors := 0
+		for i := 0; i <= 2; i++ {
+			wg.Add(1)
+			go func(counter int) {
+				defer wg.Done()
+
+				var err error
+				if counter < 2 {
+					err = writeSFTPFile(fmt.Sprintf("%s_%d", testFileName, counter), 64*1024, client)
+				} else {
+					// wait for the transfers to start
+					time.Sleep(50 * time.Millisecond)
+					_, _, err = getSftpClient(user)
+				}
+				if err != nil {
+					numErrors++
+				}
+			}(i)
+		}
+
+		wg.Wait()
+		assert.Equal(t, 1, numErrors)
+	}
+	_, err = httpdtest.RemoveUser(user, http.StatusOK)
+	assert.NoError(t, err)
+	err = os.RemoveAll(user.GetHomeDir())
+	assert.NoError(t, err)
+}
+
 func TestRenameDir(t *testing.T) {
 	u := getTestUser()
 	testDir := "/dir-to-rename"
@@ -7182,7 +8607,7 @@ func TestBuiltinKeyboardInteractiveAuthentication(t *testing.T) {
 	user, _, err := httpdtest.AddUser(u, http.StatusCreated)
 	assert.NoError(t, err)
 	authMethods := []ssh.AuthMethod{
-		ssh.KeyboardInteractive(func(user, instruction string, questions []string, echos []bool) ([]string, error) {
+		ssh.KeyboardInteractive(func(_, _ string, _ []string, _ []bool) ([]string, error) {
 			return []string{defaultPassword}, nil
 		}),
 	}
@@ -7195,23 +8620,23 @@ func TestBuiltinKeyboardInteractiveAuthentication(t *testing.T) {
 		assert.NoError(t, err)
 	}
 	// add multi-factor authentication
-	configName, _, secret, _, err := mfa.GenerateTOTPSecret(mfa.GetAvailableTOTPConfigNames()[0], user.Username)
+	configName, key, _, err := mfa.GenerateTOTPSecret(mfa.GetAvailableTOTPConfigNames()[0], user.Username)
 	assert.NoError(t, err)
 	user.Password = defaultPassword
 	user.Filters.TOTPConfig = dataprovider.UserTOTPConfig{
 		Enabled:    true,
 		ConfigName: configName,
-		Secret:     kms.NewPlainSecret(secret),
+		Secret:     kms.NewPlainSecret(key.Secret()),
 		Protocols:  []string{common.ProtocolSSH},
 	}
 	err = dataprovider.UpdateUser(&user, "", "", "")
 	assert.NoError(t, err)
-	passcode, err := generateTOTPPasscode(secret, otp.AlgorithmSHA1)
+	passcode, err := generateTOTPPasscode(key.Secret(), otp.AlgorithmSHA1)
 	assert.NoError(t, err)
 	passwordAsked := false
 	passcodeAsked := false
 	authMethods = []ssh.AuthMethod{
-		ssh.KeyboardInteractive(func(user, instruction string, questions []string, echos []bool) ([]string, error) {
+		ssh.KeyboardInteractive(func(_, _ string, questions []string, _ []bool) ([]string, error) {
 			var answers []string
 			if strings.HasPrefix(questions[0], "Password") {
 				answers = append(answers, defaultPassword)
@@ -7233,6 +8658,69 @@ func TestBuiltinKeyboardInteractiveAuthentication(t *testing.T) {
 	}
 	assert.True(t, passwordAsked)
 	assert.True(t, passcodeAsked)
+
+	_, err = httpdtest.RemoveUser(user, http.StatusOK)
+	assert.NoError(t, err)
+	err = os.RemoveAll(user.GetHomeDir())
+	assert.NoError(t, err)
+}
+
+func TestMultiStepBuiltinKeyboardAuth(t *testing.T) {
+	u := getTestUser()
+	u.PublicKeys = []string{testPubKey}
+	u.Filters.DeniedLoginMethods = []string{
+		dataprovider.SSHLoginMethodPublicKey,
+		dataprovider.LoginMethodPassword,
+		dataprovider.SSHLoginMethodKeyboardInteractive,
+	}
+	user, _, err := httpdtest.AddUser(u, http.StatusCreated)
+	assert.NoError(t, err)
+	signer, err := ssh.ParsePrivateKey([]byte(testPrivateKey))
+	assert.NoError(t, err)
+	// public key + password
+	authMethods := []ssh.AuthMethod{
+		ssh.PublicKeys(signer),
+		ssh.KeyboardInteractive(func(_, _ string, _ []string, _ []bool) ([]string, error) {
+			return []string{defaultPassword}, nil
+		}),
+	}
+	conn, client, err := getCustomAuthSftpClient(user, authMethods)
+	if assert.NoError(t, err) {
+		defer conn.Close()
+		defer client.Close()
+		assert.NoError(t, checkBasicSFTP(client))
+		err = writeSFTPFile(testFileName, 4096, client)
+		assert.NoError(t, err)
+	}
+	// add multi-factor authentication
+	configName, key, _, err := mfa.GenerateTOTPSecret(mfa.GetAvailableTOTPConfigNames()[0], user.Username)
+	assert.NoError(t, err)
+	user.Password = defaultPassword
+	user.Filters.TOTPConfig = dataprovider.UserTOTPConfig{
+		Enabled:    true,
+		ConfigName: configName,
+		Secret:     kms.NewPlainSecret(key.Secret()),
+		Protocols:  []string{common.ProtocolSSH},
+	}
+	err = dataprovider.UpdateUser(&user, "", "", "")
+	assert.NoError(t, err)
+	passcode, err := generateTOTPPasscode(key.Secret(), otp.AlgorithmSHA1)
+	assert.NoError(t, err)
+	// public key + passcode
+	authMethods = []ssh.AuthMethod{
+		ssh.PublicKeys(signer),
+		ssh.KeyboardInteractive(func(_, _ string, _ []string, _ []bool) ([]string, error) {
+			return []string{passcode}, nil
+		}),
+	}
+	conn, client, err = getCustomAuthSftpClient(user, authMethods)
+	if assert.NoError(t, err) {
+		defer conn.Close()
+		defer client.Close()
+		assert.NoError(t, checkBasicSFTP(client))
+		err = writeSFTPFile(testFileName, 4096, client)
+		assert.NoError(t, err)
+	}
 
 	_, err = httpdtest.RemoveUser(user, http.StatusOK)
 	assert.NoError(t, err)
@@ -7362,26 +8850,30 @@ func TestSFTPLoopError(t *testing.T) {
 	}
 	err := smtpCfg.Initialize(configDir, true)
 	require.NoError(t, err)
-
 	user1 := getTestUser()
 	user2 := getTestUser()
 	user1.Username += "1"
 	user2.Username += "2"
 	// user1 is a local account with a virtual SFTP folder to user2
 	// user2 has user1 as SFTP fs
+	f := vfs.BaseVirtualFolder{
+		Name: "sftp",
+		FsConfig: vfs.Filesystem{
+			Provider: sdk.SFTPFilesystemProvider,
+			SFTPConfig: vfs.SFTPFsConfig{
+				BaseSFTPFsConfig: sdk.BaseSFTPFsConfig{
+					Endpoint: sftpServerAddr,
+					Username: user2.Username,
+				},
+				Password: kms.NewPlainSecret(defaultPassword),
+			},
+		},
+	}
+	folder, _, err := httpdtest.AddFolder(f, http.StatusCreated)
+	assert.NoError(t, err)
 	user1.VirtualFolders = append(user1.VirtualFolders, vfs.VirtualFolder{
 		BaseVirtualFolder: vfs.BaseVirtualFolder{
-			Name: "sftp",
-			FsConfig: vfs.Filesystem{
-				Provider: sdk.SFTPFilesystemProvider,
-				SFTPConfig: vfs.SFTPFsConfig{
-					BaseSFTPFsConfig: sdk.BaseSFTPFsConfig{
-						Endpoint: sftpServerAddr,
-						Username: user2.Username,
-					},
-					Password: kms.NewPlainSecret(defaultPassword),
-				},
-			},
+			Name: folder.Name,
 		},
 		VirtualPath: "/vdir",
 	})
@@ -7399,10 +8891,9 @@ func TestSFTPLoopError(t *testing.T) {
 	assert.NoError(t, err, string(resp))
 	user2, resp, err = httpdtest.AddUser(user2, http.StatusCreated)
 	assert.NoError(t, err, string(resp))
-	// test metadata check event error
 	a1 := dataprovider.BaseEventAction{
 		Name: "a1",
-		Type: dataprovider.ActionTypeMetadataCheck,
+		Type: dataprovider.ActionTypeUserQuotaReset,
 	}
 	action1, _, err := httpdtest.AddEventAction(a1, http.StatusCreated)
 	assert.NoError(t, err)
@@ -7455,7 +8946,7 @@ func TestSFTPLoopError(t *testing.T) {
 	}, 3000*time.Millisecond, 100*time.Millisecond)
 	email := lastReceivedEmail.get()
 	assert.Len(t, email.To, 1)
-	assert.True(t, util.Contains(email.To, "failure@example.com"))
+	assert.True(t, slices.Contains(email.To, "failure@example.com"))
 	assert.Contains(t, email.Data, `Subject: Failed action`)
 
 	user1.VirtualFolders[0].FsConfig.SFTPConfig.Password = kms.NewPlainSecret(defaultPassword)
@@ -7486,7 +8977,7 @@ func TestSFTPLoopError(t *testing.T) {
 	assert.NoError(t, err)
 	err = os.RemoveAll(user2.GetHomeDir())
 	assert.NoError(t, err)
-	_, err = httpdtest.RemoveFolder(vfs.BaseVirtualFolder{Name: "sftp"}, http.StatusOK)
+	_, err = httpdtest.RemoveFolder(folder, http.StatusOK)
 	assert.NoError(t, err)
 
 	smtpCfg = smtp.Config{}
@@ -7506,16 +8997,6 @@ func TestNonLocalCrossRename(t *testing.T) {
 	u.VirtualFolders = append(u.VirtualFolders, vfs.VirtualFolder{
 		BaseVirtualFolder: vfs.BaseVirtualFolder{
 			Name: folderNameSFTP,
-			FsConfig: vfs.Filesystem{
-				Provider: sdk.SFTPFilesystemProvider,
-				SFTPConfig: vfs.SFTPFsConfig{
-					BaseSFTPFsConfig: sdk.BaseSFTPFsConfig{
-						Endpoint: sftpServerAddr,
-						Username: baseUser.Username,
-					},
-					Password: kms.NewPlainSecret(defaultPassword),
-				},
-			},
 		},
 		VirtualPath: vdirSFTPPath,
 	})
@@ -7525,16 +9006,37 @@ func TestNonLocalCrossRename(t *testing.T) {
 	u.VirtualFolders = append(u.VirtualFolders, vfs.VirtualFolder{
 		BaseVirtualFolder: vfs.BaseVirtualFolder{
 			Name: folderNameCrypt,
-			FsConfig: vfs.Filesystem{
-				Provider: sdk.CryptedFilesystemProvider,
-				CryptConfig: vfs.CryptFsConfig{
-					Passphrase: kms.NewPlainSecret(defaultPassword),
-				},
-			},
-			MappedPath: mappedPathCrypt,
 		},
 		VirtualPath: vdirCryptPath,
 	})
+	f1 := vfs.BaseVirtualFolder{
+		Name: folderNameSFTP,
+		FsConfig: vfs.Filesystem{
+			Provider: sdk.SFTPFilesystemProvider,
+			SFTPConfig: vfs.SFTPFsConfig{
+				BaseSFTPFsConfig: sdk.BaseSFTPFsConfig{
+					Endpoint: sftpServerAddr,
+					Username: baseUser.Username,
+				},
+				Password: kms.NewPlainSecret(defaultPassword),
+			},
+		},
+	}
+	_, _, err = httpdtest.AddFolder(f1, http.StatusCreated)
+	assert.NoError(t, err)
+	f2 := vfs.BaseVirtualFolder{
+		Name: folderNameCrypt,
+		FsConfig: vfs.Filesystem{
+			Provider: sdk.CryptedFilesystemProvider,
+			CryptConfig: vfs.CryptFsConfig{
+				Passphrase: kms.NewPlainSecret(defaultPassword),
+			},
+		},
+		MappedPath: mappedPathCrypt,
+	}
+	_, _, err = httpdtest.AddFolder(f2, http.StatusCreated)
+	assert.NoError(t, err)
+
 	user, resp, err := httpdtest.AddUser(u, http.StatusCreated)
 	assert.NoError(t, err, string(resp))
 	conn, client, err := getSftpClient(user)
@@ -7615,8 +9117,7 @@ func TestNonLocalCrossRenameNonLocalBaseUser(t *testing.T) {
 	vdirLocalPath := "/vdir/local"
 	u.VirtualFolders = append(u.VirtualFolders, vfs.VirtualFolder{
 		BaseVirtualFolder: vfs.BaseVirtualFolder{
-			Name:       folderNameLocal,
-			MappedPath: mappedPathLocal,
+			Name: folderNameLocal,
 		},
 		VirtualPath: vdirLocalPath,
 	})
@@ -7626,16 +9127,28 @@ func TestNonLocalCrossRenameNonLocalBaseUser(t *testing.T) {
 	u.VirtualFolders = append(u.VirtualFolders, vfs.VirtualFolder{
 		BaseVirtualFolder: vfs.BaseVirtualFolder{
 			Name: folderNameCrypt,
-			FsConfig: vfs.Filesystem{
-				Provider: sdk.CryptedFilesystemProvider,
-				CryptConfig: vfs.CryptFsConfig{
-					Passphrase: kms.NewPlainSecret(defaultPassword),
-				},
-			},
-			MappedPath: mappedPathCrypt,
 		},
 		VirtualPath: vdirCryptPath,
 	})
+	f1 := vfs.BaseVirtualFolder{
+		Name:       folderNameLocal,
+		MappedPath: mappedPathLocal,
+	}
+	_, _, err = httpdtest.AddFolder(f1, http.StatusCreated)
+	assert.NoError(t, err)
+	f2 := vfs.BaseVirtualFolder{
+		Name: folderNameCrypt,
+		FsConfig: vfs.Filesystem{
+			Provider: sdk.CryptedFilesystemProvider,
+			CryptConfig: vfs.CryptFsConfig{
+				Passphrase: kms.NewPlainSecret(defaultPassword),
+			},
+		},
+		MappedPath: mappedPathCrypt,
+	}
+	_, _, err = httpdtest.AddFolder(f2, http.StatusCreated)
+	assert.NoError(t, err)
+
 	user, resp, err := httpdtest.AddUser(u, http.StatusCreated)
 	assert.NoError(t, err, string(resp))
 	conn, client, err := getSftpClient(user)
@@ -7902,6 +9415,13 @@ func TestCopyAndRemovePermissions(t *testing.T) {
 		user.Permissions[testDir] = []string{dataprovider.PermListItems}
 		_, _, err = httpdtest.UpdateUser(user, http.StatusOK, "")
 		assert.NoError(t, err)
+		// no copy permission
+		out, err = runSSHCommand(fmt.Sprintf(`sftpgo-copy %s %s`, testFileName, restrictedPath), user)
+		assert.Error(t, err, string(out))
+		user.Permissions[restrictedPath] = []string{dataprovider.PermListItems, dataprovider.PermUpload, dataprovider.PermCopy}
+		user.Permissions[testDir] = []string{dataprovider.PermListItems, dataprovider.PermCopy}
+		_, _, err = httpdtest.UpdateUser(user, http.StatusOK, "")
+		assert.NoError(t, err)
 		out, err = runSSHCommand(fmt.Sprintf(`sftpgo-copy %s %s`, testFileName, restrictedPath), user)
 		assert.NoError(t, err, string(out))
 		// overwrite will fail, no permission
@@ -7933,8 +9453,7 @@ func TestCrossFoldersCopy(t *testing.T) {
 	vpath1 := "/vdirs/vdir1"
 	u.VirtualFolders = append(u.VirtualFolders, vfs.VirtualFolder{
 		BaseVirtualFolder: vfs.BaseVirtualFolder{
-			Name:       folderName1,
-			MappedPath: mappedPath1,
+			Name: folderName1,
 		},
 		VirtualPath: vpath1,
 		QuotaSize:   -1,
@@ -7945,8 +9464,7 @@ func TestCrossFoldersCopy(t *testing.T) {
 	vpath2 := "/vdirs/vdir2"
 	u.VirtualFolders = append(u.VirtualFolders, vfs.VirtualFolder{
 		BaseVirtualFolder: vfs.BaseVirtualFolder{
-			Name:       folderName2,
-			MappedPath: mappedPath2,
+			Name: folderName2,
 		},
 		VirtualPath: vpath2,
 		QuotaSize:   -1,
@@ -7957,14 +9475,7 @@ func TestCrossFoldersCopy(t *testing.T) {
 	vpath3 := "/vdirs/vdir3"
 	u.VirtualFolders = append(u.VirtualFolders, vfs.VirtualFolder{
 		BaseVirtualFolder: vfs.BaseVirtualFolder{
-			Name:       folderName3,
-			MappedPath: mappedPath3,
-			FsConfig: vfs.Filesystem{
-				Provider: sdk.CryptedFilesystemProvider,
-				CryptConfig: vfs.CryptFsConfig{
-					Passphrase: kms.NewPlainSecret(defaultPassword),
-				},
-			},
+			Name: folderName3,
 		},
 		VirtualPath: vpath3,
 		QuotaSize:   -1,
@@ -7975,23 +9486,53 @@ func TestCrossFoldersCopy(t *testing.T) {
 	vpath4 := "/vdirs/vdir4"
 	u.VirtualFolders = append(u.VirtualFolders, vfs.VirtualFolder{
 		BaseVirtualFolder: vfs.BaseVirtualFolder{
-			Name:       folderName4,
-			MappedPath: mappedPath4,
-			FsConfig: vfs.Filesystem{
-				Provider: sdk.SFTPFilesystemProvider,
-				SFTPConfig: vfs.SFTPFsConfig{
-					BaseSFTPFsConfig: sdk.BaseSFTPFsConfig{
-						Endpoint: sftpServerAddr,
-						Username: baseUser.Username,
-					},
-					Password: kms.NewPlainSecret(defaultPassword),
-				},
-			},
+			Name: folderName4,
 		},
 		VirtualPath: vpath4,
 		QuotaSize:   -1,
 		QuotaFiles:  -1,
 	})
+	f1 := vfs.BaseVirtualFolder{
+		Name:       folderName1,
+		MappedPath: mappedPath1,
+	}
+	_, _, err = httpdtest.AddFolder(f1, http.StatusCreated)
+	assert.NoError(t, err)
+	f2 := vfs.BaseVirtualFolder{
+		Name:       folderName2,
+		MappedPath: mappedPath2,
+	}
+	_, _, err = httpdtest.AddFolder(f2, http.StatusCreated)
+	assert.NoError(t, err)
+	f3 := vfs.BaseVirtualFolder{
+		Name:       folderName3,
+		MappedPath: mappedPath3,
+		FsConfig: vfs.Filesystem{
+			Provider: sdk.CryptedFilesystemProvider,
+			CryptConfig: vfs.CryptFsConfig{
+				Passphrase: kms.NewPlainSecret(defaultPassword),
+			},
+		},
+	}
+	_, _, err = httpdtest.AddFolder(f3, http.StatusCreated)
+	assert.NoError(t, err)
+	f4 := vfs.BaseVirtualFolder{
+		Name:       folderName4,
+		MappedPath: mappedPath4,
+		FsConfig: vfs.Filesystem{
+			Provider: sdk.SFTPFilesystemProvider,
+			SFTPConfig: vfs.SFTPFsConfig{
+				BaseSFTPFsConfig: sdk.BaseSFTPFsConfig{
+					Endpoint: sftpServerAddr,
+					Username: baseUser.Username,
+				},
+				Password: kms.NewPlainSecret(defaultPassword),
+			},
+		},
+	}
+	_, _, err = httpdtest.AddFolder(f4, http.StatusCreated)
+	assert.NoError(t, err)
+
 	user, resp, err := httpdtest.AddUser(u, http.StatusCreated)
 	assert.NoError(t, err, string(resp))
 	conn, client, err := getSftpClient(user)
@@ -8053,11 +9594,34 @@ func TestCrossFoldersCopy(t *testing.T) {
 	}
 }
 
+func TestHTTPFs(t *testing.T) {
+	u := getTestUserWithHTTPFs()
+	user, _, err := httpdtest.AddUser(u, http.StatusCreated)
+	assert.NoError(t, err)
+
+	err = os.MkdirAll(user.GetHomeDir(), os.ModePerm)
+	assert.NoError(t, err)
+
+	conn := common.NewBaseConnection(xid.New().String(), common.ProtocolFTP, "", "", user)
+	err = conn.CreateDir(httpFsWellKnowDir, false)
+	assert.NoError(t, err)
+
+	err = os.WriteFile(filepath.Join(os.TempDir(), "httpfs", defaultHTTPFsUsername, httpFsWellKnowDir, "file.txt"), []byte("data"), 0666)
+	assert.NoError(t, err)
+
+	err = conn.Copy(httpFsWellKnowDir, httpFsWellKnowDir+"_copy")
+	assert.NoError(t, err)
+
+	_, err = httpdtest.RemoveUser(user, http.StatusOK)
+	assert.NoError(t, err)
+	err = os.RemoveAll(user.GetHomeDir())
+	assert.NoError(t, err)
+}
+
 func TestProxyProtocol(t *testing.T) {
 	resp, err := httpclient.Get(fmt.Sprintf("http://%v", httpProxyAddr))
-	if assert.NoError(t, err) {
-		defer resp.Body.Close()
-		assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
+	if !assert.Error(t, err) {
+		resp.Body.Close()
 	}
 }
 
@@ -8103,12 +9667,10 @@ func checkBasicSFTP(client *sftp.Client) error {
 func getCustomAuthSftpClient(user dataprovider.User, authMethods []ssh.AuthMethod) (*ssh.Client, *sftp.Client, error) {
 	var sftpClient *sftp.Client
 	config := &ssh.ClientConfig{
-		User: user.Username,
-		HostKeyCallback: func(hostname string, remote net.Addr, key ssh.PublicKey) error {
-			return nil
-		},
-		Auth:    authMethods,
-		Timeout: 5 * time.Second,
+		User:            user.Username,
+		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+		Auth:            authMethods,
+		Timeout:         5 * time.Second,
 	}
 	conn, err := ssh.Dial("tcp", sftpServerAddr, config)
 	if err != nil {
@@ -8124,11 +9686,9 @@ func getCustomAuthSftpClient(user dataprovider.User, authMethods []ssh.AuthMetho
 func getSftpClient(user dataprovider.User) (*ssh.Client, *sftp.Client, error) {
 	var sftpClient *sftp.Client
 	config := &ssh.ClientConfig{
-		User: user.Username,
-		HostKeyCallback: func(hostname string, remote net.Addr, key ssh.PublicKey) error {
-			return nil
-		},
-		Timeout: 5 * time.Second,
+		User:            user.Username,
+		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+		Timeout:         5 * time.Second,
 	}
 	if user.Password != "" {
 		config.Auth = []ssh.AuthMethod{ssh.Password(user.Password)}
@@ -8151,11 +9711,9 @@ func runSSHCommand(command string, user dataprovider.User) ([]byte, error) {
 	var sshSession *ssh.Session
 	var output []byte
 	config := &ssh.ClientConfig{
-		User: user.Username,
-		HostKeyCallback: func(hostname string, remote net.Addr, key ssh.PublicKey) error {
-			return nil
-		},
-		Timeout: 5 * time.Second,
+		User:            user.Username,
+		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+		Timeout:         5 * time.Second,
 	}
 	if user.Password != "" {
 		config.Auth = []ssh.AuthMethod{ssh.Password(user.Password)}
@@ -8226,6 +9784,18 @@ func getCryptFsUser() dataprovider.User {
 	return u
 }
 
+func getTestUserWithHTTPFs() dataprovider.User {
+	u := getTestUser()
+	u.FsConfig.Provider = sdk.HTTPFilesystemProvider
+	u.FsConfig.HTTPConfig = vfs.HTTPFsConfig{
+		BaseHTTPFsConfig: sdk.BaseHTTPFsConfig{
+			Endpoint: fmt.Sprintf("http://127.0.0.1:%d/api/v1", httpFsPort),
+			Username: defaultHTTPFsUsername,
+		},
+	}
+	return u
+}
+
 func writeSFTPFile(name string, size int64, client *sftp.Client) error {
 	err := writeSFTPFileNoCheck(name, size, client)
 	if err != nil {
@@ -8257,6 +9827,17 @@ func writeSFTPFileNoCheck(name string, size int64, client *sftp.Client) error {
 		return err
 	}
 	return f.Close()
+}
+
+func getUploadScriptEnvContent(envVar string) []byte {
+	content := []byte("#!/bin/sh\n\n")
+	content = append(content, []byte(fmt.Sprintf("if [ -z \"$%s\" ]\n", envVar))...)
+	content = append(content, []byte("then\n")...)
+	content = append(content, []byte("    exit 1\n")...)
+	content = append(content, []byte("else\n")...)
+	content = append(content, []byte("    exit 0\n")...)
+	content = append(content, []byte("fi\n")...)
+	return content
 }
 
 func getUploadScriptContent(movedPath, logFilePath string, exitStatus int) []byte {
@@ -8322,7 +9903,7 @@ func printLatestLogs(maxNumberOfLines int) {
 		return
 	}
 	for _, line := range lines {
-		logger.DebugToConsole(line)
+		logger.DebugToConsole("%s", line)
 	}
 }
 
@@ -8360,4 +9941,23 @@ func (e *receivedEmail) get() receivedEmail {
 		To:   e.To,
 		Data: e.Data,
 	}
+}
+
+func startHTTPFs() {
+	go func() {
+		readdirCallback := func(name string) []os.FileInfo {
+			if name == httpFsWellKnowDir {
+				return []os.FileInfo{vfs.NewFileInfo("ghost.txt", false, 0, time.Unix(0, 0), false)}
+			}
+			return nil
+		}
+		callbacks := &httpdtest.HTTPFsCallbacks{
+			Readdir: readdirCallback,
+		}
+		if err := httpdtest.StartTestHTTPFs(httpFsPort, callbacks); err != nil {
+			logger.ErrorToConsole("could not start HTTPfs test server: %v", err)
+			os.Exit(1)
+		}
+	}()
+	waitTCPListening(fmt.Sprintf(":%d", httpFsPort))
 }

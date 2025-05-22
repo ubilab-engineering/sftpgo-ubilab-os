@@ -1,4 +1,4 @@
-// Copyright (C) 2019-2023 Nicola Murino
+// Copyright (C) 2019 Nicola Murino
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published
@@ -29,6 +29,11 @@ type HCLogAdapter struct {
 
 // Log emits a message and key/value pairs at a provided log level
 func (l *HCLogAdapter) Log(level hclog.Level, msg string, args ...any) {
+	// Workaround to avoid logging plugin arguments that may contain sensitive data.
+	// Check everytime we update go-plugin library.
+	if msg == "starting plugin" {
+		return
+	}
 	var ev *zerolog.Event
 	switch level {
 	case hclog.Info:

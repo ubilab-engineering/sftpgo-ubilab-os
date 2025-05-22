@@ -1,4 +1,4 @@
-// Copyright (C) 2019-2023 Nicola Murino
+// Copyright (C) 2019 Nicola Murino
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published
@@ -27,6 +27,7 @@ import (
 	"os/exec"
 	"path"
 	"runtime/debug"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -91,7 +92,7 @@ func processSSHCommand(payload []byte, connection *Connection, enabledSSHCommand
 		name, args, err := parseCommandPayload(msg.Command)
 		connection.Log(logger.LevelDebug, "new ssh command: %q args: %v num args: %d user: %s, error: %v",
 			name, args, len(args), connection.User.Username, err)
-		if err == nil && util.Contains(enabledSSHCommands, name) {
+		if err == nil && slices.Contains(enabledSSHCommands, name) {
 			connection.command = msg.Command
 			if name == scpCmdName && len(args) >= 2 {
 				connection.SetProtocol(common.ProtocolSCP)
@@ -139,9 +140,9 @@ func (c *sshCommand) handle() (err error) {
 	defer common.Connections.Remove(c.connection.GetID())
 
 	c.connection.UpdateLastActivity()
-	if util.Contains(sshHashCommands, c.command) {
+	if slices.Contains(sshHashCommands, c.command) {
 		return c.handleHashCommands()
-	} else if util.Contains(systemCommands, c.command) {
+	} else if slices.Contains(systemCommands, c.command) {
 		command, err := c.getSystemCommand()
 		if err != nil {
 			return c.sendErrorResponse(err)
@@ -192,26 +193,24 @@ func (c *sshCommand) handleSFTPGoRemove() error {
 func (c *sshCommand) updateQuota(sshDestPath string, filesNum int, filesSize int64) {
 	vfolder, err := c.connection.User.GetVirtualFolderForPath(sshDestPath)
 	if err == nil {
-		dataprovider.UpdateVirtualFolderQuota(&vfolder.BaseVirtualFolder, filesNum, filesSize, false) //nolint:errcheck
-		if vfolder.IsIncludedInUserQuota() {
-			dataprovider.UpdateUserQuota(&c.connection.User, filesNum, filesSize, false) //nolint:errcheck
-		}
-	} else {
-		dataprovider.UpdateUserQuota(&c.connection.User, filesNum, filesSize, false) //nolint:errcheck
+		dataprovider.UpdateUserFolderQuota(&vfolder, &c.connection.User, filesNum, filesSize, false)
+		return
 	}
+	dataprovider.UpdateUserQuota(&c.connection.User, filesNum, filesSize, false) //nolint:errcheck
 }
 
 func (c *sshCommand) handleHashCommands() error {
 	var h hash.Hash
-	if c.command == "md5sum" {
+	switch c.command {
+	case "md5sum":
 		h = md5.New()
-	} else if c.command == "sha1sum" {
+	case "sha1sum":
 		h = sha1.New()
-	} else if c.command == "sha256sum" {
+	case "sha256sum":
 		h = sha256.New()
-	} else if c.command == "sha384sum" {
+	case "sha384sum":
 		h = sha512.New384()
-	} else {
+	default:
 		h = sha512.New()
 	}
 	var response string
@@ -248,10 +247,14 @@ func (c *sshCommand) handleHashCommands() error {
 	return nil
 }
 
-func (c *sshCommand) executeSystemCommand(command systemCommand) error {
+func (c *sshCommand) executeSystemCommand(command systemCommand) error { //nolint:gocyclo
 	sshDestPath := c.getDestPath()
 	if !c.isLocalPath(sshDestPath) {
 		return c.sendErrorResponse(errUnsupportedConfig)
+	}
+	if err := common.Connections.IsNewTransferAllowed(c.connection.User.Username); err != nil {
+		err := fmt.Errorf("denying command due to transfer count limits")
+		return c.sendErrorResponse(err)
 	}
 	diskQuota, transferQuota := c.connection.HasSpace(true, false, command.quotaCheckPath)
 	if !diskQuota.HasSpace || !transferQuota.HasUploadSpace() || !transferQuota.HasDownloadSpace() {
@@ -425,6 +428,10 @@ func (c *sshCommand) getSystemCommand() (systemCommand, error) {
 		return command, errUnsupportedConfig
 	}
 	if c.command == "rsync" {
+		if !canAcceptRsyncArgs(args) {
+			c.connection.Log(logger.LevelWarn, "invalid rsync command, args: %+v", args)
+			return command, errors.New("invalid or unsupported rsync command")
+		}
 		// we cannot avoid that rsync creates symlinks so if the user has the permission
 		// to create symlinks we add the option --safe-links to the received rsync command if
 		// it is not already set. This should prevent to create symlinks that point outside
@@ -432,12 +439,12 @@ func (c *sshCommand) getSystemCommand() (systemCommand, error) {
 		// If the user cannot create symlinks we add the option --munge-links, if it is not
 		// already set. This should make symlinks unusable (but manually recoverable)
 		if c.connection.User.HasPerm(dataprovider.PermCreateSymlinks, c.getDestPath()) {
-			if !util.Contains(args, "--safe-links") {
-				args = append([]string{"--safe-links"}, args...)
+			if !slices.Contains(args, "--safe-links") {
+				args = slices.Insert(args, len(args)-2, "--safe-links")
 			}
 		} else {
-			if !util.Contains(args, "--munge-links") {
-				args = append([]string{"--munge-links"}, args...)
+			if !slices.Contains(args, "--munge-links") {
+				args = slices.Insert(args, len(args)-2, "--munge-links")
 			}
 		}
 	}
@@ -452,6 +459,85 @@ func (c *sshCommand) getSystemCommand() (systemCommand, error) {
 	command.quotaCheckPath = quotaPath
 	command.fs = fs
 	return command, nil
+}
+
+var (
+	acceptedRsyncOptions = []string{
+		"--existing",
+		"--ignore-existing",
+		"--remove-source-files",
+		"--delete",
+		"--delete-before",
+		"--delete-during",
+		"--delete-delay",
+		"--delete-after",
+		"--delete-excluded",
+		"--ignore-errors",
+		"--force",
+		"--partial",
+		"--delay-updates",
+		"--size-only",
+		"--blocking-io",
+		"--stats",
+		"--progress",
+		"--list-only",
+		"--dry-run",
+	}
+)
+
+func canAcceptRsyncArgs(args []string) bool {
+	// We support the following formats:
+	//
+	// rsync --server -vlogDtpre.iLsfxCIvu --supported-options . ARG  # push
+	// rsync --server --sender -vlogDtpre.iLsfxCIvu --supported-options . ARG  # pull
+	//
+	// Then some options with a single dash and containing "e." followed by
+	// supported options, listed in acceptedRsyncOptions, with double dash then
+	// dot and a finally single argument specifying the path to operate on.
+	idx := 0
+	if len(args) < 4 {
+		return false
+	}
+	// The first argument must be --server.
+	if args[idx] != "--server" {
+		return false
+	}
+	idx++
+	// The second argument must be --sender or an argument starting with a
+	// single dash and containing "e."
+	if args[idx] == "--sender" {
+		idx++
+	}
+	// Check that this argument starts with a dash and contains e. but does not
+	// end with e.
+	if !strings.HasPrefix(args[idx], "-") || strings.HasPrefix(args[idx], "--") ||
+		!strings.Contains(args[idx], "e.") || strings.HasSuffix(args[idx], "e.") {
+		return false
+	}
+	idx++
+	// We now expect optional supported options like --delete or a dot followed
+	// by the path to operate on. We don't support multiple paths in sender
+	// mode.
+	if len(args) < idx+2 {
+		return false
+	}
+	// A dot is required we'll check the expected position later.
+	if !slices.Contains(args, ".") {
+		return false
+	}
+	for _, arg := range args[idx:] {
+		if slices.Contains(acceptedRsyncOptions, arg) {
+			idx++
+		} else {
+			if arg == "." {
+				idx++
+				break
+			}
+			// Unsupported argument.
+			return false
+		}
+	}
+	return len(args) == idx+1
 }
 
 // for the supported commands, the destination path, if any, is the last argument
@@ -568,7 +654,7 @@ func (c *sshCommand) sendExitStatus(err error) {
 			}
 		}
 		common.ExecuteActionNotification(c.connection.BaseConnection, common.OperationSSHCmd, cmdPath, vCmdPath, //nolint:errcheck
-			targetPath, vTargetPath, c.command, 0, err, elapsed)
+			targetPath, vTargetPath, c.command, 0, err, elapsed, nil)
 		if err == nil {
 			logger.CommandLog(sshCommandLogSender, cmdPath, targetPath, c.connection.User.Username, "", c.connection.ID,
 				common.ProtocolSSH, -1, -1, "", "", c.connection.command, -1, c.connection.GetLocalAddress(),

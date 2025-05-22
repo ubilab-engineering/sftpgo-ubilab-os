@@ -1,4 +1,4 @@
-// Copyright (C) 2019-2023 Nicola Murino
+// Copyright (C) 2019 Nicola Murino
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published
@@ -16,11 +16,13 @@ package common
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/pkg/sftp"
 	"github.com/sftpgo/sdk"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -35,7 +37,7 @@ func TestTransferUpdateQuota(t *testing.T) {
 	transfer := BaseTransfer{
 		Connection:   conn,
 		transferType: TransferUpload,
-		Fs:           vfs.NewOsFs("", os.TempDir(), ""),
+		Fs:           vfs.NewOsFs("", os.TempDir(), "", nil),
 	}
 	transfer.BytesReceived.Store(123)
 	errFake := errors.New("fake error")
@@ -74,7 +76,7 @@ func TestTransferThrottling(t *testing.T) {
 			DownloadBandwidth: 40,
 		},
 	}
-	fs := vfs.NewOsFs("", os.TempDir(), "")
+	fs := vfs.NewOsFs("", os.TempDir(), "", nil)
 	testFileSize := int64(131072)
 	wantedUploadElapsed := 1000 * (testFileSize / 1024) / u.UploadBandwidth
 	wantedDownloadElapsed := 1000 * (testFileSize / 1024) / u.DownloadBandwidth
@@ -106,7 +108,7 @@ func TestTransferThrottling(t *testing.T) {
 
 func TestRealPath(t *testing.T) {
 	testFile := filepath.Join(os.TempDir(), "afile.txt")
-	fs := vfs.NewOsFs("123", os.TempDir(), "")
+	fs := vfs.NewOsFs("123", os.TempDir(), "", nil)
 	u := dataprovider.User{
 		BaseUser: sdk.BaseUser{
 			Username: "user",
@@ -140,7 +142,7 @@ func TestRealPath(t *testing.T) {
 
 func TestTruncate(t *testing.T) {
 	testFile := filepath.Join(os.TempDir(), "transfer_test_file")
-	fs := vfs.NewOsFs("123", os.TempDir(), "")
+	fs := vfs.NewOsFs("123", os.TempDir(), "", nil)
 	u := dataprovider.User{
 		BaseUser: sdk.BaseUser{
 			Username: "user",
@@ -209,7 +211,7 @@ func TestTransferErrors(t *testing.T) {
 		isCancelled = true
 	}
 	testFile := filepath.Join(os.TempDir(), "transfer_test_file")
-	fs := vfs.NewOsFs("id", os.TempDir(), "")
+	fs := vfs.NewOsFs("id", os.TempDir(), "", nil)
 	u := dataprovider.User{
 		BaseUser: sdk.BaseUser{
 			Username: "test",
@@ -225,8 +227,20 @@ func TestTransferErrors(t *testing.T) {
 	conn := NewBaseConnection("id", ProtocolSFTP, "", "", u)
 	transfer := NewBaseTransfer(file, conn, nil, testFile, testFile, "/transfer_test_file", TransferUpload,
 		0, 0, 0, 0, true, fs, dataprovider.TransferQuota{})
+	pathError := &os.PathError{
+		Op:   "test",
+		Path: testFile,
+		Err:  os.ErrInvalid,
+	}
+	err = transfer.ConvertError(pathError)
+	assert.EqualError(t, err, fmt.Sprintf("%s %s: %s", pathError.Op, "/transfer_test_file", pathError.Err.Error()))
+	err = transfer.ConvertError(os.ErrNotExist)
+	assert.ErrorIs(t, err, sftp.ErrSSHFxNoSuchFile)
+	err = transfer.ConvertError(os.ErrPermission)
+	assert.ErrorIs(t, err, sftp.ErrSSHFxPermissionDenied)
 	assert.Nil(t, transfer.cancelFn)
 	assert.Equal(t, testFile, transfer.GetFsPath())
+	transfer.SetMetadata(map[string]string{"key": "val"})
 	transfer.SetCancelFn(cancelFn)
 	errFake := errors.New("err fake")
 	transfer.BytesReceived.Store(9)
@@ -292,8 +306,9 @@ func TestRemovePartialCryptoFile(t *testing.T) {
 	require.NoError(t, err)
 	u := dataprovider.User{
 		BaseUser: sdk.BaseUser{
-			Username: "test",
-			HomeDir:  os.TempDir(),
+			Username:   "test",
+			HomeDir:    os.TempDir(),
+			QuotaFiles: 1000000,
 		},
 	}
 	conn := NewBaseConnection(fs.ConnectionID(), ProtocolSFTP, "", "", u)
@@ -309,6 +324,9 @@ func TestRemovePartialCryptoFile(t *testing.T) {
 	assert.Equal(t, int64(0), size)
 	assert.Equal(t, 1, deletedFiles)
 	assert.NoFileExists(t, testFile)
+	err = transfer.Close()
+	assert.Error(t, err)
+	assert.Len(t, conn.GetTransfers(), 0)
 }
 
 func TestFTPMode(t *testing.T) {
@@ -316,7 +334,7 @@ func TestFTPMode(t *testing.T) {
 	transfer := BaseTransfer{
 		Connection:   conn,
 		transferType: TransferUpload,
-		Fs:           vfs.NewOsFs("", os.TempDir(), ""),
+		Fs:           vfs.NewOsFs("", os.TempDir(), "", nil),
 	}
 	transfer.BytesReceived.Store(123)
 	assert.Empty(t, transfer.ftpMode)
@@ -327,40 +345,21 @@ func TestFTPMode(t *testing.T) {
 func TestTransferQuota(t *testing.T) {
 	user := dataprovider.User{
 		BaseUser: sdk.BaseUser{
-			TotalDataTransfer:    -1,
-			UploadDataTransfer:   -1,
-			DownloadDataTransfer: -1,
+			TotalDataTransfer:    3,
+			UploadDataTransfer:   2,
+			DownloadDataTransfer: 1,
 		},
 	}
-	user.Filters.DataTransferLimits = []sdk.DataTransferLimit{
-		{
-			Sources:              []string{"127.0.0.1/32", "192.168.1.0/24"},
-			TotalDataTransfer:    100,
-			UploadDataTransfer:   0,
-			DownloadDataTransfer: 0,
-		},
-		{
-			Sources:              []string{"172.16.0.0/24"},
-			TotalDataTransfer:    0,
-			UploadDataTransfer:   120,
-			DownloadDataTransfer: 150,
-		},
-	}
-	ul, dl, total := user.GetDataTransferLimits("127.0.1.1")
+	ul, dl, total := user.GetDataTransferLimits()
+	assert.Equal(t, int64(2*1048576), ul)
+	assert.Equal(t, int64(1*1048576), dl)
+	assert.Equal(t, int64(3*1048576), total)
+	user.TotalDataTransfer = -1
+	user.UploadDataTransfer = -1
+	user.DownloadDataTransfer = -1
+	ul, dl, total = user.GetDataTransferLimits()
 	assert.Equal(t, int64(0), ul)
 	assert.Equal(t, int64(0), dl)
-	assert.Equal(t, int64(0), total)
-	ul, dl, total = user.GetDataTransferLimits("127.0.0.1")
-	assert.Equal(t, int64(0), ul)
-	assert.Equal(t, int64(0), dl)
-	assert.Equal(t, int64(100*1048576), total)
-	ul, dl, total = user.GetDataTransferLimits("192.168.1.4")
-	assert.Equal(t, int64(0), ul)
-	assert.Equal(t, int64(0), dl)
-	assert.Equal(t, int64(100*1048576), total)
-	ul, dl, total = user.GetDataTransferLimits("172.16.0.2")
-	assert.Equal(t, int64(120*1048576), ul)
-	assert.Equal(t, int64(150*1048576), dl)
 	assert.Equal(t, int64(0), total)
 	transferQuota := dataprovider.TransferQuota{}
 	assert.True(t, transferQuota.HasDownloadSpace())
@@ -394,7 +393,7 @@ func TestTransferQuota(t *testing.T) {
 
 	conn := NewBaseConnection("", ProtocolSFTP, "", "", user)
 	transfer := NewBaseTransfer(nil, conn, nil, "file.txt", "file.txt", "/transfer_test_file", TransferUpload,
-		0, 0, 0, 0, true, vfs.NewOsFs("", os.TempDir(), ""), dataprovider.TransferQuota{})
+		0, 0, 0, 0, true, vfs.NewOsFs("", os.TempDir(), "", nil), dataprovider.TransferQuota{})
 	err := transfer.CheckRead()
 	assert.NoError(t, err)
 	err = transfer.CheckWrite()
@@ -439,6 +438,11 @@ func TestTransferQuota(t *testing.T) {
 	}
 	err = transfer.CheckWrite()
 	assert.True(t, conn.IsQuotaExceededError(err))
+
+	err = transfer.Close()
+	assert.NoError(t, err)
+	assert.Len(t, conn.GetTransfers(), 0)
+	assert.Equal(t, int32(0), Connections.GetTotalTransfers())
 }
 
 func TestUploadOutsideHomeRenameError(t *testing.T) {
@@ -448,7 +452,7 @@ func TestUploadOutsideHomeRenameError(t *testing.T) {
 	transfer := BaseTransfer{
 		Connection:   conn,
 		transferType: TransferUpload,
-		Fs:           vfs.NewOsFs("", filepath.Join(os.TempDir(), "home"), ""),
+		Fs:           vfs.NewOsFs("", filepath.Join(os.TempDir(), "home"), "", nil),
 	}
 	transfer.BytesReceived.Store(123)
 

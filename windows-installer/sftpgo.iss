@@ -17,13 +17,9 @@
     #define MyAppArch64 "x64"
     #define MySetupName "sftpgo_windows_x86_64"
 #endif
-#define MyAppURL "https://github.com/drakkan/sftpgo"
+#define MyAppURL "https://sftpgo.com"
 #define MyVersionInfo StringChange(MyAppVersion,"v","")
-#if GetEnv("SFTPGO_ISS_DOC_URL") != ""
-    #define DocURL GetEnv("SFTPGO_ISS_DOC_URL")
-#else
-    #define DocURL "https://github.com/drakkan/sftpgo/blob/main/README.md"
-#endif
+#define DocURL "https://docs.sftpgo.com"
 #define MyAppExeName "sftpgo.exe"
 #define MyAppDir "..\output"
 #define MyOutputDir ".."
@@ -37,10 +33,10 @@ AppPublisher=Nicola Murino
 AppPublisherURL={#MyAppURL}
 AppSupportURL={#MyAppURL}
 AppUpdatesURL={#MyAppURL}
-AppCopyright=AGPL-3.0
+AppCopyright=2019-2025 Nicola Murino
 DefaultDirName={autopf}\{#MyAppName}
 DefaultGroupName={#MyAppName}
-LicenseFile={#MyAppDir}\LICENSE.txt
+LicenseFile=LICENSE_with_NOTICE.txt
 OutputDir={#MyOutputDir}
 OutputBaseFilename={#MySetupName}
 SetupIconFile=icon.ico
@@ -50,19 +46,18 @@ WizardStyle=modern
 ArchitecturesInstallIn64BitMode={#MyAppArch64}
 PrivilegesRequired=admin
 ArchitecturesAllowed={#MyAppArch}
-MinVersion=6.1sp1
+MinVersion=10.0.14393
 VersionInfoVersion={#MyVersionInfo}
-VersionInfoCopyright=AGPL-3.0
-SignTool=signtool
-SignedUninstaller=yes
+VersionInfoCopyright=2019-2025 Nicola Murino
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Files]
-Source: "{#MyAppDir}\sftpgo.exe"; DestDir: "{app}"; Flags: ignoreversion signonce
+Source: "{#MyAppDir}\sftpgo.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#MyAppDir}\sftpgo.db"; DestDir: "{commonappdata}\{#MyAppName}"; Flags: onlyifdoesntexist uninsneveruninstall
 Source: "{#MyAppDir}\LICENSE.txt"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#MyAppDir}\NOTICE.txt"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#MyAppDir}\sftpgo.json"; DestDir: "{commonappdata}\{#MyAppName}"; Flags: onlyifdoesntexist uninsneveruninstall
 Source: "{#MyAppDir}\sftpgo.json"; DestDir: "{commonappdata}\{#MyAppName}"; DestName: "sftpgo_default.json"; Flags: ignoreversion
 Source: "{#MyAppDir}\templates\*"; DestDir: "{commonappdata}\{#MyAppName}\templates"; Flags: ignoreversion recursesubdirs createallsubdirs
@@ -99,3 +94,15 @@ Filename: "netsh"; Parameters: "advfirewall firewall delete rule name=""SFTPGo S
 
 [Messages]
 FinishedLabel=Setup has finished installing SFTPGo on your computer. SFTPGo should already be running as a Windows service, it uses TCP port 8080 for HTTP service and TCP port 2022 for SFTP service by default, make sure the configured ports are not used by other services or edit the configuration according to your needs.
+
+[Code]
+
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+var
+  Code: Integer;
+begin
+  if (FileExists(ExpandConstant('{app}\{#MyAppExeName}'))) then
+  begin
+    Exec(ExpandConstant('{app}\{#MyAppExeName}'), 'service stop', '', SW_HIDE, ewWaitUntilTerminated, Code);
+  end
+end;

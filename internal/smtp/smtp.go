@@ -1,4 +1,4 @@
-// Copyright (C) 2019-2023 Nicola Murino
+// Copyright (C) 2019 Nicola Murino
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published
@@ -25,9 +25,11 @@ import (
 	"sync"
 	"time"
 
+	"github.com/rs/xid"
 	"github.com/wneessen/go-mail"
 
 	"github.com/drakkan/sftpgo/v2/internal/dataprovider"
+	"github.com/drakkan/sftpgo/v2/internal/kms"
 	"github.com/drakkan/sftpgo/v2/internal/logger"
 	"github.com/drakkan/sftpgo/v2/internal/util"
 	"github.com/drakkan/sftpgo/v2/internal/version"
@@ -83,7 +85,16 @@ func (c *activeConfig) Set(cfg *dataprovider.SMTPConfigs) {
 			AuthType:   cfg.AuthType,
 			Encryption: cfg.Encryption,
 			Domain:     cfg.Domain,
+			Debug:      cfg.Debug,
+			OAuth2: OAuth2Config{
+				Provider:     cfg.OAuth2.Provider,
+				Tenant:       cfg.OAuth2.Tenant,
+				ClientID:     cfg.OAuth2.ClientID,
+				ClientSecret: cfg.OAuth2.ClientSecret.GetPayload(),
+				RefreshToken: cfg.OAuth2.RefreshToken.GetPayload(),
+			},
 		}
+		config.OAuth2.initialize()
 	}
 
 	c.Lock()
@@ -104,7 +115,7 @@ func (c *activeConfig) Set(cfg *dataprovider.SMTPConfigs) {
 	}
 }
 
-func (c *activeConfig) getSMTPClientAndMsg(to []string, subject, body string, contentType EmailContentType,
+func (c *activeConfig) getSMTPClientAndMsg(to, bcc []string, subject, body string, contentType EmailContentType,
 	attachments ...*mail.File,
 ) (*mail.Client, *mail.Msg, error) {
 	c.RLock()
@@ -114,11 +125,11 @@ func (c *activeConfig) getSMTPClientAndMsg(to []string, subject, body string, co
 		return nil, nil, errors.New("smtp: not configured")
 	}
 
-	return c.config.getSMTPClientAndMsg(to, subject, body, contentType, attachments...)
+	return c.config.getSMTPClientAndMsg(to, bcc, subject, body, contentType, attachments...)
 }
 
-func (c *activeConfig) sendEmail(to []string, subject, body string, contentType EmailContentType, attachments ...*mail.File) error {
-	client, msg, err := c.getSMTPClientAndMsg(to, subject, body, contentType, attachments...)
+func (c *activeConfig) sendEmail(to, bcc []string, subject, body string, contentType EmailContentType, attachments ...*mail.File) error {
+	client, msg, err := c.getSMTPClientAndMsg(to, bcc, subject, body, contentType, attachments...)
 	if err != nil {
 		return err
 	}
@@ -157,6 +168,7 @@ type Config struct {
 	// 0 Plain
 	// 1 Login
 	// 2 CRAM-MD5
+	// 3 OAuth2
 	AuthType int `json:"auth_type" mapstructure:"auth_type"`
 	// 0 no encryption
 	// 1 TLS
@@ -167,6 +179,10 @@ type Config struct {
 	// Path to the email templates. This can be an absolute path or a path relative to the config dir.
 	// Templates are searched within a subdirectory named "email" in the specified path
 	TemplatesPath string `json:"templates_path" mapstructure:"templates_path"`
+	// Set to 1 to enable debug logs
+	Debug int `json:"debug" mapstructure:"debug"`
+	// OAuth2 related settings
+	OAuth2 OAuth2Config `json:"oauth2" mapstructure:"oauth2"`
 }
 
 func (c *Config) isEqual(other *Config) bool {
@@ -194,21 +210,27 @@ func (c *Config) isEqual(other *Config) bool {
 	if c.Domain != other.Domain {
 		return false
 	}
-	return true
+	if c.Debug != other.Debug {
+		return false
+	}
+	return c.OAuth2.isEqual(&other.OAuth2)
 }
 
 func (c *Config) validate() error {
 	if c.Port <= 0 || c.Port > 65535 {
 		return fmt.Errorf("smtp: invalid port %d", c.Port)
 	}
-	if c.AuthType < 0 || c.AuthType > 2 {
+	if c.AuthType < 0 || c.AuthType > 3 {
 		return fmt.Errorf("smtp: invalid auth type %d", c.AuthType)
 	}
 	if c.Encryption < 0 || c.Encryption > 2 {
 		return fmt.Errorf("smtp: invalid encryption %d", c.Encryption)
 	}
 	if c.From == "" && c.User == "" {
-		return fmt.Errorf(`smtp: from address and user cannot both be empty`)
+		return errors.New(`smtp: from address and user cannot both be empty`)
+	}
+	if c.AuthType == 3 {
+		return c.OAuth2.Validate()
 	}
 	return nil
 }
@@ -226,7 +248,7 @@ func (c *Config) loadTemplates(configDir string) error {
 	return nil
 }
 
-// Initialize initialized and validates the SMTP configuration
+// Initialize initializes and validates the SMTP configuration
 func (c *Config) Initialize(configDir string, isService bool) error {
 	if !isService && c.Host == "" {
 		if err := loadConfigFromProvider(); err != nil {
@@ -235,8 +257,11 @@ func (c *Config) Initialize(configDir string, isService bool) error {
 		if !config.isEnabled() {
 			return nil
 		}
+		// If not running as a service, templates will only be loaded if required.
 		return c.loadTemplates(configDir)
 	}
+	// In service mode SMTP can be enabled from the WebAdmin at runtime so we
+	// always load templates.
 	if err := c.loadTemplates(configDir); err != nil {
 		return err
 	}
@@ -276,6 +301,8 @@ func (c *Config) getMailClientOptions() []mail.Option {
 			options = append(options, mail.WithSMTPAuth(mail.SMTPAuthLogin))
 		case 2:
 			options = append(options, mail.WithSMTPAuth(mail.SMTPAuthCramMD5))
+		case 3:
+			options = append(options, mail.WithSMTPAuth(mail.SMTPAuthXOAUTH2))
 		default:
 			options = append(options, mail.WithSMTPAuth(mail.SMTPAuthPlain))
 		}
@@ -283,14 +310,20 @@ func (c *Config) getMailClientOptions() []mail.Option {
 	if c.Domain != "" {
 		options = append(options, mail.WithHELO(c.Domain))
 	}
+	if c.Debug > 0 {
+		options = append(options,
+			mail.WithLogger(&logger.MailAdapter{
+				ConnectionID: xid.New().String(),
+			}),
+			mail.WithDebugLog())
+	}
 	return options
 }
 
-func (c *Config) getSMTPClientAndMsg(to []string, subject, body string, contentType EmailContentType,
+func (c *Config) getSMTPClientAndMsg(to, bcc []string, subject, body string, contentType EmailContentType,
 	attachments ...*mail.File) (*mail.Client, *mail.Msg, error) {
-	version := version.Get()
 	msg := mail.NewMsg()
-	msg.SetUserAgent(fmt.Sprintf("SFTPGo-%s-%s", version.Version, version.CommitHash))
+	msg.SetUserAgent(version.GetServerVersion(" ", false))
 
 	var from string
 	if c.From != "" {
@@ -304,10 +337,15 @@ func (c *Config) getSMTPClientAndMsg(to []string, subject, body string, contentT
 	if err := msg.To(to...); err != nil {
 		return nil, nil, err
 	}
+	if len(bcc) > 0 {
+		if err := msg.Bcc(bcc...); err != nil {
+			return nil, nil, err
+		}
+	}
 	msg.Subject(subject)
 	msg.SetDate()
 	msg.SetMessageID()
-	msg.SetAttachements(attachments)
+	msg.SetAttachments(attachments)
 
 	switch contentType {
 	case EmailContentTypeTextPlain:
@@ -322,12 +360,19 @@ func (c *Config) getSMTPClientAndMsg(to []string, subject, body string, contentT
 	if err != nil {
 		return nil, nil, fmt.Errorf("unable to create mail client: %w", err)
 	}
+	if c.AuthType == 3 {
+		token, err := c.OAuth2.getAccessToken()
+		if err != nil {
+			return nil, nil, fmt.Errorf("unable to get oauth2 access token: %w", err)
+		}
+		client.SetPassword(token)
+	}
 	return client, msg, nil
 }
 
 // SendEmail tries to send an email using the specified parameters
-func (c *Config) SendEmail(to []string, subject, body string, contentType EmailContentType, attachments ...*mail.File) error {
-	client, msg, err := c.getSMTPClientAndMsg(to, subject, body, contentType, attachments...)
+func (c *Config) SendEmail(to, bcc []string, subject, body string, contentType EmailContentType, attachments ...*mail.File) error {
+	client, msg, err := c.getSMTPClientAndMsg(to, bcc, subject, body, contentType, attachments...)
 	if err != nil {
 		return err
 	}
@@ -366,14 +411,8 @@ func RenderPasswordExpirationTemplate(buf *bytes.Buffer, data any) error {
 }
 
 // SendEmail tries to send an email using the specified parameters.
-func SendEmail(to []string, subject, body string, contentType EmailContentType, attachments ...*mail.File) error {
-	return config.sendEmail(to, subject, body, contentType, attachments...)
-}
-
-// ReloadProviderConf reloads the configuration from the provider
-// and apply it if different from the active one
-func ReloadProviderConf() {
-	loadConfigFromProvider() //nolint:errcheck
+func SendEmail(to, bcc []string, subject, body string, contentType EmailContentType, attachments ...*mail.File) error {
+	return config.sendEmail(to, bcc, subject, body, contentType, attachments...)
 }
 
 func loadConfigFromProvider() error {
@@ -383,10 +422,29 @@ func loadConfigFromProvider() error {
 		return fmt.Errorf("smtp: unable to load config from provider: %w", err)
 	}
 	configs.SetNilsToEmpty()
-	if err := configs.SMTP.Password.TryDecrypt(); err != nil {
-		logger.Error(logSender, "", "unable to decrypt password: %v", err)
-		return fmt.Errorf("smtp: unable to decrypt password: %w", err)
+	if err := configs.SMTP.TryDecrypt(); err != nil {
+		logger.Error(logSender, "", "unable to decrypt smtp config: %v", err)
+		return fmt.Errorf("smtp: unable to decrypt smtp config: %w", err)
 	}
 	config.Set(configs.SMTP)
 	return nil
+}
+
+func updateRefreshToken(token string) {
+	configs, err := dataprovider.GetConfigs()
+	if err != nil {
+		logger.Error(logSender, "", "unable to load config from provider, updating refresh token not possible: %v", err)
+		return
+	}
+	configs.SetNilsToEmpty()
+	if configs.SMTP.IsEmpty() {
+		logger.Warn(logSender, "", "unable to update refresh token, smtp not configured in the data provider")
+		return
+	}
+	configs.SMTP.OAuth2.RefreshToken = kms.NewPlainSecret(token)
+	if err := dataprovider.UpdateConfigs(&configs, dataprovider.ActionExecutorSystem, "", ""); err != nil {
+		logger.Error(logSender, "", "unable to save new refresh token: %v", err)
+		return
+	}
+	logger.Info(logSender, "", "refresh token updated")
 }

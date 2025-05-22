@@ -1,4 +1,4 @@
-// Copyright (C) 2019-2023 Nicola Murino
+// Copyright (C) 2019 Nicola Murino
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published
@@ -202,9 +202,15 @@ func ErrorToConsole(format string, v ...any) {
 
 // TransferLog logs uploads or downloads
 func TransferLog(operation, path string, elapsed int64, size int64, user, connectionID, protocol, localAddr,
-	remoteAddr, ftpMode string,
+	remoteAddr, ftpMode string, err error,
 ) {
-	ev := logger.Info().
+	var ev *zerolog.Event
+	if err != nil {
+		ev = logger.Error()
+	} else {
+		ev = logger.Info()
+	}
+	ev.
 		Timestamp().
 		Str("sender", operation).
 		Str("local_addr", localAddr).
@@ -218,7 +224,7 @@ func TransferLog(operation, path string, elapsed int64, size int64, user, connec
 	if ftpMode != "" {
 		ev.Str("ftp_mode", ftpMode)
 	}
-	ev.Send()
+	ev.AnErr("error", err).Send()
 }
 
 // CommandLog logs an SFTP/SCP/SSH command
@@ -261,6 +267,26 @@ func ConnectionFailedLog(user, ip, loginType, protocol, errorString string) {
 		Send()
 }
 
+// LoginLog logs successful logins.
+func LoginLog(user, ip, loginMethod, protocol, connectionID, clientVersion string, encrypted bool, info string) {
+	ev := logger.Info()
+	ev.Timestamp().
+		Str("sender", "login").
+		Str("ip", ip).
+		Str("username", user).
+		Str("method", loginMethod).
+		Str("protocol", protocol)
+	if connectionID != "" {
+		ev.Str("connection_id", connectionID)
+	}
+	ev.Str("client", clientVersion).
+		Bool("encrypted", encrypted)
+	if info != "" {
+		ev.Str("info", info)
+	}
+	ev.Send()
+}
+
 func isLogFilePathValid(logFilePath string) bool {
 	cleanInput := filepath.Clean(logFilePath)
 	if cleanInput == "." || cleanInput == ".." {
@@ -283,7 +309,7 @@ func (l *StdLoggerWrapper) Write(p []byte) (n int, err error) {
 		p = p[0 : n-1]
 	}
 
-	Log(LevelError, l.Sender, "", string(p))
+	Log(LevelError, l.Sender, "", "%s", p)
 	return
 }
 

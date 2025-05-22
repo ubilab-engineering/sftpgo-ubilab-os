@@ -1,4 +1,4 @@
-// Copyright (C) 2019-2023 Nicola Murino
+// Copyright (C) 2019 Nicola Murino
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published
@@ -19,6 +19,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -32,7 +33,6 @@ import (
 
 	"github.com/coreos/go-oidc/v3/oidc"
 	"github.com/go-chi/jwtauth/v5"
-	"github.com/lestrrat-go/jwx/v2/jwa"
 	"github.com/rs/xid"
 	"github.com/sftpgo/sdk"
 	"github.com/stretchr/testify/assert"
@@ -101,9 +101,10 @@ func TestOIDCInitialization(t *testing.T) {
 	config := OIDC{}
 	err := config.initialize()
 	assert.NoError(t, err)
+	secret := "jRsmE0SWnuZjP7djBqNq0mrf8QN77j2c"
 	config = OIDC{
 		ClientID:        "sftpgo-client",
-		ClientSecret:    "jRsmE0SWnuZjP7djBqNq0mrf8QN77j2c",
+		ClientSecret:    util.GenerateUniqueID(),
 		ConfigURL:       fmt.Sprintf("http://%v/", oidcMockAddr),
 		RedirectBaseURL: "http://127.0.0.1:8081/",
 		UsernameField:   "preferred_username",
@@ -114,10 +115,19 @@ func TestOIDCInitialization(t *testing.T) {
 		assert.Contains(t, err.Error(), "oidc: required scope \"openid\" is not set")
 	}
 	config.Scopes = []string{oidc.ScopeOpenID}
+	config.ClientSecretFile = "missing file"
+	err = config.initialize()
+	assert.ErrorIs(t, err, fs.ErrNotExist)
+	secretFile := filepath.Join(os.TempDir(), util.GenerateUniqueID())
+	defer os.Remove(secretFile)
+	err = os.WriteFile(secretFile, []byte(secret), 0600)
+	assert.NoError(t, err)
+	config.ClientSecretFile = secretFile
 	err = config.initialize()
 	if assert.Error(t, err) {
 		assert.Contains(t, err.Error(), "oidc: unable to initialize provider")
 	}
+	assert.Equal(t, secret, config.ClientSecret)
 	config.ConfigURL = fmt.Sprintf("http://%v/auth/realms/sftpgo", oidcMockAddr)
 	err = config.initialize()
 	assert.NoError(t, err)
@@ -125,6 +135,8 @@ func TestOIDCInitialization(t *testing.T) {
 }
 
 func TestOIDCLoginLogout(t *testing.T) {
+	tokenValidationMode = 2
+
 	oidcMgr, ok := oidcMgr.(*memoryOIDCManager)
 	require.True(t, ok)
 	server := getTestOIDCServer()
@@ -137,11 +149,11 @@ func TestOIDCLoginLogout(t *testing.T) {
 	assert.NoError(t, err)
 	server.router.ServeHTTP(rr, r)
 	assert.Equal(t, http.StatusBadRequest, rr.Code)
-	assert.Contains(t, rr.Body.String(), "Authentication state did not match")
+	assert.Contains(t, rr.Body.String(), util.I18nInvalidAuth)
 
 	expiredAuthReq := oidcPendingAuth{
-		State:    xid.New().String(),
-		Nonce:    xid.New().String(),
+		State:    util.GenerateOpaqueString(),
+		Nonce:    util.GenerateOpaqueString(),
 		Audience: tokenAudienceWebClient,
 		IssuedAt: util.GetTimeAsMsSinceEpoch(time.Now().Add(-10 * time.Minute)),
 	}
@@ -151,7 +163,7 @@ func TestOIDCLoginLogout(t *testing.T) {
 	assert.NoError(t, err)
 	server.router.ServeHTTP(rr, r)
 	assert.Equal(t, http.StatusBadRequest, rr.Code)
-	assert.Contains(t, rr.Body.String(), "Authentication state did not match")
+	assert.Contains(t, rr.Body.String(), util.I18nInvalidAuth)
 	oidcMgr.removePendingAuth(expiredAuthReq.State)
 
 	server.binding.OIDC.oauth2Config = &mockOAuth2Config{
@@ -542,6 +554,8 @@ func TestOIDCLoginLogout(t *testing.T) {
 	assert.NoError(t, err)
 	err = dataprovider.DeleteUser(username, "", "", "")
 	assert.NoError(t, err)
+
+	tokenValidationMode = 0
 }
 
 func TestOIDCRefreshToken(t *testing.T) {
@@ -550,7 +564,7 @@ func TestOIDCRefreshToken(t *testing.T) {
 	r, err := http.NewRequest(http.MethodGet, webUsersPath, nil)
 	assert.NoError(t, err)
 	token := oidcToken{
-		Cookie:      xid.New().String(),
+		Cookie:      util.GenerateOpaqueString(),
 		AccessToken: xid.New().String(),
 		TokenType:   "Bearer",
 		ExpiresAt:   util.GetTimeAsMsSinceEpoch(time.Now().Add(-1 * time.Minute)),
@@ -566,12 +580,12 @@ func TestOIDCRefreshToken(t *testing.T) {
 	verifier := mockOIDCVerifier{
 		err: common.ErrGenericFailure,
 	}
-	err = token.refresh(&config, &verifier, r)
+	err = token.refresh(context.Background(), &config, &verifier, r)
 	if assert.Error(t, err) {
 		assert.Contains(t, err.Error(), "refresh token not set")
 	}
 	token.RefreshToken = xid.New().String()
-	err = token.refresh(&config, &verifier, r)
+	err = token.refresh(context.Background(), &config, &verifier, r)
 	assert.ErrorIs(t, err, common.ErrGenericFailure)
 
 	newToken := &oauth2.Token{
@@ -587,7 +601,7 @@ func TestOIDCRefreshToken(t *testing.T) {
 	verifier = mockOIDCVerifier{
 		token: &oidc.IDToken{},
 	}
-	err = token.refresh(&config, &verifier, r)
+	err = token.refresh(context.Background(), &config, &verifier, r)
 	if assert.Error(t, err) {
 		assert.Contains(t, err.Error(), "the refreshed token has no id token")
 	}
@@ -603,7 +617,7 @@ func TestOIDCRefreshToken(t *testing.T) {
 	verifier = mockOIDCVerifier{
 		err: common.ErrGenericFailure,
 	}
-	err = token.refresh(&config, &verifier, r)
+	err = token.refresh(context.Background(), &config, &verifier, r)
 	assert.ErrorIs(t, err, common.ErrGenericFailure)
 
 	newToken = newToken.WithExtra(map[string]any{
@@ -616,18 +630,20 @@ func TestOIDCRefreshToken(t *testing.T) {
 		},
 	}
 	verifier = mockOIDCVerifier{
-		token: &oidc.IDToken{},
+		token: &oidc.IDToken{
+			Nonce: xid.New().String(), // nonce is different from the expected one
+		},
 	}
-	err = token.refresh(&config, &verifier, r)
+	err = token.refresh(context.Background(), &config, &verifier, r)
 	if assert.Error(t, err) {
 		assert.Contains(t, err.Error(), "the refreshed token nonce mismatch")
 	}
 	verifier = mockOIDCVerifier{
 		token: &oidc.IDToken{
-			Nonce: token.Nonce,
+			Nonce: "", // empty token is fine on refresh but claims are not set
 		},
 	}
-	err = token.refresh(&config, &verifier, r)
+	err = token.refresh(context.Background(), &config, &verifier, r)
 	if assert.Error(t, err) {
 		assert.Contains(t, err.Error(), "oidc: claims not set")
 	}
@@ -638,12 +654,12 @@ func TestOIDCRefreshToken(t *testing.T) {
 	verifier = mockOIDCVerifier{
 		token: idToken,
 	}
-	err = token.refresh(&config, &verifier, r)
+	err = token.refresh(context.Background(), &config, &verifier, r)
 	assert.NoError(t, err)
 	assert.Len(t, token.Permissions, 1)
 	token.Role = nil
 	// user does not exist
-	err = token.refresh(&config, &verifier, r)
+	err = token.refresh(context.Background(), &config, &verifier, r)
 	assert.Error(t, err)
 	require.Len(t, oidcMgr.tokens, 1)
 	oidcMgr.removeToken(token.Cookie)
@@ -652,7 +668,7 @@ func TestOIDCRefreshToken(t *testing.T) {
 
 func TestOIDCRefreshUser(t *testing.T) {
 	token := oidcToken{
-		Cookie:      xid.New().String(),
+		Cookie:      util.GenerateOpaqueString(),
 		AccessToken: xid.New().String(),
 		TokenType:   "Bearer",
 		ExpiresAt:   util.GetTimeAsMsSinceEpoch(time.Now().Add(1 * time.Minute)),
@@ -766,7 +782,7 @@ func TestValidateOIDCToken(t *testing.T) {
 		},
 	}
 	token := oidcToken{
-		Cookie:      xid.New().String(),
+		Cookie:      util.GenerateOpaqueString(),
 		AccessToken: xid.New().String(),
 		ExpiresAt:   util.GetTimeAsMsSinceEpoch(time.Now().Add(-2 * time.Minute)),
 	}
@@ -782,8 +798,8 @@ func TestValidateOIDCToken(t *testing.T) {
 
 	server.tokenAuth = jwtauth.New("PS256", util.GenerateRandomBytes(32), nil)
 	token = oidcToken{
-		Cookie:      xid.New().String(),
-		AccessToken: xid.New().String(),
+		Cookie:      util.GenerateOpaqueString(),
+		AccessToken: util.GenerateUniqueID(),
 	}
 	oidcMgr.addToken(token)
 	rr = httptest.NewRecorder()
@@ -797,7 +813,7 @@ func TestValidateOIDCToken(t *testing.T) {
 	assert.Len(t, oidcMgr.tokens, 0)
 
 	token = oidcToken{
-		Cookie:      xid.New().String(),
+		Cookie:      util.GenerateOpaqueString(),
 		AccessToken: xid.New().String(),
 		Role:        "admin",
 	}
@@ -890,7 +906,8 @@ func TestOIDCToken(t *testing.T) {
 		},
 		Filters: dataprovider.UserFilters{
 			BaseUserFilters: sdk.BaseUserFilters{
-				DeniedProtocols: []string{common.ProtocolHTTP},
+				DeniedProtocols:    []string{common.ProtocolHTTP},
+				DeniedLoginMethods: []string{dataprovider.LoginMethodPassword},
 			},
 		},
 	}
@@ -1091,7 +1108,7 @@ func TestMemoryOIDCManager(t *testing.T) {
 		AccessToken: xid.New().String(),
 		Nonce:       xid.New().String(),
 		SessionID:   xid.New().String(),
-		Cookie:      xid.New().String(),
+		Cookie:      util.GenerateOpaqueString(),
 		Username:    xid.New().String(),
 		Role:        "admin",
 		Permissions: []string{dataprovider.PermAdminAny},
@@ -1141,7 +1158,7 @@ func TestMemoryOIDCManager(t *testing.T) {
 	token.UsedAt = usedAt
 	oidcMgr.tokens[token.Cookie] = token
 	newToken := oidcToken{
-		Cookie: xid.New().String(),
+		Cookie: util.GenerateOpaqueString(),
 	}
 	oidcMgr.addToken(newToken)
 	oidcMgr.cleanup()
@@ -1165,18 +1182,18 @@ func TestOIDCEvMgrIntegration(t *testing.T) {
 	// add a special chars to check json replacer
 	username := `test_"oidc_eventmanager`
 	u := map[string]any{
-		"username": "{{Name}}",
+		"username": "{{.Name}}",
 		"status":   1,
-		"home_dir": filepath.Join(os.TempDir(), "{{IDPFieldcustom1.sub}}"),
+		"home_dir": filepath.Join(os.TempDir(), "{{.IDPFieldcustom1.sub}}"),
 		"permissions": map[string][]string{
 			"/": {dataprovider.PermAny},
 		},
-		"description": "{{IDPFieldcustom2}}",
+		"description": "{{.IDPFieldcustom2}}",
 	}
 	userTmpl, err := json.Marshal(u)
 	require.NoError(t, err)
 	a := map[string]any{
-		"username":    "{{Name}}",
+		"username":    "{{.Name}}",
 		"status":      1,
 		"permissions": []string{dataprovider.PermAdminAny},
 	}
@@ -1246,7 +1263,7 @@ func TestOIDCEvMgrIntegration(t *testing.T) {
 		Nonce:  authReq.Nonce,
 		Expiry: time.Now().Add(5 * time.Minute),
 	}
-	setIDTokenClaims(idToken, []byte(`{"preferred_username":"`+util.JSONEscape(username)+`","custom1":{"sub":"val1"},"custom2":"desc"}`))
+	setIDTokenClaims(idToken, []byte(`{"preferred_username":"`+util.JSONEscape(username)+`","custom1":{"sub":"val1"},"custom2":"desc"}`)) //nolint:goconst
 	server.binding.OIDC.verifier = &mockOIDCVerifier{
 		err:   nil,
 		token: idToken,
@@ -1532,7 +1549,7 @@ func TestOIDCWithLoginFormsDisabled(t *testing.T) {
 
 	server := getTestOIDCServer()
 	server.binding.OIDC.ImplicitRoles = true
-	server.binding.EnabledLoginMethods = 3
+	server.binding.DisabledLoginMethods = 12
 	server.binding.EnableWebAdmin = true
 	server.binding.EnableWebClient = true
 	err := server.binding.OIDC.initialize()
@@ -1573,12 +1590,9 @@ func TestOIDCWithLoginFormsDisabled(t *testing.T) {
 		tokenCookie = k
 	}
 	// we should be able to create admins without setting a password
-	if csrfTokenAuth == nil {
-		csrfTokenAuth = jwtauth.New(jwa.HS256.String(), util.GenerateRandomBytes(32), nil)
-	}
 	adminUsername := "testAdmin"
 	form := make(url.Values)
-	form.Set(csrfFormToken, createCSRFToken(""))
+	form.Set(csrfFormToken, createCSRFToken(rr, r, server.csrfTokenAuth, tokenCookie, webBaseAdminPath))
 	form.Set("username", adminUsername)
 	form.Set("password", "")
 	form.Set("status", "1")
@@ -1650,7 +1664,7 @@ func TestDbOIDCManager(t *testing.T) {
 	}
 
 	token := oidcToken{
-		Cookie:       xid.New().String(),
+		Cookie:       util.GenerateOpaqueString(),
 		AccessToken:  xid.New().String(),
 		TokenType:    "Bearer",
 		RefreshToken: xid.New().String(),

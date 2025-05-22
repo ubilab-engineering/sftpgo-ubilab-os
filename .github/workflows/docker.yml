@@ -33,7 +33,7 @@ jobs:
             optional_deps: true
     steps:
       - name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Gather image information
         id: info
@@ -42,7 +42,7 @@ jobs:
           DOCKERFILE=Dockerfile
           MINOR=""
           MAJOR=""
-          FEATURES="nopgxregisterdefaulttypes"
+          FEATURES="nopgxregisterdefaulttypes,disable_grpc_modules"
           if [ "${{ github.event_name }}" = "schedule" ]; then
             VERSION=nightly
           elif [[ $GITHUB_REF == refs/tags/* ]]; then
@@ -141,21 +141,21 @@ jobs:
           OPTIONAL_DEPS: ${{ matrix.optional_deps }}
 
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@v2
+        uses: docker/setup-qemu-action@v3
 
       - name: Set up builder
-        uses: docker/setup-buildx-action@v2
+        uses: docker/setup-buildx-action@v3
         id: builder
 
       - name: Login to Docker Hub
-        uses: docker/login-action@v2
+        uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
         if: ${{ github.event_name != 'pull_request' }}
 
       - name: Login to GitHub Container Registry
-        uses: docker/login-action@v2
+        uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.repository_owner }}
@@ -163,7 +163,7 @@ jobs:
         if: ${{ github.event_name != 'pull_request' }}
 
       - name: Build and push
-        uses: docker/build-push-action@v4
+        uses: docker/build-push-action@v6
         with:
           context: .
           builder: ${{ steps.builder.outputs.name }}
@@ -178,7 +178,7 @@ jobs:
             FEATURES=${{ steps.info.outputs.features }}
           labels: |
             org.opencontainers.image.title=SFTPGo
-            org.opencontainers.image.description=Fully featured and highly configurable SFTP server with optional HTTP, FTP/S and WebDAV support
+            org.opencontainers.image.description=Full-featured and highly configurable file transfer server: SFTP, HTTP/S,FTP/S, WebDAV
             org.opencontainers.image.url=https://github.com/drakkan/sftpgo
             org.opencontainers.image.documentation=https://github.com/drakkan/sftpgo/blob/${{ github.sha }}/docker/README.md
             org.opencontainers.image.source=https://github.com/drakkan/sftpgo

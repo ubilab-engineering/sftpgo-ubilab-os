@@ -1,4 +1,4 @@
-// Copyright (C) 2019-2023 Nicola Murino
+// Copyright (C) 2019 Nicola Murino
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published
@@ -22,6 +22,7 @@ import (
 	"net"
 	"os"
 	"path"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -72,11 +73,13 @@ const (
 	PermChown = "chown"
 	// changing file or directory access and modification time is allowed
 	PermChtimes = "chtimes"
+	// copying files or directories is allowed
+	PermCopy = "copy"
 )
 
 // Available login methods
 const (
-	LoginMethodNoAuthTryed            = "no_auth_tryed"
+	LoginMethodNoAuthTried            = "no_auth_tried"
 	LoginMethodPassword               = "password"
 	SSHLoginMethodPassword            = "password-over-SSH"
 	SSHLoginMethodPublicKey           = "publickey"
@@ -121,6 +124,8 @@ type UserFilters struct {
 	sdk.BaseUserFilters
 	// User must change password from WebClient/REST API at next login.
 	RequirePasswordChange bool `json:"require_password_change,omitempty"`
+	// AdditionalEmails defines additional email addresses
+	AdditionalEmails []string `json:"additional_emails,omitempty"`
 	// Time-based one time passwords configuration
 	TOTPConfig UserTOTPConfig `json:"totp_config,omitempty"`
 	// Recovery codes to use if the user loses access to their second factor auth device.
@@ -173,7 +178,7 @@ func (u *User) getRootFs(connectionID string) (fs vfs.Fs, err error) {
 	case sdk.HTTPFilesystemProvider:
 		return vfs.NewHTTPFs(connectionID, u.GetHomeDir(), "", u.FsConfig.HTTPConfig)
 	default:
-		return vfs.NewOsFs(connectionID, u.GetHomeDir(), ""), nil
+		return vfs.NewOsFs(connectionID, u.GetHomeDir(), "", &u.FsConfig.OSConfig), nil
 	}
 }
 
@@ -218,7 +223,7 @@ func (u *User) checkLocalHomeDir(connectionID string) {
 	case sdk.LocalFilesystemProvider, sdk.CryptedFilesystemProvider:
 		return
 	default:
-		osFs := vfs.NewOsFs(connectionID, u.GetHomeDir(), "")
+		osFs := vfs.NewOsFs(connectionID, u.GetHomeDir(), "", nil)
 		osFs.CheckRootPath(u.Username, u.GetUID(), u.GetGID())
 	}
 }
@@ -333,7 +338,31 @@ func (u *User) isFsEqual(other *User) bool {
 	return true
 }
 
-// CheckLoginConditions checks if the user is active and not expired
+func (u *User) isTimeBasedAccessAllowed(when time.Time) bool {
+	if len(u.Filters.AccessTime) == 0 {
+		return true
+	}
+	if when.IsZero() {
+		when = time.Now()
+	}
+	if UseLocalTime() {
+		when = when.Local()
+	} else {
+		when = when.UTC()
+	}
+	weekDay := when.Weekday()
+	hhMM := when.Format("15:04")
+	for _, p := range u.Filters.AccessTime {
+		if p.DayOfWeek == int(weekDay) {
+			if hhMM >= p.From && hhMM <= p.To {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// CheckLoginConditions checks user access restrictions
 func (u *User) CheckLoginConditions() error {
 	if u.Status < 1 {
 		return fmt.Errorf("user %q is disabled", u.Username)
@@ -342,7 +371,10 @@ func (u *User) CheckLoginConditions() error {
 		return fmt.Errorf("user %q is expired, expiration timestamp: %v current timestamp: %v", u.Username,
 			u.ExpirationDate, util.GetTimeAsMsSinceEpoch(time.Now()))
 	}
-	return nil
+	if u.isTimeBasedAccessAllowed(time.Now()) {
+		return nil
+	}
+	return errors.New("access is not allowed at this time")
 }
 
 // hideConfidentialData hides user confidential data
@@ -357,6 +389,30 @@ func (u *User) hideConfidentialData() {
 			code.Secret.Hide()
 		}
 	}
+}
+
+// CheckMaxShareExpiration returns an error if the share expiration exceed the
+// maximum allowed date.
+func (u *User) CheckMaxShareExpiration(expiresAt time.Time) error {
+	if u.Filters.MaxSharesExpiration == 0 {
+		return nil
+	}
+	maxAllowedExpiration := time.Now().Add(24 * time.Hour * time.Duration(u.Filters.MaxSharesExpiration+1))
+	maxAllowedExpiration = time.Date(maxAllowedExpiration.Year(), maxAllowedExpiration.Month(),
+		maxAllowedExpiration.Day(), 0, 0, 0, 0, maxAllowedExpiration.Location())
+	if util.GetTimeAsMsSinceEpoch(expiresAt) == 0 || expiresAt.After(maxAllowedExpiration) {
+		return util.NewValidationError(fmt.Sprintf("the share must expire before %s", maxAllowedExpiration.Format(time.DateOnly)))
+	}
+	return nil
+}
+
+// GetEmailAddresses returns all the email addresses.
+func (u *User) GetEmailAddresses() []string {
+	var res []string
+	if u.Email != "" {
+		res = append(res, u.Email)
+	}
+	return slices.Concat(res, u.Filters.AdditionalEmails)
 }
 
 // GetSubDirPermissions returns permissions for sub directories
@@ -453,9 +509,11 @@ func (u *User) IsPasswordHashed() bool {
 	return util.IsStringPrefixInSlice(u.Password, hashPwdPrefixes)
 }
 
-// IsTLSUsernameVerificationEnabled returns true if we need to extract the username
-// from the client TLS certificate
-func (u *User) IsTLSUsernameVerificationEnabled() bool {
+// IsTLSVerificationEnabled returns true if we need to check the TLS authentication
+func (u *User) IsTLSVerificationEnabled() bool {
+	if len(u.Filters.TLSCerts) > 0 {
+		return true
+	}
 	if u.Filters.TLSUsername != "" {
 		return u.Filters.TLSUsername != sdk.TLSUsernameNone
 	}
@@ -603,27 +661,6 @@ func (u *User) GetVirtualFolderForPath(virtualPath string) (vfs.VirtualFolder, e
 	return folder, errNoMatchingVirtualFolder
 }
 
-// CheckMetadataConsistency checks the consistency between the metadata stored
-// in the configured metadata plugin and the filesystem
-func (u *User) CheckMetadataConsistency() error {
-	fs, err := u.getRootFs(xid.New().String())
-	if err != nil {
-		return err
-	}
-	defer fs.Close()
-
-	if err = fs.CheckMetadata(); err != nil {
-		return err
-	}
-	for idx := range u.VirtualFolders {
-		v := &u.VirtualFolders[idx]
-		if err = v.CheckMetadataConsistency(); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
 // ScanQuota scans the user home dir and virtual folders, included in its quota,
 // and returns the number of files and their size
 func (u *User) ScanQuota() (int, int64, error) {
@@ -659,8 +696,7 @@ func (u *User) GetVirtualFoldersInPath(virtualPath string) map[string]bool {
 	result := make(map[string]bool)
 
 	for idx := range u.VirtualFolders {
-		v := &u.VirtualFolders[idx]
-		dirsForPath := util.GetDirsForVirtualPath(v.VirtualPath)
+		dirsForPath := util.GetDirsForVirtualPath(u.VirtualFolders[idx].VirtualPath)
 		for index := range dirsForPath {
 			d := dirsForPath[index]
 			if d == "/" {
@@ -699,13 +735,34 @@ func (u *User) hasVirtualDirs() bool {
 	return numFolders > 0
 }
 
-// FilterListDir adds virtual folders and remove hidden items from the given files list
+// GetVirtualFoldersInfo returns []os.FileInfo for virtual folders
+func (u *User) GetVirtualFoldersInfo(virtualPath string) []os.FileInfo {
+	filter := u.getPatternsFilterForPath(virtualPath)
+	if !u.hasVirtualDirs() && filter.DenyPolicy != sdk.DenyPolicyHide {
+		return nil
+	}
+	vdirs := u.GetVirtualFoldersInPath(virtualPath)
+	result := make([]os.FileInfo, 0, len(vdirs))
+
+	for dir := range u.GetVirtualFoldersInPath(virtualPath) {
+		dirName := path.Base(dir)
+		if filter.DenyPolicy == sdk.DenyPolicyHide {
+			if !filter.CheckAllowed(dirName) {
+				continue
+			}
+		}
+		result = append(result, vfs.NewFileInfo(dirName, true, 0, time.Unix(0, 0), false))
+	}
+
+	return result
+}
+
+// FilterListDir removes hidden items from the given files list
 func (u *User) FilterListDir(dirContents []os.FileInfo, virtualPath string) []os.FileInfo {
 	filter := u.getPatternsFilterForPath(virtualPath)
 	if !u.hasVirtualDirs() && filter.DenyPolicy != sdk.DenyPolicyHide {
 		return dirContents
 	}
-
 	vdirs := make(map[string]bool)
 	for dir := range u.GetVirtualFoldersInPath(virtualPath) {
 		dirName := path.Base(dir)
@@ -718,36 +775,24 @@ func (u *User) FilterListDir(dirContents []os.FileInfo, virtualPath string) []os
 	}
 
 	validIdx := 0
-	for index, fi := range dirContents {
-		for dir := range vdirs {
-			if fi.Name() == dir {
-				if !fi.IsDir() {
-					fi = vfs.NewFileInfo(dir, true, 0, time.Unix(0, 0), false)
-					dirContents[index] = fi
+	for idx := range dirContents {
+		fi := dirContents[idx]
+
+		if fi.Name() != "." && fi.Name() != ".." {
+			if _, ok := vdirs[fi.Name()]; ok {
+				continue
+			}
+			if filter.DenyPolicy == sdk.DenyPolicyHide {
+				if !filter.CheckAllowed(fi.Name()) {
+					continue
 				}
-				delete(vdirs, dir)
 			}
 		}
-		if filter.DenyPolicy == sdk.DenyPolicyHide {
-			if filter.CheckAllowed(fi.Name()) {
-				dirContents[validIdx] = fi
-				validIdx++
-			}
-		}
+		dirContents[validIdx] = fi
+		validIdx++
 	}
 
-	if filter.DenyPolicy == sdk.DenyPolicyHide {
-		for idx := validIdx; idx < len(dirContents); idx++ {
-			dirContents[idx] = nil
-		}
-		dirContents = dirContents[:validIdx]
-	}
-
-	for dir := range vdirs {
-		fi := vfs.NewFileInfo(dir, true, 0, time.Unix(0, 0), false)
-		dirContents = append(dirContents, fi)
-	}
-	return dirContents
+	return dirContents[:validIdx]
 }
 
 // IsMappedPath returns true if the specified filesystem path has a virtual folder mapping.
@@ -811,20 +856,20 @@ func (u *User) HasPermissionsInside(virtualPath string) bool {
 // HasPerm returns true if the user has the given permission or any permission
 func (u *User) HasPerm(permission, path string) bool {
 	perms := u.GetPermissionsForPath(path)
-	if util.Contains(perms, PermAny) {
+	if slices.Contains(perms, PermAny) {
 		return true
 	}
-	return util.Contains(perms, permission)
+	return slices.Contains(perms, permission)
 }
 
 // HasAnyPerm returns true if the user has at least one of the given permissions
 func (u *User) HasAnyPerm(permissions []string, path string) bool {
 	perms := u.GetPermissionsForPath(path)
-	if util.Contains(perms, PermAny) {
+	if slices.Contains(perms, PermAny) {
 		return true
 	}
 	for _, permission := range permissions {
-		if util.Contains(perms, permission) {
+		if slices.Contains(perms, permission) {
 			return true
 		}
 	}
@@ -834,11 +879,11 @@ func (u *User) HasAnyPerm(permissions []string, path string) bool {
 // HasPerms returns true if the user has all the given permissions
 func (u *User) HasPerms(permissions []string, path string) bool {
 	perms := u.GetPermissionsForPath(path)
-	if util.Contains(perms, PermAny) {
+	if slices.Contains(perms, PermAny) {
 		return true
 	}
 	for _, permission := range permissions {
-		if !util.Contains(perms, permission) {
+		if !slices.Contains(perms, permission) {
 			return false
 		}
 	}
@@ -894,40 +939,28 @@ func (u *User) HasNoQuotaRestrictions(checkFiles bool) bool {
 }
 
 // IsLoginMethodAllowed returns true if the specified login method is allowed
-func (u *User) IsLoginMethodAllowed(loginMethod, protocol string, partialSuccessMethods []string) bool {
+func (u *User) IsLoginMethodAllowed(loginMethod, protocol string) bool {
 	if len(u.Filters.DeniedLoginMethods) == 0 {
 		return true
 	}
-	if len(partialSuccessMethods) == 1 {
-		for _, method := range u.GetNextAuthMethods(partialSuccessMethods, true) {
-			if method == loginMethod {
-				return true
-			}
-		}
-	}
-	if util.Contains(u.Filters.DeniedLoginMethods, loginMethod) {
+	if slices.Contains(u.Filters.DeniedLoginMethods, loginMethod) {
 		return false
 	}
 	if protocol == protocolSSH && loginMethod == LoginMethodPassword {
-		if util.Contains(u.Filters.DeniedLoginMethods, SSHLoginMethodPassword) {
+		if slices.Contains(u.Filters.DeniedLoginMethods, SSHLoginMethodPassword) {
 			return false
 		}
 	}
 	return true
 }
 
-// GetNextAuthMethods returns the list of authentications methods that
-// can continue for multi-step authentication
-func (u *User) GetNextAuthMethods(partialSuccessMethods []string, isPasswordAuthEnabled bool) []string {
+// GetNextAuthMethods returns the list of authentications methods that can
+// continue for multi-step authentication. We call this method after a
+// successful public key authentication.
+func (u *User) GetNextAuthMethods() []string {
 	var methods []string
-	if len(partialSuccessMethods) != 1 {
-		return methods
-	}
-	if partialSuccessMethods[0] != SSHLoginMethodPublicKey {
-		return methods
-	}
 	for _, method := range u.GetAllowedLoginMethods() {
-		if method == SSHLoginMethodKeyAndPassword && isPasswordAuthEnabled {
+		if method == SSHLoginMethodKeyAndPassword {
 			methods = append(methods, LoginMethodPassword)
 		}
 		if method == SSHLoginMethodKeyAndKeyboardInt {
@@ -942,19 +975,16 @@ func (u *User) GetNextAuthMethods(partialSuccessMethods []string, isPasswordAuth
 // We support publickey+password and publickey+keyboard-interactive, so
 // only publickey can returns partial success.
 // We can have partial success if only multi-step Auth methods are enabled
-func (u *User) IsPartialAuth(loginMethod string) bool {
-	if loginMethod != SSHLoginMethodPublicKey {
-		return false
-	}
+func (u *User) IsPartialAuth() bool {
 	for _, method := range u.GetAllowedLoginMethods() {
 		if method == LoginMethodTLSCertificate || method == LoginMethodTLSCertificateAndPwd ||
 			method == SSHLoginMethodPassword {
 			continue
 		}
-		if method == LoginMethodPassword && util.Contains(u.Filters.DeniedLoginMethods, SSHLoginMethodPassword) {
+		if method == LoginMethodPassword && slices.Contains(u.Filters.DeniedLoginMethods, SSHLoginMethodPassword) {
 			continue
 		}
-		if !util.Contains(SSHMultiStepsLoginMethods, method) {
+		if !slices.Contains(SSHMultiStepsLoginMethods, method) {
 			return false
 		}
 	}
@@ -968,7 +998,7 @@ func (u *User) GetAllowedLoginMethods() []string {
 		if method == SSHLoginMethodPassword {
 			continue
 		}
-		if !util.Contains(u.Filters.DeniedLoginMethods, method) {
+		if !slices.Contains(u.Filters.DeniedLoginMethods, method) {
 			allowedMethods = append(allowedMethods, method)
 		}
 	}
@@ -981,9 +1011,14 @@ func (u *User) getPatternsFilterForPath(virtualPath string) sdk.PatternsFilter {
 		return filter
 	}
 	dirsForPath := util.GetDirsForVirtualPath(virtualPath)
-	for _, dir := range dirsForPath {
+	for idx, dir := range dirsForPath {
 		for _, f := range u.Filters.FilePatterns {
 			if f.Path == dir {
+				if idx > 0 && len(f.AllowedPatterns) > 0 && len(f.DeniedPatterns) > 0 && f.DeniedPatterns[0] == "*" {
+					if f.CheckAllowed(path.Base(dirsForPath[idx-1])) {
+						return filter
+					}
+				}
 				filter = f
 				break
 			}
@@ -1004,7 +1039,7 @@ func (u *User) isDirHidden(virtualPath string) bool {
 			return false
 		}
 		filter := u.getPatternsFilterForPath(dirPath)
-		if filter.DenyPolicy == sdk.DenyPolicyHide {
+		if filter.DenyPolicy == sdk.DenyPolicyHide && filter.Path != dirPath {
 			if !filter.CheckAllowed(path.Base(dirPath)) {
 				return true
 			}
@@ -1033,58 +1068,72 @@ func (u *User) IsFileAllowed(virtualPath string) (bool, int) {
 
 // CanManageMFA returns true if the user can add a multi-factor authentication configuration
 func (u *User) CanManageMFA() bool {
-	if util.Contains(u.Filters.WebClient, sdk.WebClientMFADisabled) {
+	if slices.Contains(u.Filters.WebClient, sdk.WebClientMFADisabled) {
 		return false
 	}
 	return len(mfa.GetAvailableTOTPConfigs()) > 0
 }
 
-func (u *User) isExternalAuthCached() bool {
+func (u *User) skipExternalAuth() bool {
+	if u.Filters.Hooks.ExternalAuthDisabled {
+		return true
+	}
 	if u.ID <= 0 {
 		return false
 	}
 	if u.Filters.ExternalAuthCacheTime <= 0 {
 		return false
 	}
-
 	return isLastActivityRecent(u.LastLogin, time.Duration(u.Filters.ExternalAuthCacheTime)*time.Second)
 }
 
 // CanManageShares returns true if the user can add, update and list shares
 func (u *User) CanManageShares() bool {
-	return !util.Contains(u.Filters.WebClient, sdk.WebClientSharesDisabled)
+	return !slices.Contains(u.Filters.WebClient, sdk.WebClientSharesDisabled)
 }
 
 // CanResetPassword returns true if this user is allowed to reset its password
 func (u *User) CanResetPassword() bool {
-	return !util.Contains(u.Filters.WebClient, sdk.WebClientPasswordResetDisabled)
+	return !slices.Contains(u.Filters.WebClient, sdk.WebClientPasswordResetDisabled)
 }
 
 // CanChangePassword returns true if this user is allowed to change its password
 func (u *User) CanChangePassword() bool {
-	return !util.Contains(u.Filters.WebClient, sdk.WebClientPasswordChangeDisabled)
+	return !slices.Contains(u.Filters.WebClient, sdk.WebClientPasswordChangeDisabled)
 }
 
 // CanChangeAPIKeyAuth returns true if this user is allowed to enable/disable API key authentication
 func (u *User) CanChangeAPIKeyAuth() bool {
-	return !util.Contains(u.Filters.WebClient, sdk.WebClientAPIKeyAuthChangeDisabled)
+	return !slices.Contains(u.Filters.WebClient, sdk.WebClientAPIKeyAuthChangeDisabled)
 }
 
 // CanChangeInfo returns true if this user is allowed to change its info such as email and description
 func (u *User) CanChangeInfo() bool {
-	return !util.Contains(u.Filters.WebClient, sdk.WebClientInfoChangeDisabled)
+	return !slices.Contains(u.Filters.WebClient, sdk.WebClientInfoChangeDisabled)
 }
 
 // CanManagePublicKeys returns true if this user is allowed to manage public keys
-// from the web client. Used in web client UI
+// from the WebClient. Used in WebClient UI
 func (u *User) CanManagePublicKeys() bool {
-	return !util.Contains(u.Filters.WebClient, sdk.WebClientPubKeyChangeDisabled)
+	return !slices.Contains(u.Filters.WebClient, sdk.WebClientPubKeyChangeDisabled)
+}
+
+// CanManageTLSCerts returns true if this user is allowed to manage TLS certificates
+// from the WebClient. Used in WebClient UI
+func (u *User) CanManageTLSCerts() bool {
+	return !slices.Contains(u.Filters.WebClient, sdk.WebClientTLSCertChangeDisabled)
+}
+
+// CanUpdateProfile returns true if the user is allowed to update the profile.
+// Used in WebClient UI
+func (u *User) CanUpdateProfile() bool {
+	return u.CanManagePublicKeys() || u.CanChangeAPIKeyAuth() || u.CanChangeInfo() || u.CanManageTLSCerts()
 }
 
 // CanAddFilesFromWeb returns true if the client can add files from the web UI.
 // The specified target is the directory where the files must be uploaded
 func (u *User) CanAddFilesFromWeb(target string) bool {
-	if util.Contains(u.Filters.WebClient, sdk.WebClientWriteDisabled) {
+	if slices.Contains(u.Filters.WebClient, sdk.WebClientWriteDisabled) {
 		return false
 	}
 	return u.HasPerm(PermUpload, target) || u.HasPerm(PermOverwrite, target)
@@ -1093,7 +1142,7 @@ func (u *User) CanAddFilesFromWeb(target string) bool {
 // CanAddDirsFromWeb returns true if the client can add directories from the web UI.
 // The specified target is the directory where the new directory must be created
 func (u *User) CanAddDirsFromWeb(target string) bool {
-	if util.Contains(u.Filters.WebClient, sdk.WebClientWriteDisabled) {
+	if slices.Contains(u.Filters.WebClient, sdk.WebClientWriteDisabled) {
 		return false
 	}
 	return u.HasPerm(PermCreateDirs, target)
@@ -1102,7 +1151,7 @@ func (u *User) CanAddDirsFromWeb(target string) bool {
 // CanRenameFromWeb returns true if the client can rename objects from the web UI.
 // The specified src and dest are the source and target directories for the rename.
 func (u *User) CanRenameFromWeb(src, dest string) bool {
-	if util.Contains(u.Filters.WebClient, sdk.WebClientWriteDisabled) {
+	if slices.Contains(u.Filters.WebClient, sdk.WebClientWriteDisabled) {
 		return false
 	}
 	return u.HasAnyPerm(permsRenameAny, src) && u.HasAnyPerm(permsRenameAny, dest)
@@ -1111,10 +1160,41 @@ func (u *User) CanRenameFromWeb(src, dest string) bool {
 // CanDeleteFromWeb returns true if the client can delete objects from the web UI.
 // The specified target is the parent directory for the object to delete
 func (u *User) CanDeleteFromWeb(target string) bool {
-	if util.Contains(u.Filters.WebClient, sdk.WebClientWriteDisabled) {
+	if slices.Contains(u.Filters.WebClient, sdk.WebClientWriteDisabled) {
 		return false
 	}
 	return u.HasAnyPerm(permsDeleteAny, target)
+}
+
+// CanCopyFromWeb returns true if the client can copy objects from the web UI.
+// The specified src and dest are the source and target directories for the copy.
+func (u *User) CanCopyFromWeb(src, dest string) bool {
+	if slices.Contains(u.Filters.WebClient, sdk.WebClientWriteDisabled) {
+		return false
+	}
+	if !u.HasPerm(PermListItems, src) {
+		return false
+	}
+	if !u.HasPerm(PermDownload, src) {
+		return false
+	}
+	return u.HasPerm(PermCopy, src) && u.HasPerm(PermCopy, dest)
+}
+
+// InactivityDays returns the number of days of inactivity
+func (u *User) InactivityDays(when time.Time) int {
+	if when.IsZero() {
+		when = time.Now()
+	}
+	lastActivity := u.LastLogin
+	if lastActivity == 0 {
+		lastActivity = u.CreatedAt
+	}
+	if lastActivity == 0 {
+		// unable to determine inactivity
+		return 0
+	}
+	return int(float64(when.Sub(util.GetTimeFromMsecSinceEpoch(lastActivity))) / float64(24*time.Hour))
 }
 
 // PasswordExpiresIn returns the number of days before the password expires.
@@ -1149,7 +1229,7 @@ func (u *User) MustSetSecondFactor() bool {
 			return true
 		}
 		for _, p := range u.Filters.TwoFactorAuthProtocols {
-			if !util.Contains(u.Filters.TOTPConfig.Protocols, p) {
+			if !slices.Contains(u.Filters.TOTPConfig.Protocols, p) {
 				return true
 			}
 		}
@@ -1160,18 +1240,18 @@ func (u *User) MustSetSecondFactor() bool {
 // MustSetSecondFactorForProtocol returns true if the user must set a second factor authentication
 // for the specified protocol
 func (u *User) MustSetSecondFactorForProtocol(protocol string) bool {
-	if util.Contains(u.Filters.TwoFactorAuthProtocols, protocol) {
+	if slices.Contains(u.Filters.TwoFactorAuthProtocols, protocol) {
 		if !u.Filters.TOTPConfig.Enabled {
 			return true
 		}
-		if !util.Contains(u.Filters.TOTPConfig.Protocols, protocol) {
+		if !slices.Contains(u.Filters.TOTPConfig.Protocols, protocol) {
 			return true
 		}
 	}
 	return false
 }
 
-// GetSignature returns a signature for this admin.
+// GetSignature returns a signature for this user.
 // It will change after an update
 func (u *User) GetSignature() string {
 	return strconv.FormatInt(u.UpdatedAt, 10)
@@ -1287,39 +1367,12 @@ func (u *User) HasQuotaRestrictions() bool {
 
 // HasTransferQuotaRestrictions returns true if there are any data transfer restrictions
 func (u *User) HasTransferQuotaRestrictions() bool {
-	if len(u.Filters.DataTransferLimits) > 0 {
-		return true
-	}
 	return u.UploadDataTransfer > 0 || u.TotalDataTransfer > 0 || u.DownloadDataTransfer > 0
 }
 
 // GetDataTransferLimits returns upload, download and total data transfer limits
-func (u *User) GetDataTransferLimits(clientIP string) (int64, int64, int64) {
+func (u *User) GetDataTransferLimits() (int64, int64, int64) {
 	var total, ul, dl int64
-	if len(u.Filters.DataTransferLimits) > 0 {
-		ip := net.ParseIP(clientIP)
-		if ip != nil {
-			for _, limit := range u.Filters.DataTransferLimits {
-				for _, source := range limit.Sources {
-					_, ipNet, err := net.ParseCIDR(source)
-					if err == nil {
-						if ipNet.Contains(ip) {
-							if limit.TotalDataTransfer > 0 {
-								total = limit.TotalDataTransfer * 1048576
-							}
-							if limit.DownloadDataTransfer > 0 {
-								dl = limit.DownloadDataTransfer * 1048576
-							}
-							if limit.UploadDataTransfer > 0 {
-								ul = limit.UploadDataTransfer * 1048576
-							}
-							return ul, dl, total
-						}
-					}
-				}
-			}
-		}
-	}
 	if u.TotalDataTransfer > 0 {
 		total = u.TotalDataTransfer * 1048576
 	}
@@ -1330,205 +1383,6 @@ func (u *User) GetDataTransferLimits(clientIP string) (int64, int64, int64) {
 		ul = u.UploadDataTransfer * 1048576
 	}
 	return ul, dl, total
-}
-
-// GetQuotaSummary returns used quota and limits if defined
-func (u *User) GetQuotaSummary() string {
-	var sb strings.Builder
-
-	addSection := func() {
-		if sb.Len() > 0 {
-			sb.WriteString(". ")
-		}
-	}
-
-	if u.UsedQuotaFiles > 0 || u.QuotaFiles > 0 {
-		sb.WriteString(fmt.Sprintf("Files: %v", u.UsedQuotaFiles))
-		if u.QuotaFiles > 0 {
-			sb.WriteString(fmt.Sprintf("/%v", u.QuotaFiles))
-		}
-	}
-	if u.UsedQuotaSize > 0 || u.QuotaSize > 0 {
-		addSection()
-		sb.WriteString(fmt.Sprintf("Size: %v", util.ByteCountIEC(u.UsedQuotaSize)))
-		if u.QuotaSize > 0 {
-			sb.WriteString(fmt.Sprintf("/%v", util.ByteCountIEC(u.QuotaSize)))
-		}
-	}
-	if u.TotalDataTransfer > 0 {
-		addSection()
-		total := u.UsedDownloadDataTransfer + u.UsedUploadDataTransfer
-		sb.WriteString(fmt.Sprintf("Transfer: %v/%v", util.ByteCountIEC(total),
-			util.ByteCountIEC(u.TotalDataTransfer*1048576)))
-	}
-	if u.UploadDataTransfer > 0 {
-		addSection()
-		sb.WriteString(fmt.Sprintf("UL: %v/%v", util.ByteCountIEC(u.UsedUploadDataTransfer),
-			util.ByteCountIEC(u.UploadDataTransfer*1048576)))
-	}
-	if u.DownloadDataTransfer > 0 {
-		addSection()
-		sb.WriteString(fmt.Sprintf("DL: %v/%v", util.ByteCountIEC(u.UsedDownloadDataTransfer),
-			util.ByteCountIEC(u.DownloadDataTransfer*1048576)))
-	}
-	return sb.String()
-}
-
-// GetPermissionsAsString returns the user's permissions as comma separated string
-func (u *User) GetPermissionsAsString() string {
-	result := ""
-	for dir, perms := range u.Permissions {
-		dirPerms := strings.Join(perms, ", ")
-		dp := fmt.Sprintf("%q: %q", dir, dirPerms)
-		if dir == "/" {
-			if result != "" {
-				result = dp + ", " + result
-			} else {
-				result = dp
-			}
-		} else {
-			if result != "" {
-				result += ", "
-			}
-			result += dp
-		}
-	}
-	return result
-}
-
-// GetBandwidthAsString returns bandwidth limits if defines
-func (u *User) GetBandwidthAsString() string {
-	var sb strings.Builder
-	sb.WriteString("DL: ")
-	if u.DownloadBandwidth > 0 {
-		sb.WriteString(util.ByteCountIEC(u.DownloadBandwidth*1000) + "/s.")
-	} else {
-		sb.WriteString("unlimited.")
-	}
-	sb.WriteString(" UL: ")
-	if u.UploadBandwidth > 0 {
-		sb.WriteString(util.ByteCountIEC(u.UploadBandwidth*1000) + "/s.")
-	} else {
-		sb.WriteString("unlimited.")
-	}
-	return sb.String()
-}
-
-// GetMFAStatusAsString returns MFA status
-func (u *User) GetMFAStatusAsString() string {
-	if u.Filters.TOTPConfig.Enabled {
-		return strings.Join(u.Filters.TOTPConfig.Protocols, ", ")
-	}
-	return "Disabled"
-}
-
-// GetLastLoginAsString returns the last login as string
-func (u *User) GetLastLoginAsString() string {
-	if u.LastLogin > 0 {
-		return util.GetTimeFromMsecSinceEpoch(u.LastLogin).UTC().Format(iso8601UTCFormat)
-	}
-	return ""
-}
-
-// GetLastQuotaUpdateAsString returns the last quota update as string
-func (u *User) GetLastQuotaUpdateAsString() string {
-	if u.LastQuotaUpdate > 0 {
-		return util.GetTimeFromMsecSinceEpoch(u.LastQuotaUpdate).UTC().Format(iso8601UTCFormat)
-	}
-	return ""
-}
-
-// GetStorageDescrition returns the storage description
-func (u *User) GetStorageDescrition() string {
-	switch u.FsConfig.Provider {
-	case sdk.LocalFilesystemProvider:
-		return fmt.Sprintf("Local: %v", u.GetHomeDir())
-	case sdk.S3FilesystemProvider:
-		return fmt.Sprintf("S3: %v", u.FsConfig.S3Config.Bucket)
-	case sdk.GCSFilesystemProvider:
-		return fmt.Sprintf("GCS: %v", u.FsConfig.GCSConfig.Bucket)
-	case sdk.AzureBlobFilesystemProvider:
-		return fmt.Sprintf("AzBlob: %v", u.FsConfig.AzBlobConfig.Container)
-	case sdk.CryptedFilesystemProvider:
-		return fmt.Sprintf("Encrypted: %v", u.GetHomeDir())
-	case sdk.SFTPFilesystemProvider:
-		return fmt.Sprintf("SFTP: %v", u.FsConfig.SFTPConfig.Endpoint)
-	case sdk.HTTPFilesystemProvider:
-		return fmt.Sprintf("HTTP: %v", u.FsConfig.HTTPConfig.Endpoint)
-	default:
-		return ""
-	}
-}
-
-// GetGroupsAsString returns the user's groups as a string
-func (u *User) GetGroupsAsString() string {
-	if len(u.Groups) == 0 {
-		return ""
-	}
-	var groups []string
-	for _, g := range u.Groups {
-		if g.Type == sdk.GroupTypePrimary {
-			groups = append(groups, "")
-			copy(groups[1:], groups)
-			groups[0] = g.Name
-		} else {
-			groups = append(groups, g.Name)
-		}
-	}
-
-	return strings.Join(groups, ",")
-}
-
-// GetInfoString returns user's info as string.
-// Storage provider, number of public keys, max sessions, uid,
-// gid, denied and allowed IP/Mask are returned
-func (u *User) GetInfoString() string {
-	var result strings.Builder
-	if len(u.PublicKeys) > 0 {
-		result.WriteString(fmt.Sprintf("Public keys: %v. ", len(u.PublicKeys)))
-	}
-	if u.MaxSessions > 0 {
-		result.WriteString(fmt.Sprintf("Max sessions: %v. ", u.MaxSessions))
-	}
-	if u.UID > 0 {
-		result.WriteString(fmt.Sprintf("UID: %v. ", u.UID))
-	}
-	if u.GID > 0 {
-		result.WriteString(fmt.Sprintf("GID: %v. ", u.GID))
-	}
-	if len(u.Filters.DeniedLoginMethods) > 0 {
-		result.WriteString(fmt.Sprintf("Denied login methods: %v. ", strings.Join(u.Filters.DeniedLoginMethods, ",")))
-	}
-	if len(u.Filters.DeniedProtocols) > 0 {
-		result.WriteString(fmt.Sprintf("Denied protocols: %v. ", strings.Join(u.Filters.DeniedProtocols, ",")))
-	}
-	if len(u.Filters.DeniedIP) > 0 {
-		result.WriteString(fmt.Sprintf("Denied IP/Mask: %v. ", len(u.Filters.DeniedIP)))
-	}
-	if len(u.Filters.AllowedIP) > 0 {
-		result.WriteString(fmt.Sprintf("Allowed IP/Mask: %v", len(u.Filters.AllowedIP)))
-	}
-	return result.String()
-}
-
-// GetStatusAsString returns the user status as a string
-func (u *User) GetStatusAsString() string {
-	if u.ExpirationDate > 0 && u.ExpirationDate < util.GetTimeAsMsSinceEpoch(time.Now()) {
-		return "Expired"
-	}
-	if u.Status == 1 {
-		return "Active"
-	}
-	return "Inactive"
-}
-
-// GetExpirationDateAsString returns expiration date formatted as YYYY-MM-DD
-func (u *User) GetExpirationDateAsString() string {
-	if u.ExpirationDate > 0 {
-		t := util.GetTimeFromMsecSinceEpoch(u.ExpirationDate)
-		return t.Format("2006-01-02")
-	}
-	return ""
 }
 
 // GetAllowedIPAsString returns the allowed IP as comma separated string
@@ -1566,6 +1420,7 @@ func (u *User) CountUnusedRecoveryCodes() int {
 
 // SetEmptySecretsIfNil sets the secrets to empty if nil
 func (u *User) SetEmptySecretsIfNil() {
+	u.HasPassword = u.Password != ""
 	u.FsConfig.SetEmptySecretsIfNil()
 	for idx := range u.VirtualFolders {
 		vfolder := &u.VirtualFolders[idx]
@@ -1630,7 +1485,7 @@ func (u *User) applyGroupSettings(groupsMapping map[string]Group) {
 	for _, g := range u.Groups {
 		if g.Type == sdk.GroupTypePrimary {
 			if group, ok := groupsMapping[g.Name]; ok {
-				u.mergeWithPrimaryGroup(group, replacer)
+				u.mergeWithPrimaryGroup(&group, replacer)
 			} else {
 				providerLog(logger.LevelError, "mapping not found for user %s, group %s", u.Username, g.Name)
 			}
@@ -1640,7 +1495,7 @@ func (u *User) applyGroupSettings(groupsMapping map[string]Group) {
 	for _, g := range u.Groups {
 		if g.Type == sdk.GroupTypeSecondary {
 			if group, ok := groupsMapping[g.Name]; ok {
-				u.mergeAdditiveProperties(group, sdk.GroupTypeSecondary, replacer)
+				u.mergeAdditiveProperties(&group, sdk.GroupTypeSecondary, replacer)
 			} else {
 				providerLog(logger.LevelError, "mapping not found for user %s, group %s", u.Username, g.Name)
 			}
@@ -1673,24 +1528,26 @@ func (u *User) LoadAndApplyGroupSettings() error {
 	}
 	replacer := u.getGroupPlacehodersReplacer()
 	// make sure to always merge with the primary group first
-	for idx, g := range groups {
+	for idx := range groups {
+		g := groups[idx]
 		if g.Name == primaryGroupName {
-			u.mergeWithPrimaryGroup(g, replacer)
+			u.mergeWithPrimaryGroup(&g, replacer)
 			lastIdx := len(groups) - 1
 			groups[idx] = groups[lastIdx]
 			groups = groups[:lastIdx]
 			break
 		}
 	}
-	for _, g := range groups {
-		u.mergeAdditiveProperties(g, sdk.GroupTypeSecondary, replacer)
+	for idx := range groups {
+		g := groups[idx]
+		u.mergeAdditiveProperties(&g, sdk.GroupTypeSecondary, replacer)
 	}
 	u.removeDuplicatesAfterGroupMerge()
 	return nil
 }
 
 func (u *User) getGroupPlacehodersReplacer() *strings.Replacer {
-	return strings.NewReplacer("%username%", u.Username)
+	return strings.NewReplacer("%username%", u.Username, "%role%", u.Role)
 }
 
 func (u *User) replacePlaceholder(value string, replacer *strings.Replacer) string {
@@ -1717,12 +1574,31 @@ func (u *User) replaceFsConfigPlaceholders(fsConfig vfs.Filesystem, replacer *st
 	return fsConfig
 }
 
-func (u *User) mergeWithPrimaryGroup(group Group, replacer *strings.Replacer) {
+func (u *User) mergeCryptFsConfig(group *Group) {
+	if group.UserSettings.FsConfig.Provider == sdk.CryptedFilesystemProvider {
+		if u.FsConfig.CryptConfig.ReadBufferSize == 0 {
+			u.FsConfig.CryptConfig.ReadBufferSize = group.UserSettings.FsConfig.CryptConfig.ReadBufferSize
+		}
+		if u.FsConfig.CryptConfig.WriteBufferSize == 0 {
+			u.FsConfig.CryptConfig.WriteBufferSize = group.UserSettings.FsConfig.CryptConfig.WriteBufferSize
+		}
+	}
+}
+
+func (u *User) mergeWithPrimaryGroup(group *Group, replacer *strings.Replacer) {
 	if group.UserSettings.HomeDir != "" {
 		u.HomeDir = u.replacePlaceholder(group.UserSettings.HomeDir, replacer)
 	}
 	if group.UserSettings.FsConfig.Provider != 0 {
 		u.FsConfig = u.replaceFsConfigPlaceholders(group.UserSettings.FsConfig, replacer)
+		u.mergeCryptFsConfig(group)
+	} else {
+		if u.FsConfig.OSConfig.ReadBufferSize == 0 {
+			u.FsConfig.OSConfig.ReadBufferSize = group.UserSettings.FsConfig.OSConfig.ReadBufferSize
+		}
+		if u.FsConfig.OSConfig.WriteBufferSize == 0 {
+			u.FsConfig.OSConfig.WriteBufferSize = group.UserSettings.FsConfig.OSConfig.WriteBufferSize
+		}
 	}
 	if u.MaxSessions == 0 {
 		u.MaxSessions = group.UserSettings.MaxSessions
@@ -1747,15 +1623,15 @@ func (u *User) mergeWithPrimaryGroup(group Group, replacer *strings.Replacer) {
 	if u.ExpirationDate == 0 && group.UserSettings.ExpiresIn > 0 {
 		u.ExpirationDate = u.CreatedAt + int64(group.UserSettings.ExpiresIn)*86400000
 	}
-	u.mergePrimaryGroupFilters(group.UserSettings.Filters, replacer)
+	u.mergePrimaryGroupFilters(&group.UserSettings.Filters, replacer)
 	u.mergeAdditiveProperties(group, sdk.GroupTypePrimary, replacer)
 }
 
-func (u *User) mergePrimaryGroupFilters(filters sdk.BaseUserFilters, replacer *strings.Replacer) {
+func (u *User) mergePrimaryGroupFilters(filters *sdk.BaseUserFilters, replacer *strings.Replacer) { //nolint:gocyclo
 	if u.Filters.MaxUploadFileSize == 0 {
 		u.Filters.MaxUploadFileSize = filters.MaxUploadFileSize
 	}
-	if !u.IsTLSUsernameVerificationEnabled() {
+	if !u.IsTLSVerificationEnabled() {
 		u.Filters.TLSUsername = filters.TLSUsername
 	}
 	if !u.Filters.Hooks.CheckPasswordDisabled {
@@ -1788,6 +1664,9 @@ func (u *User) mergePrimaryGroupFilters(filters sdk.BaseUserFilters, replacer *s
 	if u.Filters.DefaultSharesExpiration == 0 {
 		u.Filters.DefaultSharesExpiration = filters.DefaultSharesExpiration
 	}
+	if u.Filters.MaxSharesExpiration == 0 {
+		u.Filters.MaxSharesExpiration = filters.MaxSharesExpiration
+	}
 	if u.Filters.PasswordExpiration == 0 {
 		u.Filters.PasswordExpiration = filters.PasswordExpiration
 	}
@@ -1796,21 +1675,21 @@ func (u *User) mergePrimaryGroupFilters(filters sdk.BaseUserFilters, replacer *s
 	}
 }
 
-func (u *User) mergeAdditiveProperties(group Group, groupType int, replacer *strings.Replacer) {
+func (u *User) mergeAdditiveProperties(group *Group, groupType int, replacer *strings.Replacer) {
 	u.mergeVirtualFolders(group, groupType, replacer)
 	u.mergePermissions(group, groupType, replacer)
 	u.mergeFilePatterns(group, groupType, replacer)
 	u.Filters.BandwidthLimits = append(u.Filters.BandwidthLimits, group.UserSettings.Filters.BandwidthLimits...)
-	u.Filters.DataTransferLimits = append(u.Filters.DataTransferLimits, group.UserSettings.Filters.DataTransferLimits...)
 	u.Filters.AllowedIP = append(u.Filters.AllowedIP, group.UserSettings.Filters.AllowedIP...)
 	u.Filters.DeniedIP = append(u.Filters.DeniedIP, group.UserSettings.Filters.DeniedIP...)
 	u.Filters.DeniedLoginMethods = append(u.Filters.DeniedLoginMethods, group.UserSettings.Filters.DeniedLoginMethods...)
 	u.Filters.DeniedProtocols = append(u.Filters.DeniedProtocols, group.UserSettings.Filters.DeniedProtocols...)
 	u.Filters.WebClient = append(u.Filters.WebClient, group.UserSettings.Filters.WebClient...)
 	u.Filters.TwoFactorAuthProtocols = append(u.Filters.TwoFactorAuthProtocols, group.UserSettings.Filters.TwoFactorAuthProtocols...)
+	u.Filters.AccessTime = append(u.Filters.AccessTime, group.UserSettings.Filters.AccessTime...)
 }
 
-func (u *User) mergeVirtualFolders(group Group, groupType int, replacer *strings.Replacer) {
+func (u *User) mergeVirtualFolders(group *Group, groupType int, replacer *strings.Replacer) {
 	if len(group.VirtualFolders) > 0 {
 		folderPaths := make(map[string]bool)
 		for _, folder := range u.VirtualFolders {
@@ -1830,7 +1709,10 @@ func (u *User) mergeVirtualFolders(group Group, groupType int, replacer *strings
 	}
 }
 
-func (u *User) mergePermissions(group Group, groupType int, replacer *strings.Replacer) {
+func (u *User) mergePermissions(group *Group, groupType int, replacer *strings.Replacer) {
+	if u.Permissions == nil {
+		u.Permissions = make(map[string][]string)
+	}
 	for k, v := range group.UserSettings.Permissions {
 		if k == "/" {
 			if groupType == sdk.GroupTypePrimary {
@@ -1846,7 +1728,7 @@ func (u *User) mergePermissions(group Group, groupType int, replacer *strings.Re
 	}
 }
 
-func (u *User) mergeFilePatterns(group Group, groupType int, replacer *strings.Replacer) {
+func (u *User) mergeFilePatterns(group *Group, groupType int, replacer *strings.Replacer) {
 	if len(group.UserSettings.Filters.FilePatterns) > 0 {
 		patternPaths := make(map[string]bool)
 		for _, pattern := range u.Filters.FilePatterns {
@@ -1913,6 +1795,8 @@ func (u *User) getACopy() User {
 	filters.TOTPConfig.Secret = u.Filters.TOTPConfig.Secret.Clone()
 	filters.TOTPConfig.Protocols = make([]string, len(u.Filters.TOTPConfig.Protocols))
 	copy(filters.TOTPConfig.Protocols, u.Filters.TOTPConfig.Protocols)
+	filters.AdditionalEmails = make([]string, len(u.Filters.AdditionalEmails))
+	copy(filters.AdditionalEmails, u.Filters.AdditionalEmails)
 	filters.RecoveryCodes = make([]RecoveryCode, 0, len(u.Filters.RecoveryCodes))
 	for _, code := range u.Filters.RecoveryCodes {
 		if code.Secret == nil {
@@ -1931,6 +1815,7 @@ func (u *User) getACopy() User {
 			Email:                    u.Email,
 			Password:                 u.Password,
 			PublicKeys:               pubKeys,
+			HasPassword:              u.HasPassword,
 			HomeDir:                  u.HomeDir,
 			UID:                      u.UID,
 			GID:                      u.GID,

@@ -1,4 +1,4 @@
-// Copyright (C) 2019-2023 Nicola Murino
+// Copyright (C) 2019 Nicola Murino
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published
@@ -49,7 +49,7 @@ func getUserConnection(w http.ResponseWriter, r *http.Request) (*Connection, err
 	connID := xid.New().String()
 	protocol := getProtocolFromRequest(r)
 	connectionID := fmt.Sprintf("%v_%v", protocol, connID)
-	if err := checkHTTPClientUser(&user, r, connectionID, false); err != nil {
+	if err := checkHTTPClientUser(&user, r, connectionID, false, false); err != nil {
 		sendAPIResponse(w, r, err, http.StatusText(http.StatusForbidden), http.StatusForbidden)
 		return nil, err
 	}
@@ -74,12 +74,12 @@ func readUserFolder(w http.ResponseWriter, r *http.Request) {
 	defer common.Connections.Remove(connection.GetID())
 
 	name := connection.User.GetCleanedPath(r.URL.Query().Get("path"))
-	contents, err := connection.ReadDir(name)
+	lister, err := connection.ReadDir(name)
 	if err != nil {
-		sendAPIResponse(w, r, err, "Unable to get directory contents", getMappedStatusCode(err))
+		sendAPIResponse(w, r, err, "Unable to get directory lister", getMappedStatusCode(err))
 		return
 	}
-	renderAPIDirContents(w, r, contents, false)
+	renderAPIDirContents(w, lister, false)
 }
 
 func createUserDir(w http.ResponseWriter, r *http.Request) {
@@ -90,6 +90,7 @@ func createUserDir(w http.ResponseWriter, r *http.Request) {
 	}
 	defer common.Connections.Remove(connection.GetID())
 
+	connection.User.CheckFsRoot(connection.ID) //nolint:errcheck
 	name := connection.User.GetCleanedPath(r.URL.Query().Get("path"))
 	if getBoolQueryParam(r, "mkdir_parents") {
 		if err = connection.CheckParentDirs(path.Dir(name)); err != nil {
@@ -97,7 +98,6 @@ func createUserDir(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	connection.User.CheckFsRoot(connection.ID) //nolint:errcheck
 	err = connection.CreateDir(name, true)
 	if err != nil {
 		sendAPIResponse(w, r, err, fmt.Sprintf("Unable to create directory %q", name), getMappedStatusCode(err))
@@ -134,11 +134,23 @@ func renameUserFsEntry(w http.ResponseWriter, r *http.Request) {
 
 	oldName := connection.User.GetCleanedPath(r.URL.Query().Get("path"))
 	newName := connection.User.GetCleanedPath(r.URL.Query().Get("target"))
-	err = connection.Rename(oldName, newName)
-	if err != nil {
-		sendAPIResponse(w, r, err, fmt.Sprintf("Unable to rename %q -> %q", oldName, newName),
-			getMappedStatusCode(err))
-		return
+	if !connection.IsSameResource(oldName, newName) {
+		if err := connection.Copy(oldName, newName); err != nil {
+			sendAPIResponse(w, r, err, fmt.Sprintf("Cannot perform copy step to rename %q -> %q", oldName, newName),
+				getMappedStatusCode(err))
+			return
+		}
+		if err := connection.RemoveAll(oldName); err != nil {
+			sendAPIResponse(w, r, err, fmt.Sprintf("Cannot perform remove step to rename %q -> %q", oldName, newName),
+				getMappedStatusCode(err))
+			return
+		}
+	} else {
+		if err := connection.Rename(oldName, newName); err != nil {
+			sendAPIResponse(w, r, err, fmt.Sprintf("Unable to rename %q => %q", oldName, newName),
+				getMappedStatusCode(err))
+			return
+		}
 	}
 	sendAPIResponse(w, r, nil, fmt.Sprintf("%q renamed to %q", oldName, newName), http.StatusOK)
 }
@@ -166,7 +178,7 @@ func copyUserFsEntry(w http.ResponseWriter, r *http.Request) {
 	}
 	err = connection.Copy(source, target)
 	if err != nil {
-		sendAPIResponse(w, r, err, fmt.Sprintf("Unable to copy %q -> %q", source, target),
+		sendAPIResponse(w, r, err, fmt.Sprintf("Unable to copy %q => %q", source, target),
 			getMappedStatusCode(err))
 		return
 	}
@@ -261,6 +273,7 @@ func uploadUserFile(w http.ResponseWriter, r *http.Request) {
 	}
 	defer common.Connections.Remove(connection.GetID())
 
+	connection.User.CheckFsRoot(connection.ID) //nolint:errcheck
 	filePath := connection.User.GetCleanedPath(r.URL.Query().Get("path"))
 	if getBoolQueryParam(r, "mkdir_parents") {
 		if err = connection.CheckParentDirs(path.Dir(filePath)); err != nil {
@@ -272,7 +285,6 @@ func uploadUserFile(w http.ResponseWriter, r *http.Request) {
 }
 
 func doUploadFile(w http.ResponseWriter, r *http.Request, connection *Connection, filePath string) error {
-	connection.User.CheckFsRoot(connection.ID) //nolint:errcheck
 	writer, err := connection.getFileWriter(filePath)
 	if err != nil {
 		sendAPIResponse(w, r, err, fmt.Sprintf("Unable to write file %q", filePath), getMappedStatusCode(err))
@@ -305,6 +317,13 @@ func uploadUserFiles(w http.ResponseWriter, r *http.Request) {
 	}
 	defer common.Connections.Remove(connection.GetID())
 
+	if err := common.Connections.IsNewTransferAllowed(connection.User.Username); err != nil {
+		connection.Log(logger.LevelInfo, "denying file write due to number of transfer limits")
+		sendAPIResponse(w, r, err, "Denying file write due to transfer count limits",
+			http.StatusConflict)
+		return
+	}
+
 	transferQuota := connection.GetTransferQuota()
 	if !transferQuota.HasUploadSpace() {
 		connection.Log(logger.LevelInfo, "denying file write due to transfer quota limits")
@@ -330,6 +349,7 @@ func uploadUserFiles(w http.ResponseWriter, r *http.Request) {
 		sendAPIResponse(w, r, nil, "No files uploaded!", http.StatusBadRequest)
 		return
 	}
+	connection.User.CheckFsRoot(connection.ID) //nolint:errcheck
 	if getBoolQueryParam(r, "mkdir_parents") {
 		if err = connection.CheckParentDirs(parentDir); err != nil {
 			sendAPIResponse(w, r, err, "Error checking parent directories", getMappedStatusCode(err))
@@ -342,7 +362,6 @@ func uploadUserFiles(w http.ResponseWriter, r *http.Request) {
 func doUploadFiles(w http.ResponseWriter, r *http.Request, connection *Connection, parentDir string,
 	files []*multipart.FileHeader,
 ) int {
-	connection.User.CheckFsRoot(connection.ID) //nolint:errcheck
 	uploaded := 0
 	connection.User.UploadBandwidth = 0
 	for _, f := range files {
@@ -457,7 +476,9 @@ func getUserProfile(w http.ResponseWriter, r *http.Request) {
 			Description:     user.Description,
 			AllowAPIKeyAuth: user.Filters.AllowAPIKeyAuth,
 		},
-		PublicKeys: user.PublicKeys,
+		AdditionalEmails: user.Filters.AdditionalEmails,
+		PublicKeys:       user.PublicKeys,
+		TLSCerts:         user.Filters.TLSCerts,
 	}
 	render.JSON(w, r, resp)
 }
@@ -480,18 +501,22 @@ func updateUserProfile(w http.ResponseWriter, r *http.Request) {
 		sendAPIResponse(w, r, err, "", getRespStatus(err))
 		return
 	}
-	if !userMerged.CanManagePublicKeys() && !userMerged.CanChangeAPIKeyAuth() && !userMerged.CanChangeInfo() {
+	if !userMerged.CanUpdateProfile() {
 		sendAPIResponse(w, r, nil, "You are not allowed to change anything", http.StatusForbidden)
 		return
 	}
 	if userMerged.CanManagePublicKeys() {
 		user.PublicKeys = req.PublicKeys
 	}
+	if userMerged.CanManageTLSCerts() {
+		user.Filters.TLSCerts = req.TLSCerts
+	}
 	if userMerged.CanChangeAPIKeyAuth() {
 		user.Filters.AllowAPIKeyAuth = req.AllowAPIKeyAuth
 	}
 	if userMerged.CanChangeInfo() {
 		user.Email = req.Email
+		user.Filters.AdditionalEmails = req.AdditionalEmails
 		user.Description = req.Description
 	}
 	if err := dataprovider.UpdateUser(&user, dataprovider.ActionExecutorSelf, util.GetIPFromRemoteAddress(r.RemoteAddr), user.Role); err != nil {
@@ -515,27 +540,34 @@ func changeUserPassword(w http.ResponseWriter, r *http.Request) {
 		sendAPIResponse(w, r, err, "", getRespStatus(err))
 		return
 	}
+	invalidateToken(r)
 	sendAPIResponse(w, r, err, "Password updated", http.StatusOK)
 }
 
 func doChangeUserPassword(r *http.Request, currentPassword, newPassword, confirmNewPassword string) error {
 	if currentPassword == "" || newPassword == "" || confirmNewPassword == "" {
-		return util.NewValidationError("please provide the current password and the new one two times")
+		return util.NewI18nError(
+			util.NewValidationError("please provide the current password and the new one two times"),
+			util.I18nErrorChangePwdRequiredFields,
+		)
 	}
 	if newPassword != confirmNewPassword {
-		return util.NewValidationError("the two password fields do not match")
+		return util.NewI18nError(util.NewValidationError("the two password fields do not match"), util.I18nErrorChangePwdNoMatch)
 	}
 	if currentPassword == newPassword {
-		return util.NewValidationError("the new password must be different from the current one")
+		return util.NewI18nError(
+			util.NewValidationError("the new password must be different from the current one"),
+			util.I18nErrorChangePwdNoDifferent,
+		)
 	}
 	claims, err := getTokenClaims(r)
 	if err != nil || claims.Username == "" {
-		return errors.New("invalid token claims")
+		return util.NewI18nError(errInvalidTokenClaims, util.I18nErrorInvalidToken)
 	}
 	_, err = dataprovider.CheckUserAndPass(claims.Username, currentPassword, util.GetIPFromRemoteAddress(r.RemoteAddr),
 		getProtocolFromRequest(r))
 	if err != nil {
-		return util.NewValidationError("current password does not match")
+		return util.NewI18nError(util.NewValidationError("current password does not match"), util.I18nErrorChangePwdCurrentNoMatch)
 	}
 
 	return dataprovider.UpdateUserPassword(claims.Username, newPassword, dataprovider.ActionExecutorSelf,

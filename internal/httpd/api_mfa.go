@@ -1,4 +1,4 @@
-// Copyright (C) 2019-2023 Nicola Murino
+// Copyright (C) 2019 Nicola Murino
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published
@@ -15,9 +15,13 @@
 package httpd
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
+	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/go-chi/render"
@@ -40,6 +44,7 @@ type generateTOTPResponse struct {
 	ConfigName string `json:"config_name"`
 	Issuer     string `json:"issuer"`
 	Secret     string `json:"secret"`
+	URL        string `json:"url"`
 	QRCode     []byte `json:"qr_code"`
 }
 
@@ -79,17 +84,31 @@ func generateTOTPSecret(w http.ResponseWriter, r *http.Request) {
 		sendAPIResponse(w, r, err, "", http.StatusBadRequest)
 		return
 	}
-	configName, issuer, secret, qrCode, err := mfa.GenerateTOTPSecret(req.ConfigName, accountName)
+	configName, key, qrCode, err := mfa.GenerateTOTPSecret(req.ConfigName, accountName)
 	if err != nil {
 		sendAPIResponse(w, r, err, "", http.StatusBadRequest)
 		return
 	}
 	render.JSON(w, r, generateTOTPResponse{
 		ConfigName: configName,
-		Issuer:     issuer,
-		Secret:     secret,
+		Issuer:     key.Issuer(),
+		Secret:     key.Secret(),
+		URL:        key.URL(),
 		QRCode:     qrCode,
 	})
+}
+
+func getQRCode(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestSize)
+	img, err := mfa.GenerateQRCodeFromURL(r.URL.Query().Get("url"), 400, 400)
+	if err != nil {
+		sendAPIResponse(w, r, nil, "unable to generate qr code", http.StatusInternalServerError)
+		return
+	}
+	imgSize := int64(len(img))
+	w.Header().Set("Content-Length", strconv.FormatInt(imgSize, 10))
+	w.Header().Set("Content-Type", "image/png")
+	io.CopyN(w, bytes.NewBuffer(img), imgSize) //nolint:errcheck
 }
 
 func saveTOTPConfig(w http.ResponseWriter, r *http.Request) {
@@ -104,23 +123,24 @@ func saveTOTPConfig(w http.ResponseWriter, r *http.Request) {
 		code := getNewRecoveryCode()
 		recoveryCodes = append(recoveryCodes, dataprovider.RecoveryCode{Secret: kms.NewPlainSecret(code)})
 	}
+	baseURL := webBaseClientPath
 	if claims.hasUserAudience() {
 		if err := saveUserTOTPConfig(claims.Username, r, recoveryCodes); err != nil {
 			sendAPIResponse(w, r, err, "", getRespStatus(err))
 			return
-		}
-		if claims.MustSetTwoFactorAuth {
-			// force logout
-			defer func() {
-				c := jwtTokenClaims{}
-				c.removeCookie(w, r, webBaseClientPath)
-			}()
 		}
 	} else {
 		if err := saveAdminTOTPConfig(claims.Username, r, recoveryCodes); err != nil {
 			sendAPIResponse(w, r, err, "", getRespStatus(err))
 			return
 		}
+		baseURL = webBasePath
+	}
+	if claims.MustSetTwoFactorAuth {
+		// force logout
+		defer func() {
+			removeCookie(w, r, baseURL)
+		}()
 	}
 
 	sendAPIResponse(w, r, nil, "TOTP configuration saved", http.StatusOK)
@@ -242,7 +262,7 @@ func getNewRecoveryCode() string {
 }
 
 func saveUserTOTPConfig(username string, r *http.Request, recoveryCodes []dataprovider.RecoveryCode) error {
-	user, err := dataprovider.UserExists(username, "")
+	user, userMerged, err := dataprovider.GetUserVariants(username, "")
 	if err != nil {
 		return err
 	}
@@ -252,13 +272,13 @@ func saveUserTOTPConfig(username string, r *http.Request, recoveryCodes []datapr
 	if err != nil {
 		return util.NewValidationError(fmt.Sprintf("unable to decode JSON body: %v", err))
 	}
-	if !user.Filters.TOTPConfig.Enabled && len(user.Filters.TwoFactorAuthProtocols) > 0 {
+	if !user.Filters.TOTPConfig.Enabled && len(userMerged.Filters.TwoFactorAuthProtocols) > 0 {
 		return util.NewValidationError("two-factor authentication must be enabled")
 	}
-	for _, p := range user.Filters.TwoFactorAuthProtocols {
-		if !util.Contains(user.Filters.TOTPConfig.Protocols, p) {
+	for _, p := range userMerged.Filters.TwoFactorAuthProtocols {
+		if !slices.Contains(user.Filters.TOTPConfig.Protocols, p) {
 			return util.NewValidationError(fmt.Sprintf("totp: the following protocols are required: %q",
-				strings.Join(user.Filters.TwoFactorAuthProtocols, ", ")))
+				strings.Join(userMerged.Filters.TwoFactorAuthProtocols, ", ")))
 		}
 	}
 	if user.Filters.TOTPConfig.Secret == nil || !user.Filters.TOTPConfig.Secret.IsPlain() {
@@ -284,6 +304,9 @@ func saveAdminTOTPConfig(username string, r *http.Request, recoveryCodes []datap
 	err = render.DecodeJSON(r.Body, &admin.Filters.TOTPConfig)
 	if err != nil {
 		return util.NewValidationError(fmt.Sprintf("unable to decode JSON body: %v", err))
+	}
+	if !admin.Filters.TOTPConfig.Enabled && admin.Filters.RequireTwoFactor {
+		return util.NewValidationError("two-factor authentication must be enabled")
 	}
 	if admin.Filters.TOTPConfig.Enabled {
 		if admin.CountUnusedRecoveryCodes() < 5 && admin.Filters.TOTPConfig.Enabled {

@@ -2,16 +2,17 @@ freebsd_task:
   name: FreeBSD
 
   matrix:
-    - name: FreeBSD 13.1
+    - name: FreeBSD 14.2
       freebsd_instance:
-        image_family: freebsd-13-1
+        image_family: freebsd-14-2
 
   pkginstall_script:
     - pkg update -f
-    - pkg install -y go
+    - pkg install -y go124
     - pkg install -y git
 
   setup_script:
+    - ln -s /usr/local/bin/go124 /usr/local/bin/go
     - pw groupadd sftpgo
     - pw useradd sftpgo -g sftpgo -w none -m
     - mkdir /home/sftpgo/sftpgo
@@ -19,7 +20,7 @@ freebsd_task:
     - chown -R sftpgo:sftpgo /home/sftpgo/sftpgo
 
   compile_script:
-    - su sftpgo -c 'cd ~/sftpgo && go build -trimpath -tags nopgxregisterdefaulttypes -ldflags "-s -w -X github.com/drakkan/sftpgo/v2/internal/version.commit=`git describe --always --abbrev=8 --dirty` -X github.com/drakkan/sftpgo/v2/internal/version.date=`date -u +%FT%TZ`" -o sftpgo'
+    - su sftpgo -c 'cd ~/sftpgo && go build -trimpath -tags nopgxregisterdefaulttypes,disable_grpc_modules -ldflags "-s -w -X github.com/drakkan/sftpgo/v2/internal/version.commit=`git describe --always --abbrev=8 --dirty` -X github.com/drakkan/sftpgo/v2/internal/version.date=`date -u +%FT%TZ`" -o sftpgo'
     - su sftpgo -c 'cd ~/sftpgo/tests/eventsearcher && go build -trimpath -ldflags "-s -w" -o eventsearcher'
     - su sftpgo -c 'cd ~/sftpgo/tests/ipfilter && go build -trimpath -ldflags "-s -w" -o ipfilter'
 
@@ -27,4 +28,4 @@ freebsd_task:
     - su sftpgo -c 'cd ~/sftpgo && ./sftpgo initprovider && ./sftpgo resetprovider --force'
 
   test_script:
-    - su sftpgo -c 'cd ~/sftpgo && go test -v -tags nopgxregisterdefaulttypes -p 1 -timeout 20m ./... -coverprofile=coverage.txt -covermode=atomic'
+    - su sftpgo -c 'cd ~/sftpgo && go test -v -tags nopgxregisterdefaulttypes,disable_grpc_modules -p 1 -timeout 20m ./... -coverprofile=coverage.txt -covermode=atomic'

@@ -1,4 +1,4 @@
-// Copyright (C) 2019-2023 Nicola Murino
+// Copyright (C) 2019 Nicola Murino
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published
@@ -19,12 +19,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -32,6 +34,7 @@ import (
 	"time"
 
 	"github.com/pires/go-proxyproto"
+	"github.com/sftpgo/sdk/plugin/notifier"
 
 	"github.com/drakkan/sftpgo/v2/internal/command"
 	"github.com/drakkan/sftpgo/v2/internal/dataprovider"
@@ -41,6 +44,7 @@ import (
 	"github.com/drakkan/sftpgo/v2/internal/plugin"
 	"github.com/drakkan/sftpgo/v2/internal/smtp"
 	"github.com/drakkan/sftpgo/v2/internal/util"
+	"github.com/drakkan/sftpgo/v2/internal/version"
 	"github.com/drakkan/sftpgo/v2/internal/vfs"
 )
 
@@ -110,13 +114,19 @@ const (
 
 // Upload modes
 const (
-	UploadModeStandard = iota
-	UploadModeAtomic
-	UploadModeAtomicWithResume
+	UploadModeStandard              = 0
+	UploadModeAtomic                = 1
+	UploadModeAtomicWithResume      = 2
+	UploadModeS3StoreOnError        = 4
+	UploadModeGCSStoreOnError       = 8
+	UploadModeAzureBlobStoreOnError = 16
 )
 
 func init() {
 	Connections.clients = clientsMap{
+		clients: make(map[string]int),
+	}
+	Connections.transfers = clientsMap{
 		clients: make(map[string]int),
 	}
 	Connections.perUserConns = make(map[string]int)
@@ -149,22 +159,29 @@ var (
 	// Connections is the list of active connections
 	Connections ActiveConnections
 	// QuotaScans is the list of active quota scans
-	QuotaScans ActiveScans
-	// ActiveMetadataChecks holds the active metadata checks
-	ActiveMetadataChecks MetadataChecks
-	transfersChecker     TransfersChecker
-	supportedProtocols   = []string{ProtocolSFTP, ProtocolSCP, ProtocolSSH, ProtocolFTP, ProtocolWebDAV,
+	QuotaScans         ActiveScans
+	transfersChecker   TransfersChecker
+	supportedProtocols = []string{ProtocolSFTP, ProtocolSCP, ProtocolSSH, ProtocolFTP, ProtocolWebDAV,
 		ProtocolHTTP, ProtocolHTTPShare, ProtocolOIDC}
 	disconnHookProtocols = []string{ProtocolSFTP, ProtocolSCP, ProtocolSSH, ProtocolFTP}
 	// the map key is the protocol, for each protocol we can have multiple rate limiters
 	rateLimiters     map[string][]*rateLimiter
 	isShuttingDown   atomic.Bool
 	ftpLoginCommands = []string{"PASS", "USER"}
+	fnUpdateBranding func(*dataprovider.BrandingConfigs)
 )
+
+// SetUpdateBrandingFn sets the function to call to update branding configs.
+func SetUpdateBrandingFn(fn func(*dataprovider.BrandingConfigs)) {
+	fnUpdateBranding = fn
+}
 
 // Initialize sets the common configuration
 func Initialize(c Configuration, isShared int) error {
 	isShuttingDown.Store(false)
+	util.SetUmask(c.Umask)
+	version.SetConfig(c.ServerVersion)
+	dataprovider.SetTZ(c.TZ)
 	Config = c
 	Config.Actions.ExecuteOn = util.RemoveDuplicates(Config.Actions.ExecuteOn, true)
 	Config.Actions.ExecuteSync = util.RemoveDuplicates(Config.Actions.ExecuteSync, true)
@@ -195,7 +212,7 @@ func Initialize(c Configuration, isShared int) error {
 		Config.rateLimitersList = rateLimitersList
 	}
 	if c.DefenderConfig.Enabled {
-		if !util.Contains(supportedDefenderDrivers, c.DefenderConfig.Driver) {
+		if !slices.Contains(supportedDefenderDrivers, c.DefenderConfig.Driver) {
 			return fmt.Errorf("unsupported defender driver %q", c.DefenderConfig.Driver)
 		}
 		var defender Defender
@@ -223,11 +240,18 @@ func Initialize(c Configuration, isShared int) error {
 	if err := c.initializeProxyProtocol(); err != nil {
 		return err
 	}
+	if err := c.EventManager.validate(); err != nil {
+		return err
+	}
 	vfs.SetTempPath(c.TempPath)
 	dataprovider.SetTempPath(c.TempPath)
 	vfs.SetAllowSelfConnections(c.AllowSelfConnections)
 	vfs.SetRenameMode(c.RenameMode)
+	vfs.SetReadMetadataMode(c.Metadata.Read)
+	vfs.SetResumeMaxSize(c.ResumeMaxSize)
+	vfs.SetUploadMode(c.UploadMode)
 	dataprovider.SetAllowSelfConnections(c.AllowSelfConnections)
+	dataprovider.EnabledActionCommands = c.EventManager.EnabledCommands
 	transfersChecker = getTransfersChecker(isShared)
 	return nil
 }
@@ -319,6 +343,13 @@ func Reload() error {
 	return nil
 }
 
+// DelayLogin applies the configured login delay
+func DelayLogin(err error) {
+	if Config.defender != nil {
+		Config.defender.DelayLogin(err)
+	}
+}
+
 // IsBanned returns true if the specified IP address is banned
 func IsBanned(ip, protocol string) bool {
 	if plugin.Handler.IsIPBanned(ip, protocol) {
@@ -377,13 +408,31 @@ func GetDefenderScore(ip string) (int, error) {
 	return Config.defender.GetScore(ip)
 }
 
-// AddDefenderEvent adds the specified defender event for the given IP
-func AddDefenderEvent(ip, protocol string, event HostEvent) {
+// AddDefenderEvent adds the specified defender event for the given IP.
+// Returns true if the IP is in the defender's safe list.
+func AddDefenderEvent(ip, protocol string, event HostEvent) bool {
 	if Config.defender == nil {
-		return
+		return false
 	}
 
-	Config.defender.AddEvent(ip, protocol, event)
+	return Config.defender.AddEvent(ip, protocol, event)
+}
+
+func reloadProviderConfigs() {
+	configs, err := dataprovider.GetConfigs()
+	if err != nil {
+		logger.Error(logSender, "", "unable to load config from provider: %v", err)
+		return
+	}
+	configs.SetNilsToEmpty()
+	if fnUpdateBranding != nil {
+		fnUpdateBranding(configs.Branding)
+	}
+	if err := configs.SMTP.TryDecrypt(); err != nil {
+		logger.Error(logSender, "", "unable to decrypt smtp config: %v", err)
+		return
+	}
+	smtp.Activate(configs.SMTP)
 }
 
 func startPeriodicChecks(duration time.Duration, isShared int) {
@@ -394,7 +443,7 @@ func startPeriodicChecks(duration time.Duration, isShared int) {
 	logger.Info(logSender, "", "scheduled overquota transfers check, schedule %q", spec)
 	if isShared == 1 {
 		logger.Info(logSender, "", "add reload configs task")
-		_, err := eventScheduler.AddFunc("@every 10m", smtp.ReloadProviderConf)
+		_, err := eventScheduler.AddFunc("@every 10m", reloadProviderConfigs)
 		util.PanicOnError(err)
 	}
 	if Config.IdleTimeout > 0 {
@@ -442,6 +491,7 @@ type ActiveConnection interface {
 	GetTransfers() []ConnectionTransfer
 	SignalTransferClose(transferID int64, err error)
 	CloseFS() error
+	isAccessAllowed() bool
 }
 
 // StatAttributes defines the attributes for set stat commands
@@ -467,22 +517,28 @@ type ConnectionTransfer struct {
 	DLSize        int64  `json:"-"`
 }
 
-func (t *ConnectionTransfer) getConnectionTransferAsString() string {
-	result := ""
-	switch t.OperationType {
-	case operationUpload:
-		result += "UL "
-	case operationDownload:
-		result += "DL "
+// EventManagerConfig defines the configuration for the EventManager
+type EventManagerConfig struct {
+	// EnabledCommands defines the system commands that can be executed via EventManager,
+	// an empty list means that any command is allowed to be executed.
+	// Commands must be set as an absolute path
+	EnabledCommands []string `json:"enabled_commands" mapstructure:"enabled_commands"`
+}
+
+func (c *EventManagerConfig) validate() error {
+	for _, c := range c.EnabledCommands {
+		if !filepath.IsAbs(c) {
+			return fmt.Errorf("invalid command %q: it must be an absolute path", c)
+		}
 	}
-	result += fmt.Sprintf("%q ", t.VirtualPath)
-	if t.Size > 0 {
-		elapsed := time.Since(util.GetTimeFromMsecSinceEpoch(t.StartTime))
-		speed := float64(t.Size) / float64(util.GetTimeAsMsSinceEpoch(time.Now())-t.StartTime)
-		result += fmt.Sprintf("Size: %s Elapsed: %s Speed: \"%.1f KB/s\"", util.ByteCountIEC(t.Size),
-			util.GetDurationAsString(elapsed), speed)
-	}
-	return result
+	return nil
+}
+
+// MetadataConfig defines how to handle metadata for cloud storage backends
+type MetadataConfig struct {
+	// If not zero the metadata will be read before downloads and will be
+	// available in notifications
+	Read int `json:"read" mapstructure:"read"`
 }
 
 // Configuration defines configuration parameters common to all supported protocols
@@ -499,6 +555,9 @@ type Configuration struct {
 	// 2 means atomic with resume support: as atomic but if there is an upload error the temporary
 	// file is renamed to the requested path and not deleted, this way a client can reconnect and resume
 	// the upload.
+	// 4 means files for S3 backend are stored even if a client-side upload error is detected.
+	// 8 means files for Google Cloud Storage backend are stored even if a client-side upload error is detected.
+	// 16 means files for Azure Blob backend are stored even if a client-side upload error is detected.
 	UploadMode int `json:"upload_mode" mapstructure:"upload_mode"`
 	// Actions to execute for SFTP file operations and SSH commands
 	Actions ProtocolActions `json:"actions" mapstructure:"actions"`
@@ -513,6 +572,12 @@ type Configuration struct {
 	// renames for these providers, they may be slow, there is no atomic rename API like for local
 	// filesystem, so SFTPGo will recursively list the directory contents and do a rename for each entry
 	RenameMode int `json:"rename_mode" mapstructure:"rename_mode"`
+	// ResumeMaxSize defines the maximum size allowed, in bytes, to resume uploads on storage backends
+	// with immutable objects. By default, resuming uploads is not allowed for cloud storage providers
+	// (S3, GCS, Azure Blob) because SFTPGo must rewrite the entire file.
+	// Set to a value greater than 0 to allow resuming uploads of files smaller than or equal to the
+	// defined size.
+	ResumeMaxSize int64 `json:"resume_max_size" mapstructure:"resume_max_size"`
 	// TempPath defines the path for temporary files such as those used for atomic uploads or file pipes.
 	// If you set this option you must make sure that the defined path exists, is accessible for writing
 	// by the user running SFTPGo, and is on the same filesystem as the users home directories otherwise
@@ -568,7 +633,19 @@ type Configuration struct {
 	// Defender configuration
 	DefenderConfig DefenderConfig `json:"defender" mapstructure:"defender"`
 	// Rate limiter configurations
-	RateLimitersConfig    []RateLimiterConfig `json:"rate_limiters" mapstructure:"rate_limiters"`
+	RateLimitersConfig []RateLimiterConfig `json:"rate_limiters" mapstructure:"rate_limiters"`
+	// Umask for new uploads. Leave blank to use the system default.
+	Umask string `json:"umask" mapstructure:"umask"`
+	// Defines the server version
+	ServerVersion string `json:"server_version" mapstructure:"server_version"`
+	// TZ defines the time zone to use for the EventManager scheduler and to
+	// control time-based access restrictions. Set to "local" to use the
+	// server's local time, otherwise UTC will be used.
+	TZ string `json:"tz" mapstructure:"tz"`
+	// Metadata configuration
+	Metadata MetadataConfig `json:"metadata" mapstructure:"metadata"`
+	// EventManager configuration
+	EventManager          EventManagerConfig `json:"event_manager" mapstructure:"event_manager"`
 	idleTimeoutAsDuration time.Duration
 	idleLoginTimeout      time.Duration
 	defender              Defender
@@ -580,7 +657,7 @@ type Configuration struct {
 
 // IsAtomicUploadEnabled returns true if atomic upload is enabled
 func (c *Configuration) IsAtomicUploadEnabled() bool {
-	return c.UploadMode == UploadModeAtomic || c.UploadMode == UploadModeAtomicWithResume
+	return c.UploadMode&UploadModeAtomic != 0 || c.UploadMode&UploadModeAtomicWithResume != 0
 }
 
 func (c *Configuration) initializeProxyProtocol() error {
@@ -601,7 +678,7 @@ func (c *Configuration) initializeProxyProtocol() error {
 
 // GetProxyListener returns a wrapper for the given listener that supports the
 // HAProxy Proxy Protocol
-func (c *Configuration) GetProxyListener(listener net.Listener) (*proxyproto.Listener, error) {
+func (c *Configuration) GetProxyListener(listener net.Listener) (net.Listener, error) {
 	if c.ProxyProtocol > 0 {
 		defaultPolicy := proxyproto.REQUIRE
 		if c.ProxyProtocol == 1 {
@@ -610,7 +687,7 @@ func (c *Configuration) GetProxyListener(listener net.Listener) (*proxyproto.Lis
 
 		return &proxyproto.Listener{
 			Listener:          listener,
-			Policy:            getProxyPolicy(c.proxyAllowed, c.proxySkipped, defaultPolicy),
+			ConnPolicy:        getProxyPolicy(c.proxyAllowed, c.proxySkipped, defaultPolicy),
 			ReadHeaderTimeout: 10 * time.Second,
 		}, nil
 	}
@@ -728,7 +805,7 @@ func (c *Configuration) checkPostDisconnectHook(remoteAddr, protocol, username, 
 	if c.PostDisconnectHook == "" {
 		return
 	}
-	if !util.Contains(disconnHookProtocols, protocol) {
+	if !slices.Contains(disconnHookProtocols, protocol) {
 		return
 	}
 	go c.executePostDisconnectHook(remoteAddr, protocol, username, connID, connectionTime)
@@ -785,12 +862,14 @@ func (c *Configuration) ExecutePostConnectHook(ipAddr, protocol string) error {
 	return nil
 }
 
-func getProxyPolicy(allowed, skipped []func(net.IP) bool, def proxyproto.Policy) proxyproto.PolicyFunc {
-	return func(upstream net.Addr) (proxyproto.Policy, error) {
-		upstreamIP, err := util.GetIPFromNetAddr(upstream)
+func getProxyPolicy(allowed, skipped []func(net.IP) bool, def proxyproto.Policy) proxyproto.ConnPolicyFunc {
+	return func(connPolicyOptions proxyproto.ConnPolicyOptions) (proxyproto.Policy, error) {
+		upstreamIP, err := util.GetIPFromNetAddr(connPolicyOptions.Upstream)
 		if err != nil {
-			// something is wrong with the source IP, better reject the connection
-			return proxyproto.REJECT, err
+			// Something is wrong with the source IP, better reject the
+			// connection.
+			logger.Error(logSender, "", "reject connection from ip %q, err: %v", connPolicyOptions.Upstream, err)
+			return proxyproto.REJECT, proxyproto.ErrInvalidUpstream
 		}
 
 		for _, skippedFrom := range skipped {
@@ -801,10 +880,18 @@ func getProxyPolicy(allowed, skipped []func(net.IP) bool, def proxyproto.Policy)
 
 		for _, allowFrom := range allowed {
 			if allowFrom(upstreamIP) {
+				if def == proxyproto.REQUIRE {
+					return proxyproto.REQUIRE, nil
+				}
 				return proxyproto.USE, nil
 			}
 		}
 
+		if def == proxyproto.REQUIRE {
+			logger.Debug(logSender, "", "reject connection from ip %q: proxy protocol signature required and not set",
+				upstreamIP)
+			return proxyproto.REJECT, proxyproto.ErrInvalidUpstream
+		}
 		return def, nil
 	}
 }
@@ -813,12 +900,12 @@ func getProxyPolicy(allowed, skipped []func(net.IP) bool, def proxyproto.Policy)
 // Each SSH connection can open several channels for SFTP or SSH commands
 type SSHConnection struct {
 	id           string
-	conn         net.Conn
+	conn         io.Closer
 	lastActivity atomic.Int64
 }
 
 // NewSSHConnection returns a new SSHConnection
-func NewSSHConnection(id string, conn net.Conn) *SSHConnection {
+func NewSSHConnection(id string, conn io.Closer) *SSHConnection {
 	c := &SSHConnection{
 		id:   id,
 		conn: conn,
@@ -851,7 +938,9 @@ func (c *SSHConnection) Close() error {
 type ActiveConnections struct {
 	// clients contains both authenticated and estabilished connections and the ones waiting
 	// for authentication
-	clients              clientsMap
+	clients clientsMap
+	// transfers contains active transfers, total and per-user
+	transfers            clientsMap
 	transfersCheckStatus atomic.Bool
 	sync.RWMutex
 	connections    []ActiveConnection
@@ -901,6 +990,9 @@ func (conns *ActiveConnections) Add(c ActiveConnection) error {
 		if maxSessions := c.GetMaxSessions(); maxSessions > 0 {
 			if val := conns.perUserConns[username]; val >= maxSessions {
 				return fmt.Errorf("too many open sessions: %d/%d", val, maxSessions)
+			}
+			if val := conns.transfers.getTotalFrom(username); val >= maxSessions {
+				return fmt.Errorf("too many open transfers: %d/%d", val, maxSessions)
 			}
 		}
 		conns.addUserConnection(username)
@@ -963,14 +1055,16 @@ func (conns *ActiveConnections) Remove(connectionID string) {
 		metric.UpdateActiveConnectionsSize(lastIdx)
 		logger.Debug(conn.GetProtocol(), conn.GetID(), "connection removed, local address %q, remote address %q close fs error: %v, num open connections: %d",
 			conn.GetLocalAddress(), conn.GetRemoteAddress(), err, lastIdx)
-		if conn.GetProtocol() == ProtocolFTP && conn.GetUsername() == "" && !util.Contains(ftpLoginCommands, conn.GetCommand()) {
+		if conn.GetProtocol() == ProtocolFTP && conn.GetUsername() == "" && !slices.Contains(ftpLoginCommands, conn.GetCommand()) {
 			ip := util.GetIPFromRemoteAddress(conn.GetRemoteAddress())
-			logger.ConnectionFailedLog("", ip, dataprovider.LoginMethodNoAuthTryed, conn.GetProtocol(),
-				dataprovider.ErrNoAuthTryed.Error())
-			metric.AddNoAuthTryed()
+			logger.ConnectionFailedLog("", ip, dataprovider.LoginMethodNoAuthTried, ProtocolFTP,
+				dataprovider.ErrNoAuthTried.Error())
+			metric.AddNoAuthTried()
 			AddDefenderEvent(ip, ProtocolFTP, HostEventNoLoginTried)
-			dataprovider.ExecutePostLoginHook(&dataprovider.User{}, dataprovider.LoginMethodNoAuthTryed, ip,
-				conn.GetProtocol(), dataprovider.ErrNoAuthTryed)
+			dataprovider.ExecutePostLoginHook(&dataprovider.User{}, dataprovider.LoginMethodNoAuthTried, ip,
+				ProtocolFTP, dataprovider.ErrNoAuthTried)
+			plugin.Handler.NotifyLogEvent(notifier.LogEventTypeNoLoginTried, ProtocolFTP, "", ip, "",
+				dataprovider.ErrNoAuthTried)
 		}
 		Config.checkPostDisconnectHook(conn.GetRemoteAddress(), conn.GetProtocol(), conn.GetUsername(),
 			conn.GetID(), conn.GetConnectionTime())
@@ -1067,8 +1161,14 @@ func (conns *ActiveConnections) checkIdles() {
 		if idleTime > Config.idleTimeoutAsDuration || (isUnauthenticatedFTPUser && idleTime > Config.idleLoginTimeout) {
 			defer func(conn ActiveConnection) {
 				err := conn.Disconnect()
-				logger.Debug(conn.GetProtocol(), conn.GetID(), "close idle connection, idle time: %v, username: %q close err: %v",
+				logger.Debug(conn.GetProtocol(), conn.GetID(), "close idle connection, idle time: %s, username: %q close err: %v",
 					time.Since(conn.GetLastActivity()), conn.GetUsername(), err)
+			}(c)
+		} else if !c.isAccessAllowed() {
+			defer func(conn ActiveConnection) {
+				err := conn.Disconnect()
+				logger.Info(conn.GetProtocol(), conn.GetID(), "access conditions not met for user: %q close connection err: %v",
+					conn.GetUsername(), err)
 			}(c)
 		}
 	}
@@ -1154,6 +1254,35 @@ func (conns *ActiveConnections) GetClientConnections() int32 {
 	return conns.clients.getTotal()
 }
 
+// GetTotalTransfers returns the total number of active transfers
+func (conns *ActiveConnections) GetTotalTransfers() int32 {
+	return conns.transfers.getTotal()
+}
+
+// IsNewTransferAllowed returns an error if the maximum number of concurrent allowed
+// transfers is exceeded
+func (conns *ActiveConnections) IsNewTransferAllowed(username string) error {
+	if isShuttingDown.Load() {
+		return ErrShuttingDown
+	}
+	if Config.MaxTotalConnections == 0 && Config.MaxPerHostConnections == 0 {
+		return nil
+	}
+	if Config.MaxPerHostConnections > 0 {
+		if transfers := conns.transfers.getTotalFrom(username); transfers >= Config.MaxPerHostConnections {
+			logger.Info(logSender, "", "active transfers from user %q: %d/%d", username, transfers, Config.MaxPerHostConnections)
+			return ErrConnectionDenied
+		}
+	}
+	if Config.MaxTotalConnections > 0 {
+		if transfers := conns.transfers.getTotal(); transfers >= int32(Config.MaxTotalConnections) {
+			logger.Info(logSender, "", "active transfers %d/%d", transfers, Config.MaxTotalConnections)
+			return ErrConnectionDenied
+		}
+	}
+	return nil
+}
+
 // IsNewConnectionAllowed returns an error if the maximum number of concurrent allowed
 // connections is exceeded or a whitelist is defined and the specified ipAddr is not listed
 // or the service is shutting down
@@ -1178,9 +1307,12 @@ func (conns *ActiveConnections) IsNewConnectionAllowed(ipAddr, protocol string) 
 
 	if Config.MaxPerHostConnections > 0 {
 		if total := conns.clients.getTotalFrom(ipAddr); total > Config.MaxPerHostConnections {
-			logger.Info(logSender, "", "active connections from %s %d/%d", ipAddr, total, Config.MaxPerHostConnections)
-			AddDefenderEvent(ipAddr, protocol, HostEventLimitExceeded)
-			return ErrConnectionDenied
+			if !AddDefenderEvent(ipAddr, protocol, HostEventLimitExceeded) {
+				logger.Warn(logSender, "", "connection denied, active connections from IP %q: %d/%d",
+					ipAddr, total, Config.MaxPerHostConnections)
+				return ErrConnectionDenied
+			}
+			logger.Info(logSender, "", "active connections from safe IP %q: %d", ipAddr, total)
 		}
 	}
 
@@ -1191,7 +1323,11 @@ func (conns *ActiveConnections) IsNewConnectionAllowed(ipAddr, protocol string) 
 		}
 
 		// on a single SFTP connection we could have multiple SFTP channels or commands
-		// so we check the estabilished connections too
+		// so we check the estabilished connections and active uploads too
+		if transfers := conns.transfers.getTotal(); transfers >= int32(Config.MaxTotalConnections) {
+			logger.Info(logSender, "", "active transfers %d/%d", transfers, Config.MaxTotalConnections)
+			return ErrConnectionDenied
+		}
 
 		conns.RLock()
 		defer conns.RUnlock()
@@ -1221,6 +1357,7 @@ func (conns *ActiveConnections) GetStats(role string) []ConnectionStatus {
 				RemoteAddress:  c.GetRemoteAddress(),
 				ConnectionTime: util.GetTimeAsMsSinceEpoch(c.GetConnectionTime()),
 				LastActivity:   util.GetTimeAsMsSinceEpoch(c.GetLastActivity()),
+				CurrentTime:    util.GetTimeAsMsSinceEpoch(time.Now()),
 				Protocol:       c.GetProtocol(),
 				Command:        c.GetCommand(),
 				Transfers:      c.GetTransfers(),
@@ -1246,6 +1383,8 @@ type ConnectionStatus struct {
 	ConnectionTime int64 `json:"connection_time"`
 	// Last activity as unix timestamp in milliseconds
 	LastActivity int64 `json:"last_activity"`
+	// Current time as unix timestamp in milliseconds
+	CurrentTime int64 `json:"current_time"`
 	// Protocol for this connection
 	Protocol string `json:"protocol"`
 	// active uploads/downloads
@@ -1254,45 +1393,6 @@ type ConnectionStatus struct {
 	Command string `json:"command,omitempty"`
 	// Node identifier, omitted for single node installations
 	Node string `json:"node,omitempty"`
-}
-
-// GetConnectionDuration returns the connection duration as string
-func (c *ConnectionStatus) GetConnectionDuration() string {
-	elapsed := time.Since(util.GetTimeFromMsecSinceEpoch(c.ConnectionTime))
-	return util.GetDurationAsString(elapsed)
-}
-
-// GetConnectionInfo returns connection info.
-// Protocol,Client Version and RemoteAddress are returned.
-func (c *ConnectionStatus) GetConnectionInfo() string {
-	var result strings.Builder
-
-	result.WriteString(fmt.Sprintf("%v. Client: %q From: %q", c.Protocol, c.ClientVersion, c.RemoteAddress))
-
-	if c.Command == "" {
-		return result.String()
-	}
-
-	switch c.Protocol {
-	case ProtocolSSH, ProtocolFTP:
-		result.WriteString(fmt.Sprintf(". Command: %q", c.Command))
-	case ProtocolWebDAV:
-		result.WriteString(fmt.Sprintf(". Method: %q", c.Command))
-	}
-
-	return result.String()
-}
-
-// GetTransfersAsString returns the active transfers as string
-func (c *ConnectionStatus) GetTransfersAsString() string {
-	result := ""
-	for _, t := range c.Transfers {
-		if result != "" {
-			result += ". "
-		}
-		result += t.getConnectionTransferAsString()
-	}
-	return result
 }
 
 // ActiveQuotaScan defines an active quota scan for a user
@@ -1412,77 +1512,6 @@ func (s *ActiveScans) RemoveVFolderQuotaScan(folderName string) bool {
 			lastIdx := len(s.FolderScans) - 1
 			s.FolderScans[idx] = s.FolderScans[lastIdx]
 			s.FolderScans = s.FolderScans[:lastIdx]
-			return true
-		}
-	}
-
-	return false
-}
-
-// MetadataCheck defines an active metadata check
-type MetadataCheck struct {
-	// Username to which the metadata check refers
-	Username string `json:"username"`
-	// check start time as unix timestamp in milliseconds
-	StartTime int64  `json:"start_time"`
-	Role      string `json:"-"`
-}
-
-// MetadataChecks holds the active metadata checks
-type MetadataChecks struct {
-	sync.RWMutex
-	checks []MetadataCheck
-}
-
-// Get returns the active metadata checks
-func (c *MetadataChecks) Get(role string) []MetadataCheck {
-	c.RLock()
-	defer c.RUnlock()
-
-	checks := make([]MetadataCheck, 0, len(c.checks))
-	for _, check := range c.checks {
-		if role == "" || role == check.Role {
-			checks = append(checks, MetadataCheck{
-				Username:  check.Username,
-				StartTime: check.StartTime,
-			})
-		}
-	}
-
-	return checks
-}
-
-// Add adds a user to the ones with active metadata checks.
-// Return false if a metadata check is already active for the specified user
-func (c *MetadataChecks) Add(username, role string) bool {
-	c.Lock()
-	defer c.Unlock()
-
-	for idx := range c.checks {
-		if c.checks[idx].Username == username {
-			return false
-		}
-	}
-
-	c.checks = append(c.checks, MetadataCheck{
-		Username:  username,
-		StartTime: util.GetTimeAsMsSinceEpoch(time.Now()),
-		Role:      role,
-	})
-
-	return true
-}
-
-// Remove removes a user from the ones with active metadata checks
-func (c *MetadataChecks) Remove(username string) bool {
-	c.Lock()
-	defer c.Unlock()
-
-	for idx := range c.checks {
-		if c.checks[idx].Username == username {
-			lastIdx := len(c.checks) - 1
-			c.checks[idx] = c.checks[lastIdx]
-			c.checks = c.checks[:lastIdx]
 			return true
 		}
 	}

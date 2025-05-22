@@ -1,4 +1,4 @@
-// Copyright (C) 2019-2023 Nicola Murino
+// Copyright (C) 2019 Nicola Murino
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published
@@ -24,25 +24,37 @@ import (
 	"path"
 	"path/filepath"
 	"runtime"
+	"slices"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/eikenb/pipeat"
 	"github.com/pkg/sftp"
 	"github.com/sftpgo/sdk"
-	"github.com/sftpgo/sdk/plugin/metadata"
 
 	"github.com/drakkan/sftpgo/v2/internal/kms"
 	"github.com/drakkan/sftpgo/v2/internal/logger"
-	"github.com/drakkan/sftpgo/v2/internal/plugin"
 	"github.com/drakkan/sftpgo/v2/internal/util"
 )
 
 const (
-	dirMimeType  = "inode/directory"
-	s3fsName     = "S3Fs"
-	gcsfsName    = "GCSFs"
-	azBlobFsName = "AzureBlobFs"
+	dirMimeType       = "inode/directory"
+	s3fsName          = "S3Fs"
+	gcsfsName         = "GCSFs"
+	azBlobFsName      = "AzureBlobFs"
+	lastModifiedField = "sftpgo_last_modified"
+	preResumeTimeout  = 90 * time.Second
+	// ListerBatchSize defines the default limit for DirLister implementations
+	ListerBatchSize = 1000
+)
+
+// Additional checks for files
+const (
+	CheckParentDir     = 1
+	CheckResume        = 2
+	CheckUpdateModTime = 4
 )
 
 var (
@@ -50,11 +62,21 @@ var (
 	// ErrStorageSizeUnavailable is returned if the storage backend does not support getting the size
 	ErrStorageSizeUnavailable = errors.New("unable to get available size for this storage backend")
 	// ErrVfsUnsupported defines the error for an unsupported VFS operation
-	ErrVfsUnsupported    = errors.New("not supported")
-	tempPath             string
-	sftpFingerprints     []string
-	allowSelfConnections int
-	renameMode           int
+	ErrVfsUnsupported        = errors.New("not supported")
+	errInvalidDirListerLimit = errors.New("dir lister: invalid limit, must be > 0")
+	tempPath                 string
+	sftpFingerprints         []string
+	allowSelfConnections     int
+	renameMode               int
+	readMetadata             int
+	resumeMaxSize            int64
+	uploadMode               int
+)
+
+var (
+	createPipeFn = func(dirPath string, _ int64) (pipeReaderAt, pipeWriterAt, error) {
+		return pipeat.PipeInDir(dirPath)
+	}
 )
 
 // SetAllowSelfConnections sets the desired behaviour for self connections
@@ -82,15 +104,31 @@ func SetRenameMode(val int) {
 	renameMode = val
 }
 
+// SetReadMetadataMode sets the read metadata mode
+func SetReadMetadataMode(val int) {
+	readMetadata = val
+}
+
+// SetResumeMaxSize sets the max size allowed for resuming uploads for backends
+// with immutable objects
+func SetResumeMaxSize(val int64) {
+	resumeMaxSize = val
+}
+
+// SetUploadMode sets the upload mode
+func SetUploadMode(val int) {
+	uploadMode = val
+}
+
 // Fs defines the interface for filesystem backends
 type Fs interface {
 	Name() string
 	ConnectionID() string
 	Stat(name string) (os.FileInfo, error)
 	Lstat(name string) (os.FileInfo, error)
-	Open(name string, offset int64) (File, *pipeat.PipeReaderAt, func(), error)
-	Create(name string, flag int) (File, *PipeWriter, func(), error)
-	Rename(source, target string) (int, int64, error)
+	Open(name string, offset int64) (File, PipeReader, func(), error)
+	Create(name string, flag, checks int) (File, PipeWriter, func(), error)
+	Rename(source, target string, checks int) (int, int64, error)
 	Remove(name string, isDir bool) error
 	Mkdir(name string) error
 	Symlink(source, target string) error
@@ -98,9 +136,10 @@ type Fs interface {
 	Chmod(name string, mode os.FileMode) error
 	Chtimes(name string, atime, mtime time.Time, isUploading bool) error
 	Truncate(name string, size int64) error
-	ReadDir(dirname string) ([]os.FileInfo, error)
+	ReadDir(dirname string) (DirLister, error)
 	Readlink(name string) (string, error)
 	IsUploadResumeSupported() bool
+	IsConditionalUploadResumeSupported(size int64) bool
 	IsAtomicUploadSupported() bool
 	CheckRootPath(username string, uid int, gid int) bool
 	ResolvePath(virtualPath string) (string, error)
@@ -116,7 +155,6 @@ type Fs interface {
 	HasVirtualFolders() bool
 	GetMimeType(name string) (string, error)
 	GetAvailableDiskSize(dirName string) (*sftp.StatVFS, error)
-	CheckMetadata() error
 	Close() error
 }
 
@@ -126,17 +164,10 @@ type FsRealPather interface {
 	RealPath(p string) (string, error)
 }
 
-// fsMetadataChecker is a Fs that implements the getFileNamesInPrefix method.
-// This interface is used to abstract metadata consistency checks
-type fsMetadataChecker interface {
-	Fs
-	getFileNamesInPrefix(fsPrefix string) (map[string]bool, error)
-}
-
 // FsFileCopier is a Fs that implements the CopyFile method.
 type FsFileCopier interface {
 	Fs
-	CopyFile(source, target string, srcSize int64) error
+	CopyFile(source, target string, srcInfo os.FileInfo) (int, int64, error)
 }
 
 // File defines an interface representing a SFTPGo file
@@ -150,6 +181,82 @@ type File interface {
 	Stat() (os.FileInfo, error)
 	Name() string
 	Truncate(size int64) error
+}
+
+// PipeWriter defines an interface representing a SFTPGo pipe writer
+type PipeWriter interface {
+	io.Writer
+	io.WriterAt
+	io.Closer
+	Done(err error)
+	GetWrittenBytes() int64
+}
+
+// PipeReader defines an interface representing a SFTPGo pipe reader
+type PipeReader interface {
+	io.Reader
+	io.ReaderAt
+	io.Closer
+	setMetadata(value map[string]string)
+	setMetadataFromPointerVal(value map[string]*string)
+	Metadata() map[string]string
+}
+
+type pipeReaderAt interface {
+	Read(p []byte) (int, error)
+	ReadAt(p []byte, offset int64) (int, error)
+	GetReadedBytes() int64
+	Close() error
+	CloseWithError(err error) error
+}
+
+type pipeWriterAt interface {
+	Write(p []byte) (int, error)
+	WriteAt(p []byte, offset int64) (int, error)
+	GetWrittenBytes() int64
+	Close() error
+	CloseWithError(err error) error
+}
+
+// DirLister defines an interface for a directory lister
+type DirLister interface {
+	Next(limit int) ([]os.FileInfo, error)
+	Close() error
+}
+
+// Metadater defines an interface to implement to return metadata for a file
+type Metadater interface {
+	Metadata() map[string]string
+}
+
+type baseDirLister struct {
+	cache []os.FileInfo
+}
+
+func (l *baseDirLister) Next(limit int) ([]os.FileInfo, error) {
+	if limit <= 0 {
+		return nil, errInvalidDirListerLimit
+	}
+	if len(l.cache) >= limit {
+		return l.returnFromCache(limit), nil
+	}
+	return l.returnFromCache(limit), io.EOF
+}
+
+func (l *baseDirLister) returnFromCache(limit int) []os.FileInfo {
+	if len(l.cache) >= limit {
+		result := l.cache[:limit]
+		l.cache = l.cache[limit:]
+		return result
+	}
+	result := l.cache
+	l.cache = nil
+	return result
+}
+
+func (l *baseDirLister) Close() error {
+	l.cache = nil
+	return nil
 }
 
 // QuotaCheckResult defines the result for a quota check
@@ -182,13 +289,17 @@ func (q *QuotaCheckResult) GetRemainingFiles() int {
 // S3FsConfig defines the configuration for S3 based filesystem
 type S3FsConfig struct {
 	sdk.BaseS3FsConfig
-	AccessSecret *kms.Secret `json:"access_secret,omitempty"`
+	AccessSecret   *kms.Secret `json:"access_secret,omitempty"`
+	SSECustomerKey *kms.Secret `json:"sse_customer_key,omitempty"`
 }
 
 // HideConfidentialData hides confidential data
 func (c *S3FsConfig) HideConfidentialData() {
 	if c.AccessSecret != nil {
 		c.AccessSecret.Hide()
+	}
+	if c.SSECustomerKey != nil {
+		c.SSECustomerKey.Hide()
 	}
 }
 
@@ -220,8 +331,10 @@ func (c *S3FsConfig) isEqual(other S3FsConfig) bool {
 	if !c.areMultipartFieldsEqual(other) {
 		return false
 	}
-
 	if c.ForcePathStyle != other.ForcePathStyle {
+		return false
+	}
+	if c.SkipTLSVerify != other.SkipTLSVerify {
 		return false
 	}
 	return c.isSecretEqual(other)
@@ -250,6 +363,15 @@ func (c *S3FsConfig) areMultipartFieldsEqual(other S3FsConfig) bool {
 }
 
 func (c *S3FsConfig) isSecretEqual(other S3FsConfig) bool {
+	if c.SSECustomerKey == nil {
+		c.SSECustomerKey = kms.NewEmptySecret()
+	}
+	if other.SSECustomerKey == nil {
+		other.SSECustomerKey = kms.NewEmptySecret()
+	}
+	if !c.SSECustomerKey.IsEqual(other.SSECustomerKey) {
+		return false
+	}
 	if c.AccessSecret == nil {
 		c.AccessSecret = kms.NewEmptySecret()
 	}
@@ -261,10 +383,16 @@ func (c *S3FsConfig) isSecretEqual(other S3FsConfig) bool {
 
 func (c *S3FsConfig) checkCredentials() error {
 	if c.AccessKey == "" && !c.AccessSecret.IsEmpty() {
-		return errors.New("access_key cannot be empty with access_secret not empty")
+		return util.NewI18nError(
+			errors.New("access_key cannot be empty with access_secret not empty"),
+			util.I18nErrorAccessKeyRequired,
+		)
 	}
 	if c.AccessSecret.IsEmpty() && c.AccessKey != "" {
-		return errors.New("access_secret cannot be empty with access_key not empty")
+		return util.NewI18nError(
+			errors.New("access_secret cannot be empty with access_key not empty"),
+			util.I18nErrorAccessSecretRequired,
+		)
 	}
 	if c.AccessSecret.IsEncrypted() && !c.AccessSecret.IsValid() {
 		return errors.New("invalid encrypted access_secret")
@@ -272,19 +400,43 @@ func (c *S3FsConfig) checkCredentials() error {
 	if !c.AccessSecret.IsEmpty() && !c.AccessSecret.IsValidInput() {
 		return errors.New("invalid access_secret")
 	}
+	if c.SSECustomerKey.IsEncrypted() && !c.SSECustomerKey.IsValid() {
+		return errors.New("invalid encrypted sse_customer_key")
+	}
+	if !c.SSECustomerKey.IsEmpty() && !c.SSECustomerKey.IsValidInput() {
+		return errors.New("invalid sse_customer_key")
+	}
 	return nil
 }
 
 // ValidateAndEncryptCredentials validates the configuration and encrypts access secret if it is in plain text
 func (c *S3FsConfig) ValidateAndEncryptCredentials(additionalData string) error {
 	if err := c.validate(); err != nil {
-		return util.NewValidationError(fmt.Sprintf("could not validate s3config: %v", err))
+		var errI18n *util.I18nError
+		errValidation := util.NewValidationError(fmt.Sprintf("could not validate s3config: %v", err))
+		if errors.As(err, &errI18n) {
+			return util.NewI18nError(errValidation, errI18n.Message)
+		}
+		return util.NewI18nError(errValidation, util.I18nErrorFsValidation)
 	}
 	if c.AccessSecret.IsPlain() {
 		c.AccessSecret.SetAdditionalData(additionalData)
 		err := c.AccessSecret.Encrypt()
 		if err != nil {
-			return util.NewValidationError(fmt.Sprintf("could not encrypt s3 access secret: %v", err))
+			return util.NewI18nError(
+				util.NewValidationError(fmt.Sprintf("could not encrypt s3 access secret: %v", err)),
+				util.I18nErrorFsValidation,
+			)
+		}
+	}
+	if c.SSECustomerKey.IsPlain() {
+		c.SSECustomerKey.SetAdditionalData(additionalData)
+		err := c.SSECustomerKey.Encrypt()
+		if err != nil {
+			return util.NewI18nError(
+				util.NewValidationError(fmt.Sprintf("could not encrypt s3 SSE customer key: %v", err)),
+				util.I18nErrorFsValidation,
+			)
 		}
 	}
 	return nil
@@ -292,16 +444,28 @@ func (c *S3FsConfig) ValidateAndEncryptCredentials(additionalData string) error 
 
 func (c *S3FsConfig) checkPartSizeAndConcurrency() error {
 	if c.UploadPartSize != 0 && (c.UploadPartSize < 5 || c.UploadPartSize > 5000) {
-		return errors.New("upload_part_size cannot be != 0, lower than 5 (MB) or greater than 5000 (MB)")
+		return util.NewI18nError(
+			errors.New("upload_part_size cannot be != 0, lower than 5 (MB) or greater than 5000 (MB)"),
+			util.I18nErrorULPartSizeInvalid,
+		)
 	}
 	if c.UploadConcurrency < 0 || c.UploadConcurrency > 64 {
-		return fmt.Errorf("invalid upload concurrency: %v", c.UploadConcurrency)
+		return util.NewI18nError(
+			fmt.Errorf("invalid upload concurrency: %v", c.UploadConcurrency),
+			util.I18nErrorULConcurrencyInvalid,
+		)
 	}
 	if c.DownloadPartSize != 0 && (c.DownloadPartSize < 5 || c.DownloadPartSize > 5000) {
-		return errors.New("download_part_size cannot be != 0, lower than 5 (MB) or greater than 5000 (MB)")
+		return util.NewI18nError(
+			errors.New("download_part_size cannot be != 0, lower than 5 (MB) or greater than 5000 (MB)"),
+			util.I18nErrorDLPartSizeInvalid,
+		)
 	}
 	if c.DownloadConcurrency < 0 || c.DownloadConcurrency > 64 {
-		return fmt.Errorf("invalid download concurrency: %v", c.DownloadConcurrency)
+		return util.NewI18nError(
+			fmt.Errorf("invalid download concurrency: %v", c.DownloadConcurrency),
+			util.I18nErrorDLConcurrencyInvalid,
+		)
 	}
 	return nil
 }
@@ -321,20 +485,23 @@ func (c *S3FsConfig) validate() error {
 	if c.AccessSecret == nil {
 		c.AccessSecret = kms.NewEmptySecret()
 	}
+	if c.SSECustomerKey == nil {
+		c.SSECustomerKey = kms.NewEmptySecret()
+	}
 	if c.Bucket == "" {
-		return errors.New("bucket cannot be empty")
+		return util.NewI18nError(errors.New("bucket cannot be empty"), util.I18nErrorBucketRequired)
 	}
 	// the region may be embedded within the endpoint for some S3 compatible
 	// object storage, for example B2
 	if c.Endpoint == "" && c.Region == "" {
-		return errors.New("region cannot be empty")
+		return util.NewI18nError(errors.New("region cannot be empty"), util.I18nErrorRegionRequired)
 	}
 	if err := c.checkCredentials(); err != nil {
 		return err
 	}
 	if c.KeyPrefix != "" {
 		if strings.HasPrefix(c.KeyPrefix, "/") {
-			return errors.New("key_prefix cannot start with /")
+			return util.NewI18nError(errors.New("key_prefix cannot start with /"), util.I18nErrorKeyPrefixInvalid)
 		}
 		c.KeyPrefix = path.Clean(c.KeyPrefix)
 		if !strings.HasSuffix(c.KeyPrefix, "/") {
@@ -362,13 +529,21 @@ func (c *GCSFsConfig) HideConfidentialData() {
 // ValidateAndEncryptCredentials validates the configuration and encrypts credentials if they are in plain text
 func (c *GCSFsConfig) ValidateAndEncryptCredentials(additionalData string) error {
 	if err := c.validate(); err != nil {
-		return util.NewValidationError(fmt.Sprintf("could not validate GCS config: %v", err))
+		var errI18n *util.I18nError
+		errValidation := util.NewValidationError(fmt.Sprintf("could not validate GCS config: %v", err))
+		if errors.As(err, &errI18n) {
+			return util.NewI18nError(errValidation, errI18n.Message)
+		}
+		return util.NewI18nError(errValidation, util.I18nErrorFsValidation)
 	}
 	if c.Credentials.IsPlain() {
 		c.Credentials.SetAdditionalData(additionalData)
 		err := c.Credentials.Encrypt()
 		if err != nil {
-			return util.NewValidationError(fmt.Sprintf("could not encrypt GCS credentials: %v", err))
+			return util.NewI18nError(
+				util.NewValidationError(fmt.Sprintf("could not encrypt GCS credentials: %v", err)),
+				util.I18nErrorFsValidation,
+			)
 		}
 	}
 	return nil
@@ -415,11 +590,11 @@ func (c *GCSFsConfig) validate() error {
 		c.Credentials = kms.NewEmptySecret()
 	}
 	if c.Bucket == "" {
-		return errors.New("bucket cannot be empty")
+		return util.NewI18nError(errors.New("bucket cannot be empty"), util.I18nErrorBucketRequired)
 	}
 	if c.KeyPrefix != "" {
 		if strings.HasPrefix(c.KeyPrefix, "/") {
-			return errors.New("key_prefix cannot start with /")
+			return util.NewI18nError(errors.New("key_prefix cannot start with /"), util.I18nErrorKeyPrefixInvalid)
 		}
 		c.KeyPrefix = path.Clean(c.KeyPrefix)
 		if !strings.HasSuffix(c.KeyPrefix, "/") {
@@ -430,7 +605,7 @@ func (c *GCSFsConfig) validate() error {
 		return errors.New("invalid encrypted credentials")
 	}
 	if c.AutomaticCredentials == 0 && !c.Credentials.IsValidInput() {
-		return errors.New("invalid credentials")
+		return util.NewI18nError(errors.New("invalid credentials"), util.I18nErrorFsCredentialsRequired)
 	}
 	c.StorageClass = strings.TrimSpace(c.StorageClass)
 	c.ACL = strings.TrimSpace(c.ACL)
@@ -519,18 +694,29 @@ func (c *AzBlobFsConfig) isSecretEqual(other AzBlobFsConfig) bool {
 // ValidateAndEncryptCredentials validates the configuration and  encrypts access secret if it is in plain text
 func (c *AzBlobFsConfig) ValidateAndEncryptCredentials(additionalData string) error {
 	if err := c.validate(); err != nil {
-		return util.NewValidationError(fmt.Sprintf("could not validate Azure Blob config: %v", err))
+		var errI18n *util.I18nError
+		errValidation := util.NewValidationError(fmt.Sprintf("could not validate Azure Blob config: %v", err))
+		if errors.As(err, &errI18n) {
+			return util.NewI18nError(errValidation, errI18n.Message)
+		}
+		return util.NewI18nError(errValidation, util.I18nErrorFsValidation)
 	}
 	if c.AccountKey.IsPlain() {
 		c.AccountKey.SetAdditionalData(additionalData)
 		if err := c.AccountKey.Encrypt(); err != nil {
-			return util.NewValidationError(fmt.Sprintf("could not encrypt Azure blob account key: %v", err))
+			return util.NewI18nError(
+				util.NewValidationError(fmt.Sprintf("could not encrypt Azure blob account key: %v", err)),
+				util.I18nErrorFsValidation,
+			)
 		}
 	}
 	if c.SASURL.IsPlain() {
 		c.SASURL.SetAdditionalData(additionalData)
 		if err := c.SASURL.Encrypt(); err != nil {
-			return util.NewValidationError(fmt.Sprintf("could not encrypt Azure blob SAS URL: %v", err))
+			return util.NewI18nError(
+				util.NewValidationError(fmt.Sprintf("could not encrypt Azure blob SAS URL: %v", err)),
+				util.I18nErrorFsValidation,
+			)
 		}
 	}
 	return nil
@@ -539,7 +725,10 @@ func (c *AzBlobFsConfig) ValidateAndEncryptCredentials(additionalData string) er
 func (c *AzBlobFsConfig) checkCredentials() error {
 	if c.SASURL.IsPlain() {
 		_, err := url.Parse(c.SASURL.GetPayload())
-		return err
+		if err != nil {
+			return util.NewI18nError(err, util.I18nErrorSASURLInvalid)
+		}
+		return nil
 	}
 	if c.SASURL.IsEncrypted() && !c.SASURL.IsValid() {
 		return errors.New("invalid encrypted sas_url")
@@ -547,8 +736,8 @@ func (c *AzBlobFsConfig) checkCredentials() error {
 	if !c.SASURL.IsEmpty() {
 		return nil
 	}
-	if c.AccountName == "" || !c.AccountKey.IsValidInput() {
-		return errors.New("credentials cannot be empty or invalid")
+	if c.AccountName == "" {
+		return util.NewI18nError(errors.New("account name is required"), util.I18nErrorAccountNameRequired)
 	}
 	if c.AccountKey.IsEncrypted() && !c.AccountKey.IsValid() {
 		return errors.New("invalid encrypted account_key")
@@ -558,16 +747,28 @@ func (c *AzBlobFsConfig) checkCredentials() error {
 
 func (c *AzBlobFsConfig) checkPartSizeAndConcurrency() error {
 	if c.UploadPartSize < 0 || c.UploadPartSize > 100 {
-		return fmt.Errorf("invalid upload part size: %v", c.UploadPartSize)
+		return util.NewI18nError(
+			fmt.Errorf("invalid upload part size: %v", c.UploadPartSize),
+			util.I18nErrorULPartSizeInvalid,
+		)
 	}
 	if c.UploadConcurrency < 0 || c.UploadConcurrency > 64 {
-		return fmt.Errorf("invalid upload concurrency: %v", c.UploadConcurrency)
+		return util.NewI18nError(
+			fmt.Errorf("invalid upload concurrency: %v", c.UploadConcurrency),
+			util.I18nErrorULConcurrencyInvalid,
+		)
 	}
 	if c.DownloadPartSize < 0 || c.DownloadPartSize > 100 {
-		return fmt.Errorf("invalid download part size: %v", c.DownloadPartSize)
+		return util.NewI18nError(
+			fmt.Errorf("invalid download part size: %v", c.DownloadPartSize),
+			util.I18nErrorDLPartSizeInvalid,
+		)
 	}
 	if c.DownloadConcurrency < 0 || c.DownloadConcurrency > 64 {
-		return fmt.Errorf("invalid upload concurrency: %v", c.DownloadConcurrency)
+		return util.NewI18nError(
+			fmt.Errorf("invalid upload concurrency: %v", c.DownloadConcurrency),
+			util.I18nErrorDLConcurrencyInvalid,
+		)
 	}
 	return nil
 }
@@ -589,6 +790,12 @@ func (c *AzBlobFsConfig) isSameResource(other AzBlobFsConfig) bool {
 	if c.Endpoint != other.Endpoint {
 		return false
 	}
+	if c.SASURL == nil {
+		c.SASURL = kms.NewEmptySecret()
+	}
+	if other.SASURL == nil {
+		other.SASURL = kms.NewEmptySecret()
+	}
 	return c.SASURL.GetPayload() == other.SASURL.GetPayload()
 }
 
@@ -602,14 +809,14 @@ func (c *AzBlobFsConfig) validate() error {
 	}
 	// container could be embedded within SAS URL we check this at runtime
 	if c.SASURL.IsEmpty() && c.Container == "" {
-		return errors.New("container cannot be empty")
+		return util.NewI18nError(errors.New("container cannot be empty"), util.I18nErrorContainerRequired)
 	}
 	if err := c.checkCredentials(); err != nil {
 		return err
 	}
 	if c.KeyPrefix != "" {
 		if strings.HasPrefix(c.KeyPrefix, "/") {
-			return errors.New("key_prefix cannot start with /")
+			return util.NewI18nError(errors.New("key_prefix cannot start with /"), util.I18nErrorKeyPrefixInvalid)
 		}
 		c.KeyPrefix = path.Clean(c.KeyPrefix)
 		if !strings.HasSuffix(c.KeyPrefix, "/") {
@@ -619,7 +826,7 @@ func (c *AzBlobFsConfig) validate() error {
 	if err := c.checkPartSizeAndConcurrency(); err != nil {
 		return err
 	}
-	if !util.Contains(validAzAccessTier, c.AccessTier) {
+	if !slices.Contains(validAzAccessTier, c.AccessTier) {
 		return fmt.Errorf("invalid access tier %q, valid values: \"''%v\"", c.AccessTier, strings.Join(validAzAccessTier, ", "))
 	}
 	return nil
@@ -627,6 +834,7 @@ func (c *AzBlobFsConfig) validate() error {
 
 // CryptFsConfig defines the configuration to store local files as encrypted
 type CryptFsConfig struct {
+	sdk.OSFsConfig
 	Passphrase *kms.Secret `json:"passphrase,omitempty"`
 }
 
@@ -650,12 +858,20 @@ func (c *CryptFsConfig) isEqual(other CryptFsConfig) bool {
 // ValidateAndEncryptCredentials validates the configuration and encrypts the passphrase if it is in plain text
 func (c *CryptFsConfig) ValidateAndEncryptCredentials(additionalData string) error {
 	if err := c.validate(); err != nil {
-		return util.NewValidationError(fmt.Sprintf("could not validate Crypt fs config: %v", err))
+		var errI18n *util.I18nError
+		errValidation := util.NewValidationError(fmt.Sprintf("could not validate crypt fs config: %v", err))
+		if errors.As(err, &errI18n) {
+			return util.NewI18nError(errValidation, errI18n.Message)
+		}
+		return util.NewI18nError(errValidation, util.I18nErrorFsValidation)
 	}
 	if c.Passphrase.IsPlain() {
 		c.Passphrase.SetAdditionalData(additionalData)
 		if err := c.Passphrase.Encrypt(); err != nil {
-			return util.NewValidationError(fmt.Sprintf("could not encrypt Crypt fs passphrase: %v", err))
+			return util.NewI18nError(
+				util.NewValidationError(fmt.Sprintf("could not encrypt Crypt fs passphrase: %v", err)),
+				util.I18nErrorFsValidation,
+			)
 		}
 	}
 	return nil
@@ -668,10 +884,10 @@ func (c *CryptFsConfig) isSameResource(other CryptFsConfig) bool {
 // validate returns an error if the configuration is not valid
 func (c *CryptFsConfig) validate() error {
 	if c.Passphrase == nil || c.Passphrase.IsEmpty() {
-		return errors.New("invalid passphrase")
+		return util.NewI18nError(errors.New("invalid passphrase"), util.I18nErrorPassphraseRequired)
 	}
 	if !c.Passphrase.IsValidInput() {
-		return errors.New("passphrase cannot be empty or invalid")
+		return util.NewI18nError(errors.New("passphrase cannot be empty or invalid"), util.I18nErrorPassphraseRequired)
 	}
 	if c.Passphrase.IsEncrypted() && !c.Passphrase.IsValid() {
 		return errors.New("invalid encrypted passphrase")
@@ -679,44 +895,119 @@ func (c *CryptFsConfig) validate() error {
 	return nil
 }
 
-// PipeWriter defines a wrapper for pipeat.PipeWriterAt.
-type PipeWriter struct {
-	writer *pipeat.PipeWriterAt
-	err    error
-	done   chan bool
+// pipeWriter defines a wrapper for a pipeWriterAt.
+type pipeWriter struct {
+	pipeWriterAt
+	err  error
+	done chan bool
 }
 
 // NewPipeWriter initializes a new PipeWriter
-func NewPipeWriter(w *pipeat.PipeWriterAt) *PipeWriter {
-	return &PipeWriter{
-		writer: w,
-		err:    nil,
-		done:   make(chan bool),
+func NewPipeWriter(w pipeWriterAt) PipeWriter {
+	return &pipeWriter{
+		pipeWriterAt: w,
+		err:          nil,
+		done:         make(chan bool),
 	}
 }
 
-// Close waits for the upload to end, closes the pipeat.PipeWriterAt and returns an error if any.
-func (p *PipeWriter) Close() error {
-	p.writer.Close() //nolint:errcheck // the returned error is always null
+// Close waits for the upload to end, closes the pipeWriterAt and returns an error if any.
+func (p *pipeWriter) Close() error {
+	p.pipeWriterAt.Close() //nolint:errcheck // the returned error is always null
 	<-p.done
 	return p.err
 }
 
 // Done unlocks other goroutines waiting on Close().
 // It must be called when the upload ends
-func (p *PipeWriter) Done(err error) {
+func (p *pipeWriter) Done(err error) {
 	p.err = err
 	p.done <- true
 }
 
-// WriteAt is a wrapper for pipeat WriteAt
-func (p *PipeWriter) WriteAt(data []byte, off int64) (int, error) {
-	return p.writer.WriteAt(data, off)
+func newPipeWriterAtOffset(w pipeWriterAt, offset int64) PipeWriter {
+	return &pipeWriterAtOffset{
+		pipeWriter: &pipeWriter{
+			pipeWriterAt: w,
+			err:          nil,
+			done:         make(chan bool),
+		},
+		offset:      offset,
+		writeOffset: offset,
+	}
 }
 
-// Write is a wrapper for pipeat Write
-func (p *PipeWriter) Write(data []byte) (int, error) {
-	return p.writer.Write(data)
+type pipeWriterAtOffset struct {
+	*pipeWriter
+	offset      int64
+	writeOffset int64
+}
+
+func (p *pipeWriterAtOffset) WriteAt(buf []byte, off int64) (int, error) {
+	if off < p.offset {
+		return 0, fmt.Errorf("invalid offset %d, minimum accepted %d", off, p.offset)
+	}
+	return p.pipeWriter.WriteAt(buf, off-p.offset)
+}
+
+func (p *pipeWriterAtOffset) Write(buf []byte) (int, error) {
+	n, err := p.WriteAt(buf, p.writeOffset)
+	p.writeOffset += int64(n)
+	return n, err
+}
+
+// NewPipeReader initializes a new PipeReader
+func NewPipeReader(r pipeReaderAt) PipeReader {
+	return &pipeReader{
+		pipeReaderAt: r,
+	}
+}
+
+// pipeReader defines a wrapper for pipeat.PipeReaderAt.
+type pipeReader struct {
+	pipeReaderAt
+	mu       sync.RWMutex
+	metadata map[string]string
+}
+
+func (p *pipeReader) setMetadata(value map[string]string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	p.metadata = value
+}
+
+func (p *pipeReader) setMetadataFromPointerVal(value map[string]*string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if len(value) == 0 {
+		p.metadata = nil
+		return
+	}
+
+	p.metadata = map[string]string{}
+	for k, v := range value {
+		val := util.GetStringFromPointer(v)
+		if val != "" {
+			p.metadata[k] = val
+		}
+	}
+}
+
+// Metadata implements the Metadater interface
+func (p *pipeReader) Metadata() map[string]string {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	if len(p.metadata) == 0 {
+		return nil
+	}
+	result := make(map[string]string)
+	for k, v := range p.metadata {
+		result[k] = v
+	}
+	return result
 }
 
 func isEqualityCheckModeValid(mode int) bool {
@@ -752,21 +1043,24 @@ func IsHTTPFs(fs Fs) bool {
 	return strings.HasPrefix(fs.Name(), httpFsName)
 }
 
-// IsBufferedSFTPFs returns true if this is a buffered SFTP filesystem
-func IsBufferedSFTPFs(fs Fs) bool {
+// IsBufferedLocalOrSFTPFs returns true if this is a buffered SFTP or local filesystem
+func IsBufferedLocalOrSFTPFs(fs Fs) bool {
+	if osFs, ok := fs.(*OsFs); ok {
+		return osFs.writeBufferSize > 0
+	}
 	if !IsSFTPFs(fs) {
 		return false
 	}
 	return !fs.IsUploadResumeSupported()
 }
 
-// IsLocalOrUnbufferedSFTPFs returns true if fs is local or SFTP with no buffer
-func IsLocalOrUnbufferedSFTPFs(fs Fs) bool {
-	if IsLocalOsFs(fs) {
-		return true
+// FsOpenReturnsFile returns true if fs.Open returns a *os.File handle
+func FsOpenReturnsFile(fs Fs) bool {
+	if osFs, ok := fs.(*OsFs); ok {
+		return osFs.readBufferSize == 0
 	}
-	if IsSFTPFs(fs) {
-		return fs.IsUploadResumeSupported()
+	if sftpFs, ok := fs.(*SFTPFs); ok {
+		return sftpFs.config.BufferSize == 0
 	}
 	return false
 }
@@ -781,16 +1075,30 @@ func HasTruncateSupport(fs Fs) bool {
 	return IsLocalOsFs(fs) || IsSFTPFs(fs) || IsHTTPFs(fs)
 }
 
+// IsRenameAtomic returns true if renaming a directory is supposed to be atomic
+func IsRenameAtomic(fs Fs) bool {
+	if strings.HasPrefix(fs.Name(), s3fsName) {
+		return false
+	}
+	if strings.HasPrefix(fs.Name(), gcsfsName) {
+		return false
+	}
+	if strings.HasPrefix(fs.Name(), azBlobFsName) {
+		return false
+	}
+	return true
+}
+
 // HasImplicitAtomicUploads returns true if the fs don't persists partial files on error
 func HasImplicitAtomicUploads(fs Fs) bool {
 	if strings.HasPrefix(fs.Name(), s3fsName) {
-		return true
+		return uploadMode&4 == 0
 	}
 	if strings.HasPrefix(fs.Name(), gcsfsName) {
-		return true
+		return uploadMode&8 == 0
 	}
 	if strings.HasPrefix(fs.Name(), azBlobFsName) {
-		return true
+		return uploadMode&16 == 0
 	}
 	return false
 }
@@ -828,100 +1136,81 @@ func SetPathPermissions(fs Fs, path string, uid int, gid int) {
 	}
 }
 
-func updateFileInfoModTime(storageID, objectPath string, info *FileInfo) (*FileInfo, error) {
-	if !plugin.Handler.HasMetadater() {
-		return info, nil
+// IsUploadResumeSupported returns true if resuming uploads is supported
+func IsUploadResumeSupported(fs Fs, size int64) bool {
+	if fs.IsUploadResumeSupported() {
+		return true
 	}
-	if info.IsDir() {
-		return info, nil
-	}
-	mTime, err := plugin.Handler.GetModificationTime(storageID, ensureAbsPath(objectPath), info.IsDir())
-	if errors.Is(err, metadata.ErrNoSuchObject) {
-		return info, nil
-	}
-	if err != nil {
-		return info, err
-	}
-	info.modTime = util.GetTimeFromMsecSinceEpoch(mTime)
-	return info, nil
+	return fs.IsConditionalUploadResumeSupported(size)
 }
 
-func getFolderModTimes(storageID, dirName string) (map[string]int64, error) {
-	var err error
-	modTimes := make(map[string]int64)
-	if plugin.Handler.HasMetadater() {
-		modTimes, err = plugin.Handler.GetModificationTimes(storageID, ensureAbsPath(dirName))
-		if err != nil && !errors.Is(err, metadata.ErrNoSuchObject) {
-			return modTimes, err
+func getLastModified(metadata map[string]string) int64 {
+	if val, ok := metadata[lastModifiedField]; ok && val != "" {
+		lastModified, err := strconv.ParseInt(val, 10, 64)
+		if err == nil {
+			return lastModified
 		}
 	}
-	return modTimes, nil
+	return 0
 }
 
-func ensureAbsPath(name string) string {
-	if path.IsAbs(name) {
-		return name
+func getAzureLastModified(metadata map[string]*string) int64 {
+	for k, v := range metadata {
+		if strings.EqualFold(k, lastModifiedField) {
+			if val := util.GetStringFromPointer(v); val != "" {
+				lastModified, err := strconv.ParseInt(val, 10, 64)
+				if err == nil {
+					return lastModified
+				}
+			}
+			return 0
+		}
 	}
-	return path.Join("/", name)
+	return 0
 }
 
-func fsMetadataCheck(fs fsMetadataChecker, storageID, keyPrefix string) error {
-	if !plugin.Handler.HasMetadater() {
-		return nil
+func validateOSFsConfig(config *sdk.OSFsConfig) error {
+	if config.ReadBufferSize < 0 || config.ReadBufferSize > 10 {
+		return fmt.Errorf("invalid read buffer size must be between 0 and 10 MB")
 	}
-	limit := 100
-	from := ""
+	if config.WriteBufferSize < 0 || config.WriteBufferSize > 10 {
+		return fmt.Errorf("invalid write buffer size must be between 0 and 10 MB")
+	}
+	return nil
+}
+
+func doCopy(dst io.Writer, src io.Reader, buf []byte) (written int64, err error) {
+	if buf == nil {
+		buf = make([]byte, 32768)
+	}
 	for {
-		metadataFolders, err := plugin.Handler.GetMetadataFolders(storageID, from, limit)
-		if err != nil {
-			fsLog(fs, logger.LevelError, "unable to get folders: %v", err)
-			return err
-		}
-		for _, folder := range metadataFolders {
-			from = folder
-			fsPrefix := folder
-			if !strings.HasSuffix(folder, "/") {
-				fsPrefix += "/"
-			}
-			if keyPrefix != "" {
-				if !strings.HasPrefix(fsPrefix, "/"+keyPrefix) {
-					fsLog(fs, logger.LevelDebug, "skip metadata check for folder %q outside prefix %q",
-						folder, keyPrefix)
-					continue
+		nr, er := src.Read(buf)
+		if nr > 0 {
+			nw, ew := dst.Write(buf[0:nr])
+			if nw < 0 || nr < nw {
+				nw = 0
+				if ew == nil {
+					ew = errors.New("invalid write")
 				}
 			}
-			fsLog(fs, logger.LevelDebug, "check metadata for folder %q", folder)
-			metadataValues, err := plugin.Handler.GetModificationTimes(storageID, folder)
-			if err != nil {
-				fsLog(fs, logger.LevelError, "unable to get modification times for folder %q: %v", folder, err)
-				return err
+			written += int64(nw)
+			if ew != nil {
+				err = ew
+				break
 			}
-			if len(metadataValues) == 0 {
-				fsLog(fs, logger.LevelDebug, "no metadata for folder %q", folder)
-				continue
-			}
-			fileNames, err := fs.getFileNamesInPrefix(fsPrefix)
-			if err != nil {
-				fsLog(fs, logger.LevelError, "unable to get content for prefix %q: %v", fsPrefix, err)
-				return err
-			}
-			// now check if we have metadata for a missing object
-			for k := range metadataValues {
-				if _, ok := fileNames[k]; !ok {
-					filePath := ensureAbsPath(path.Join(folder, k))
-					if err = plugin.Handler.RemoveMetadata(storageID, filePath); err != nil {
-						fsLog(fs, logger.LevelError, "unable to remove metadata for missing file %q: %v", filePath, err)
-					} else {
-						fsLog(fs, logger.LevelDebug, "metadata removed for missing file %q", filePath)
-					}
-				}
+			if nr != nw {
+				err = io.ErrShortWrite
+				break
 			}
 		}
-
-		if len(metadataFolders) < limit {
-			return nil
+		if er != nil {
+			if er != io.EOF {
+				err = er
+			}
+			break
 		}
 	}
+	return written, err
 }
 
 func getMountPath(mountPath string) string {
@@ -929,6 +1218,57 @@ func getMountPath(mountPath string) string {
 		return ""
 	}
 	return mountPath
+}
+
+func getLocalTempDir() string {
+	if tempPath != "" {
+		return tempPath
+	}
+	return filepath.Clean(os.TempDir())
+}
+
+func doRecursiveRename(fs Fs, source, target string,
+	renameFn func(string, string, os.FileInfo, int, bool) (int, int64, error),
+	recursion int, updateModTime bool,
+) (int, int64, error) {
+	var numFiles int
+	var filesSize int64
+
+	if recursion > util.MaxRecursion {
+		return numFiles, filesSize, util.ErrRecursionTooDeep
+	}
+	recursion++
+
+	lister, err := fs.ReadDir(source)
+	if err != nil {
+		return numFiles, filesSize, err
+	}
+	defer lister.Close()
+
+	for {
+		entries, err := lister.Next(ListerBatchSize)
+		finished := errors.Is(err, io.EOF)
+		if err != nil && !finished {
+			return numFiles, filesSize, err
+		}
+		for _, info := range entries {
+			sourceEntry := fs.Join(source, info.Name())
+			targetEntry := fs.Join(target, info.Name())
+			files, size, err := renameFn(sourceEntry, targetEntry, info, recursion, updateModTime)
+			if err != nil {
+				if fs.IsNotExist(err) {
+					fsLog(fs, logger.LevelInfo, "skipping rename for %q: %v", sourceEntry, err)
+					continue
+				}
+				return numFiles, filesSize, err
+			}
+			numFiles += files
+			filesSize += size
+		}
+		if finished {
+			return numFiles, filesSize, nil
+		}
+	}
 }
 
 func fsLog(fs Fs, level logger.LogLevel, format string, v ...any) {

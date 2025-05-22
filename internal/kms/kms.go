@@ -1,4 +1,4 @@
-// Copyright (C) 2019-2023 Nicola Murino
+// Copyright (C) 2019 Nicola Murino
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published
@@ -18,13 +18,13 @@ package kms
 import (
 	"encoding/json"
 	"errors"
-	"os"
 	"strings"
 	"sync"
 
 	sdkkms "github.com/sftpgo/sdk/kms"
 
 	"github.com/drakkan/sftpgo/v2/internal/logger"
+	"github.com/drakkan/sftpgo/v2/internal/util"
 )
 
 // SecretProvider defines the interface for a KMS secrets provider
@@ -73,7 +73,8 @@ var (
 	// ErrInvalidSecret defines the error to return if a secret is not valid
 	ErrInvalidSecret    = errors.New("invalid secret")
 	validSecretStatuses = []string{sdkkms.SecretStatusPlain, sdkkms.SecretStatusAES256GCM, sdkkms.SecretStatusSecretBox,
-		sdkkms.SecretStatusVaultTransit, sdkkms.SecretStatusAWS, sdkkms.SecretStatusGCP, sdkkms.SecretStatusRedacted}
+		sdkkms.SecretStatusVaultTransit, sdkkms.SecretStatusAWS, sdkkms.SecretStatusGCP, sdkkms.SecretStatusAzureKeyVault,
+		sdkkms.SecretStatusOracleKeyVault, sdkkms.SecretStatusRedacted}
 	config          Configuration
 	secretProviders = make(map[string]registeredSecretProvider)
 )
@@ -105,15 +106,14 @@ func NewPlainSecret(payload string) *Secret {
 
 // Initialize configures the KMS support
 func (c *Configuration) Initialize() error {
-	if c.Secrets.MasterKeyString != "" {
-		c.Secrets.masterKey = c.Secrets.MasterKeyString
-	}
-	if c.Secrets.masterKey == "" && c.Secrets.MasterKeyPath != "" {
-		mKey, err := os.ReadFile(c.Secrets.MasterKeyPath)
+	if c.Secrets.MasterKeyPath != "" {
+		mKey, err := util.ReadConfigFromFile(c.Secrets.MasterKeyPath, "")
 		if err != nil {
 			return err
 		}
-		c.Secrets.masterKey = strings.TrimSpace(string(mKey))
+		c.Secrets.masterKey = mKey
+	} else if c.Secrets.MasterKeyString != "" {
+		c.Secrets.masterKey = c.Secrets.MasterKeyString
 	}
 	config = *c
 	if config.Secrets.URL == "" {
