@@ -35,6 +35,7 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
       - name: Gather image information
         id: info
         run: |
@@ -43,7 +44,6 @@ jobs:
           MINOR=""
           MAJOR=""
           FEATURES="nopgxregisterdefaulttypes"
-#          FEATURES="nopgxregisterdefaulttypes,disable_grpc_modules"
           if [ "${{ github.event_name }}" = "schedule" ]; then
             VERSION=nightly
           elif [[ $GITHUB_REF == refs/tags/* ]]; then
