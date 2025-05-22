@@ -35,7 +35,6 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
       - name: Gather image information
         id: info
         run: |
