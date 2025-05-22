@@ -1,4 +1,4 @@
-// Copyright (C) 2019-2023 Nicola Murino
+// Copyright (C) 2019 Nicola Murino
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published
@@ -94,8 +94,7 @@ func (c *Config) Initialize(configDir string) error {
 		customTransport.TLSClientConfig.RootCAs = rootCAs
 	} else {
 		customTransport.TLSClientConfig = &tls.Config{
-			RootCAs:    rootCAs,
-			NextProtos: []string{"h2", "http/1.1"},
+			RootCAs: rootCAs,
 		}
 	}
 	customTransport.TLSClientConfig.InsecureSkipVerify = c.SkipTLSVerify

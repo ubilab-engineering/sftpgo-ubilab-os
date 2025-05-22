@@ -29,7 +29,7 @@ info:
     SFTPGo supports groups to simplify the administration of multiple accounts by letting you assign settings once to a group, instead of multiple times to each individual user.
     The SFTPGo WebClient allows end users to change their credentials, browse and manage their files in the browser and setup two-factor authentication which works with Authy, Google Authenticator and other compatible apps.
     From the WebClient each authorized user can also create HTTP/S links to externally share files and folders securely, by setting limits to the number of downloads/uploads, protecting the share with a password, limiting access by source IP address, setting an automatic expiration date.
-  version: 2.4.4-dev
+  version: 2.6.6
   contact:
     name: API support
     url: 'https://github.com/drakkan/sftpgo'
@@ -127,7 +127,7 @@ paths:
         '201':
           description: successful operation
           content:
-            application/json; charset=utf-8:
+            application/json:
               schema:
                 $ref: '#/components/schemas/ApiResponse'
         '400':
@@ -222,7 +222,7 @@ paths:
         '200':
           description: successful operation
           content:
-            application/json; charset=utf-8:
+            application/json:
               schema:
                 type: array
                 items:
@@ -291,7 +291,7 @@ paths:
         '201':
           description: successful operation
           content:
-            application/json; charset=utf-8:
+            application/json:
               schema:
                 $ref: '#/components/schemas/ApiResponse'
         '400':
@@ -326,7 +326,7 @@ paths:
         '200':
           description: successful operation
           content:
-            application/json; charset=utf-8:
+            application/json:
               schema:
                 $ref: '#/components/schemas/Token'
         '401':
@@ -350,7 +350,7 @@ paths:
         '200':
           description: successful operation
           content:
-            application/json; charset=utf-8:
+            application/json:
               schema:
                 $ref: '#/components/schemas/ApiResponse'
         '401':
@@ -381,7 +381,7 @@ paths:
         '200':
           description: successful operation
           content:
-            application/json; charset=utf-8:
+            application/json:
               schema:
                 $ref: '#/components/schemas/Token'
         '401':
@@ -405,7 +405,7 @@ paths:
         '200':
           description: successful operation
           content:
-            application/json; charset=utf-8:
+            application/json:
               schema:
                 $ref: '#/components/schemas/ApiResponse'
         '401':
@@ -427,7 +427,7 @@ paths:
         '200':
           description: successful operation
           content:
-            application/json; charset=utf-8:
+            application/json:
               schema:
                 $ref: '#/components/schemas/VersionInfo'
         '401':
@@ -450,14 +450,14 @@ paths:
       requestBody:
         required: true
         content:
-          application/json; charset=utf-8:
+          application/json:
             schema:
               $ref: '#/components/schemas/PwdChange'
       responses:
         '200':
           description: successful operation
           content:
-            application/json; charset=utf-8:
+            application/json:
               schema:
                 $ref: '#/components/schemas/ApiResponse'
         '401':
@@ -481,7 +481,7 @@ paths:
         '200':
           description: successful operation
           content:
-            application/json; charset=utf-8:
+            application/json:
               schema:
                 $ref: '#/components/schemas/AdminProfile'
         '401':
@@ -503,14 +503,14 @@ paths:
       requestBody:
         required: true
         content:
-          application/json; charset=utf-8:
+          application/json:
             schema:
               $ref: '#/components/schemas/AdminProfile'
       responses:
         '200':
           description: successful operation
           content:
-            application/json; charset=utf-8:
+            application/json:
               schema:
                 $ref: '#/components/schemas/ApiResponse'
         '400':
@@ -536,7 +536,7 @@ paths:
         '200':
           description: successful operation
           content:
-            application/json; charset=utf-8:
+            application/json:
               schema:
                 type: array
                 items:
@@ -561,7 +561,7 @@ paths:
         '200':
           description: successful operation
           content:
-            application/json; charset=utf-8:
+            application/json:
               schema:
                 type: array
                 items:
@@ -589,7 +589,7 @@ paths:
         '200':
           description: successful operation
           content:
-            application/json; charset=utf-8:
+            application/json:
               schema:
                 type: array
                 items:
@@ -614,7 +614,7 @@ paths:
       requestBody:
         required: true
         content:
-          application/json; charset=utf-8:
+          application/json:
             schema:
               type: object
               properties:
@@ -625,7 +625,7 @@ paths:
         '200':
           description: successful operation
           content:
-            application/json; charset=utf-8:
+            application/json:
               schema:
                 type: object
                 properties:
@@ -634,6 +634,8 @@ paths:
                   issuer:
                     type: string
                   secret:
+                    type: string
+                  url:
                     type: string
                   qr_code:
                     type: string
@@ -661,7 +663,7 @@ paths:
       requestBody:
         required: true
         content:
-          application/json; charset=utf-8:
+          application/json:
             schema:
               type: object
               properties:
@@ -678,7 +680,7 @@ paths:
         '200':
           description: successful operation
           content:
-            application/json; charset=utf-8:
+            application/json:
               schema:
                 $ref: '#/components/schemas/ApiResponse'
               example:
@@ -705,14 +707,14 @@ paths:
       requestBody:
         required: true
         content:
-          application/json; charset=utf-8:
+          application/json:
             schema:
               $ref: '#/components/schemas/AdminTOTPConfig'
       responses:
         '200':
           description: successful operation
           content:
-            application/json; charset=utf-8:
+            application/json:
               schema:
                 $ref: '#/components/schemas/ApiResponse'
               example:
@@ -738,7 +740,7 @@ paths:
         '200':
           description: successful operation
           content:
-            application/json; charset=utf-8:
+            application/json:
               schema:
                 type: array
                 items:
@@ -769,7 +771,7 @@ paths:
         '200':
           description: successful operation
           content:
-            application/json; charset=utf-8:
+            application/json:
               schema:
                 $ref: '#/components/schemas/ApiResponse'
               example:
@@ -833,7 +835,7 @@ paths:
         '200':
           description: successful operation
           content:
-            application/json; charset=utf-8:
+            application/json:
               schema:
                 type: array
                 items:
@@ -857,7 +859,7 @@ paths:
       requestBody:
         required: true
         content:
-          application/json; charset=utf-8:
+          application/json:
             schema:
               $ref: '#/components/schemas/IPListEntry'
       responses:
@@ -869,7 +871,7 @@ paths:
                 type: string
               description: 'URI of the newly created object'
           content:
-            application/json; charset=utf-8:
+            application/json:
               schema:
                 $ref: '#/components/schemas/ApiResponse'
               example:
@@ -907,7 +909,7 @@ paths:
         '200':
           description: successful operation
           content:
-            application/json; charset=utf-8:
+            application/json:
               schema:
                 $ref: '#/components/schemas/IPListEntry'
         '400':
@@ -931,14 +933,14 @@ paths:
       requestBody:
         required: true
         content:
-          application/json; charset=utf-8:
+          application/json:
             schema:
               $ref: '#/components/schemas/IPListEntry'
       responses:
         '200':
           description: successful operation
           content:
-            application/json; charset=utf-8:
+            application/json:
               schema:
                 $ref: '#/components/schemas/ApiResponse'
               example:
@@ -965,7 +967,7 @@ paths:
         '200':
           description: successful operation
           content:
-            application/json; charset=utf-8:
+            application/json:
               schema:
                 $ref: '#/components/schemas/ApiResponse'
               example:
@@ -993,7 +995,7 @@ paths:
         '200':
           description: successful operation
           content:
-            application/json; charset=utf-8:
+            application/json:
               schema:
                 type: array
                 items:
@@ -1026,7 +1028,7 @@ paths:
         '200':
           description: successful operation
           content:
-            application/json; charset=utf-8:
+            application/json:
               schema:
                 $ref: '#/components/schemas/DefenderEntry'
         '401':
@@ -1049,7 +1051,7 @@ paths:
         '200':
           description: successful operation
           content:
-            application/json; charset=utf-8:
+            application/json:
               schema:
                 $ref: '#/components/schemas/ApiResponse'
         '401':
@@ -1058,67 +1060,6 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
-        '500':
-          $ref: '#/components/responses/InternalServerError'
-        default:
-          $ref: '#/components/responses/DefaultResponse'
-  /metadata/users/checks:
-    get:
-      tags:
-        - metadata
-      summary: Get metadata checks
-      description: Returns the active metadata checks
-      operationId: get_users_metadata_checks
-      responses:
-        '200':
-          description: successful operation
-          content:
-            application/json; charset=utf-8:
-              schema:
-                type: array
-                items:
-                  $ref: '#/components/schemas/MetadataCheck'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '403':
-          $ref: '#/components/responses/Forbidden'
-        '500':
-          $ref: '#/components/responses/InternalServerError'
-        default:
-          $ref: '#/components/responses/DefaultResponse'
-  /metadata/users/{username}/check:
-    parameters:
-      - name: username
-        in: path
-        description: the username
-        required: true
-        schema:
-          type: string
-    post:
-      tags:
-        - metadata
-      summary: Start a metadata check
-      description: 'Starts a new metadata check for the given user. A metadata check requires a metadata plugin and removes the metadata associated to missing items (for example objects deleted outside SFTPGo). If a metadata check for this user is already active a 409 status code is returned. Metadata are stored for cloud storage backends. This API does nothing for other backends or if no metadata plugin is configured'
-      operationId: start_user_metadata_check
-      responses:
-        '202':
-          description: successful operation
-          content:
-            application/json; charset=utf-8:
-              schema:
-                $ref: '#/components/schemas/ApiResponse'
-              example:
-                message: Check started
-        '400':
-          $ref: '#/components/responses/BadRequest'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '403':
-          $ref: '#/components/responses/Forbidden'
-        '404':
-          $ref: '#/components/responses/NotFound'
-        '409':
-          $ref: '#/components/responses/Conflict'
         '500':
           $ref: '#/components/responses/InternalServerError'
         default:
@@ -1134,7 +1075,7 @@ paths:
         '200':
           description: successful operation
           content:
-            application/json; charset=utf-8:
+            application/json:
               schema:
                 type: array
                 items:
@@ -1173,7 +1114,7 @@ paths:
         required: true
         description: 'Defines virtual paths to check and their retention time in hours'
         content:
-          application/json; charset=utf-8:
+          application/json:
             schema:
               type: array
               items:
@@ -1182,7 +1123,7 @@ paths:
         '202':
           description: successful operation
           content:
-            application/json; charset=utf-8:
+            application/json:
               schema:
                 $ref: '#/components/schemas/ApiResponse'
               example:
@@ -1212,7 +1153,7 @@ paths:
         '200':
           description: successful operation
           content:
-            application/json; charset=utf-8:
+            application/json:
               schema:
                 type: array
                 items:
@@ -1243,7 +1184,7 @@ paths:
         '202':
           description: successful operation
           content:
-            application/json; charset=utf-8:
+            application/json:
               schema:
                 $ref: '#/components/schemas/ApiResponse'
               example:
@@ -1294,14 +1235,14 @@ paths:
         required: true
         description: 'If used_quota_size and used_quota_files are missing they will default to 0, this means that if mode is "add" the current value, for the missing field, will remain unchanged, if mode is "reset" the missing field is set to 0'
         content:
-          application/json; charset=utf-8:
+          application/json:
             schema:
               $ref: '#/components/schemas/QuotaUsage'
       responses:
         '200':
           description: successful operation
           content:
-            application/json; charset=utf-8:
+            application/json:
               schema:
                 $ref: '#/components/schemas/ApiResponse'
               example:
@@ -1352,14 +1293,14 @@ paths:
         required: true
         description: 'If used_upload_data_transfer and used_download_data_transfer are missing they will default to 0, this means that if mode is "add" the current value, for the missing field, will remain unchanged, if mode is "reset" the missing field is set to 0'
         content:
-          application/json; charset=utf-8:
+          application/json:
             schema:
               $ref: '#/components/schemas/TransferQuotaUsage'
       responses:
         '200':
           description: successful operation
           content:
-            application/json; charset=utf-8:
+            application/json:
               schema:
                 $ref: '#/components/schemas/ApiResponse'
               example:
@@ -1389,7 +1330,7 @@ paths:
         '200':
           description: successful operation
           content:
-            application/json; charset=utf-8:
+            application/json:
               schema:
                 type: array
                 items:
@@ -1420,7 +1361,7 @@ paths:
         '202':
           description: successful operation
           content:
-            application/json; charset=utf-8:
+            application/json:
               schema:
                 $ref: '#/components/schemas/ApiResponse'
               example:
@@ -1486,14 +1427,14 @@ paths:
         required: true
         description: 'If used_quota_size and used_quota_files are missing they will default to 0, this means that if mode is "add" the current value, for the missing field, will remain unchanged, if mode is "reset" the missing field is set to 0'
         content:
-          application/json; charset=utf-8:
+          application/json:
             schema:
               $ref: '#/components/schemas/QuotaUsage'
       responses:
         '200':
           description: successful operation
           content:
-            application/json; charset=utf-8:
+            application/json:
               schema:
                 $ref: '#/components/schemas/ApiResponse'
               example:
@@ -1550,7 +1491,7 @@ paths:
         '200':
           description: successful operation
           content:
-            application/json; charset=utf-8:
+            application/json:
               schema:
                 type: array
                 items:
@@ -1571,10 +1512,16 @@ paths:
       summary: Add folder
       operationId: add_folder
       description: Adds a new folder. A quota scan is required to update the used files/size
+      parameters:
+        - in: query
+          name: confidential_data
+          schema:
+            type: integer
+          description: 'If set to 1 confidential data will not be hidden. This means that the response will contain the key and additional data for secrets. If a master key is not set or an external KMS is used, the data returned are enough to get the secrets in cleartext. Ignored if the * permission is not granted.'
       requestBody:
         required: true
         content:
-          application/json; charset=utf-8:
+          application/json:
             schema:
               $ref: '#/components/schemas/BaseVirtualFolder'
       responses:
@@ -1586,7 +1533,7 @@ paths:
                 type: string
               description: 'URI of the newly created object'
           content:
-            application/json; charset=utf-8:
+            application/json:
               schema:
                 $ref: '#/components/schemas/BaseVirtualFolder'
         '400':
@@ -1613,11 +1560,17 @@ paths:
       summary: Find folders by name
       description: Returns the folder with the given name if it exists.
       operationId: get_folder_by_name
+      parameters:
+        - in: query
+          name: confidential_data
+          schema:
+            type: integer
+          description: 'If set to 1 confidential data will not be hidden. This means that the response will contain the key and additional data for secrets. If a master key is not set or an external KMS is used, the data returned are enough to get the secrets in cleartext. Ignored if the * permission is not granted.'
       responses:
         '200':
           description: successful operation
           content:
-            application/json; charset=utf-8:
+            application/json:
               schema:
                 $ref: '#/components/schemas/BaseVirtualFolder'
         '400':
@@ -1641,14 +1594,14 @@ paths:
       requestBody:
         required: true
         content:
-          application/json; charset=utf-8:
+          application/json:
             schema:
               $ref: '#/components/schemas/BaseVirtualFolder'
       responses:
         '200':
           description: successful operation
           content:
-            application/json; charset=utf-8:
+            application/json:
               schema:
                 $ref: '#/components/schemas/ApiResponse'
               example:
@@ -1675,7 +1628,7 @@ paths:
         '200':
           description: successful operation
           content:
-            application/json; charset=utf-8:
+            application/json:
               schema:
                 $ref: '#/components/schemas/ApiResponse'
               example:
@@ -1730,7 +1683,7 @@ paths:
         '200':
           description: successful operation
           content:
-            application/json; charset=utf-8:
+            application/json:
               schema:
                 type: array
                 items:
@@ -1751,10 +1704,16 @@ paths:
       summary: Add group
       operationId: add_group
       description: Adds a new group
+      parameters:
+        - in: query
+          name: confidential_data
+          schema:
+            type: integer
+          description: 'If set to 1 confidential data will not be hidden. This means that the response will contain the key and additional data for secrets. If a master key is not set or an external KMS is used, the data returned are enough to get the secrets in cleartext. Ignored if the * permission is not granted.'
       requestBody:
         required: true
         content:
-          application/json; charset=utf-8:
+          application/json:
             schema:
               $ref: '#/components/schemas/Group'
       responses:
@@ -1766,7 +1725,7 @@ paths:
                 type: string
               description: 'URI of the newly created object'
           content:
-            application/json; charset=utf-8:
+            application/json:
               schema:
                 $ref: '#/components/schemas/Group'
         '400':
@@ -1793,11 +1752,17 @@ paths:
       summary: Find groups by name
       description: Returns the group with the given name if it exists.
       operationId: get_group_by_name
+      parameters:
+        - in: query
+          name: confidential_data
+          schema:
+            type: integer
+          description: 'If set to 1 confidential data will not be hidden. This means that the response will contain the key and additional data for secrets. If a master key is not set or an external KMS is used, the data returned are enough to get the secrets in cleartext. Ignored if the * permission is not granted.'
       responses:
         '200':
           description: successful operation
           content:
-            application/json; charset=utf-8:
+            application/json:
               schema:
                 $ref: '#/components/schemas/Group'
         '400':
@@ -1821,14 +1786,14 @@ paths:
       requestBody:
         required: true
         content:
-          application/json; charset=utf-8:
+          application/json:
             schema:
               $ref: '#/components/schemas/Group'
       responses:
         '200':
           description: successful operation
           content:
-            application/json; charset=utf-8:
+            application/json:
               schema:
                 $ref: '#/components/schemas/ApiResponse'
               example:
@@ -1855,7 +1820,7 @@ paths:
         '200':
           description: successful operation
           content:
-            application/json; charset=utf-8:
+            application/json:
               schema:
                 $ref: '#/components/schemas/ApiResponse'
               example:
@@ -1910,7 +1875,7 @@ paths:
         '200':
           description: successful operation
           content:
-            application/json; charset=utf-8:
+            application/json:
               schema:
                 type: array
                 items:
@@ -1934,7 +1899,7 @@ paths:
       requestBody:
         required: true
         content:
-          application/json; charset=utf-8:
+          application/json:
             schema:
               $ref: '#/components/schemas/Role'
       responses:
@@ -1946,7 +1911,7 @@ paths:
                 type: string
               description: 'URI of the newly created object'
           content:
-            application/json; charset=utf-8:
+            application/json:
               schema:
                 $ref: '#/components/schemas/Role'
         '400':
@@ -1977,7 +1942,7 @@ paths:
         '200':
           description: successful operation
           content:
-            application/json; charset=utf-8:
+            application/json:
               schema:
                 $ref: '#/components/schemas/Role'
         '400':
@@ -2001,14 +1966,14 @@ paths:
       requestBody:
         required: true
         content:
-          application/json; charset=utf-8:
+          application/json:
             schema:
               $ref: '#/components/schemas/Role'
       responses:
         '200':
           description: successful operation
           content:
-            application/json; charset=utf-8:
+            application/json:
               schema:
                 $ref: '#/components/schemas/ApiResponse'
               example:
@@ -2035,7 +2000,7 @@ paths:
         '200':
           description: successful operation
           content:
-            application/json; charset=utf-8:
+            application/json:
               schema:
                 $ref: '#/components/schemas/ApiResponse'
               example:
@@ -2090,7 +2055,7 @@ paths:
         '200':
           description: successful operation
           content:
-            application/json; charset=utf-8:
+            application/json:
               schema:
                 type: array
                 items:
@@ -2111,10 +2076,16 @@ paths:
       summary: Add event action
       operationId: add_event_action
       description: Adds a new event actions
+      parameters:
+        - in: query
+          name: confidential_data
+          schema:
+            type: integer
+          description: 'If set to 1 confidential data will not be hidden. This means that the response will contain the key and additional data for secrets. If a master key is not set or an external KMS is used, the data returned are enough to get the secrets in cleartext. Ignored if the * permission is not granted.'
       requestBody:
         required: true
         content:
-          application/json; charset=utf-8:
+          application/json:
             schema:
               $ref: '#/components/schemas/BaseEventAction'
       responses:
@@ -2126,7 +2097,7 @@ paths:
                 type: string
               description: 'URI of the newly created object'
           content:
-            application/json; charset=utf-8:
+            application/json:
               schema:
                 $ref: '#/components/schemas/BaseEventAction'
         '400':
@@ -2153,11 +2124,17 @@ paths:
       summary: Find event actions by name
       description: Returns the event action with the given name if it exists.
       operationId: get_event_action_by_name
+      parameters:
+        - in: query
+          name: confidential_data
+          schema:
+            type: integer
+          description: 'If set to 1 confidential data will not be hidden. This means that the response will contain the key and additional data for secrets. If a master key is not set or an external KMS is used, the data returned are enough to get the secrets in cleartext. Ignored if the * permission is not granted.'
       responses:
         '200':
           description: successful operation
           content:
-            application/json; charset=utf-8:
+            application/json:
               schema:
                 $ref: '#/components/schemas/BaseEventAction'
         '400':
@@ -2181,14 +2158,14 @@ paths:
       requestBody:
         required: true
         content:
-          application/json; charset=utf-8:
+          application/json:
             schema:
               $ref: '#/components/schemas/BaseEventAction'
       responses:
         '200':
           description: successful operation
           content:
-            application/json; charset=utf-8:
+            application/json:
               schema:
                 $ref: '#/components/schemas/ApiResponse'
               example:
@@ -2215,7 +2192,7 @@ paths:
         '200':
           description: successful operation
           content:
-            application/json; charset=utf-8:
+            application/json:
               schema:
                 $ref: '#/components/schemas/ApiResponse'
               example:
@@ -2270,7 +2247,7 @@ paths:
         '200':
           description: successful operation
           content:
-            application/json; charset=utf-8:
+            application/json:
               schema:
                 type: array
                 items:
@@ -2291,10 +2268,16 @@ paths:
       summary: Add event rule
       operationId: add_event_rule
       description: Adds a new event rule
+      parameters:
+        - in: query
+          name: confidential_data
+          schema:
+            type: integer
+          description: 'If set to 1 confidential data will not be hidden. This means that the response will contain the key and additional data for secrets. If a master key is not set or an external KMS is used, the data returned are enough to get the secrets in cleartext. Ignored if the * permission is not granted.'
       requestBody:
         required: true
         content:
-          application/json; charset=utf-8:
+          application/json:
             schema:
               $ref: '#/components/schemas/EventRuleMinimal'
       responses:
@@ -2306,7 +2289,7 @@ paths:
                 type: string
               description: 'URI of the newly created object'
           content:
-            application/json; charset=utf-8:
+            application/json:
               schema:
                 $ref: '#/components/schemas/EventRule'
         '400':
@@ -2333,11 +2316,17 @@ paths:
       summary: Find event rules by name
       description: Returns the event rule with the given name if it exists.
       operationId: get_event_rile_by_name
+      parameters:
+        - in: query
+          name: confidential_data
+          schema:
+            type: integer
+          description: 'If set to 1 confidential data will not be hidden. This means that the response will contain the key and additional data for secrets. If a master key is not set or an external KMS is used, the data returned are enough to get the secrets in cleartext. Ignored if the * permission is not granted.'
       responses:
         '200':
           description: successful operation
           content:
-            application/json; charset=utf-8:
+            application/json:
               schema:
                 $ref: '#/components/schemas/EventRule'
         '400':
@@ -2361,14 +2350,14 @@ paths:
       requestBody:
         required: true
         content:
-          application/json; charset=utf-8:
+          application/json:
             schema:
               $ref: '#/components/schemas/EventRuleMinimal'
       responses:
         '200':
           description: successful operation
           content:
-            application/json; charset=utf-8:
+            application/json:
               schema:
                 $ref: '#/components/schemas/ApiResponse'
               example:
@@ -2395,7 +2384,7 @@ paths:
         '200':
           description: successful operation
           content:
-            application/json; charset=utf-8:
+            application/json:
               schema:
                 $ref: '#/components/schemas/ApiResponse'
               example:
@@ -2430,7 +2419,7 @@ paths:
         '202':
           description: successful operation
           content:
-            application/json; charset=utf-8:
+            application/json:
               schema:
                 $ref: '#/components/schemas/ApiResponse'
               example:
@@ -2546,13 +2535,10 @@ paths:
           explode: false
           required: false
         - in: query
-          name: exclude_ids
+          name: from_id
           schema:
-            type: array
-            items:
-              type: string
-          description: 'the event id must not be included among those specified. This is useful for cursor based pagination. Empty or missing means omit this filter. Values must be specified comma separated'
-          explode: false
+            type: string
+          description: 'the event id to start from. This is useful for cursor based pagination. Empty or missing means omit this filter.'
           required: false
         - in: query
           name: role
@@ -2590,7 +2576,7 @@ paths:
         '200':
           description: successful operation
           content:
-            application/json; charset=utf-8:
+            application/json:
               schema:
                 type: array
                 items:
@@ -2680,13 +2666,10 @@ paths:
           explode: false
           required: false
         - in: query
-          name: exclude_ids
+          name: from_id
           schema:
-            type: array
-            items:
-              type: string
-          description: 'the event id must not be included among those specified. This is useful for cursor based pagination. Empty or missing means omit this filter. Values must be specified comma separated'
-          explode: false
+            type: string
+          description: 'the event id to start from. This is useful for cursor based pagination. Empty or missing means omit this filter.'
           required: false
         - in: query
           name: role
@@ -2731,11 +2714,136 @@ paths:
         '200':
           description: successful operation
           content:
-            application/json; charset=utf-8:
+            application/json:
               schema:
                 type: array
                 items:
                   $ref: '#/components/schemas/ProviderEvent'
+            text/csv:
+              schema:
+                type: string
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+        default:
+          $ref: '#/components/responses/DefaultResponse'
+  /events/log:
+    get:
+      tags:
+        - events
+      summary: Get log events
+      description: 'Returns an array with one or more log events applying the specified filters. This API is only available if you configure an "eventsearcher" plugin'
+      operationId: get_log_events
+      parameters:
+        - in: query
+          name: start_timestamp
+          schema:
+            type: integer
+            format: int64
+            minimum: 0
+            default: 0
+          required: false
+          description: 'the event timestamp, unix timestamp in nanoseconds, must be greater than or equal to the specified one. 0 or missing means omit this filter'
+        - in: query
+          name: end_timestamp
+          schema:
+            type: integer
+            format: int64
+            minimum: 0
+            default: 0
+          required: false
+          description: 'the event timestamp, unix timestamp in nanoseconds, must be less than or equal to the specified one. 0 or missing means omit this filter'
+        - in: query
+          name: events
+          schema:
+            type: array
+            items:
+              $ref: '#/components/schemas/LogEventType'
+          description: 'the log events must be included among those specified. Empty or missing means omit this filter. Events must be specified comma separated'
+          explode: false
+          required: false
+        - in: query
+          name: username
+          schema:
+            type: string
+          description: 'the event username must be the same as the one specified. Empty or missing means omit this filter'
+          required: false
+        - in: query
+          name: ip
+          schema:
+            type: string
+          description: 'the event IP must be the same as the one specified. Empty or missing means omit this filter'
+          required: false
+        - in: query
+          name: protocols
+          schema:
+            type: array
+            items:
+              $ref: '#/components/schemas/EventProtocols'
+          description: 'the event protocol must be included among those specified. Empty or missing means omit this filter. Values must be specified comma separated'
+          explode: false
+          required: false
+        - in: query
+          name: instance_ids
+          schema:
+            type: array
+            items:
+              type: string
+          description: 'the event instance id must be included among those specified. Empty or missing means omit this filter. Values must be specified comma separated'
+          explode: false
+          required: false
+        - in: query
+          name: from_id
+          schema:
+            type: string
+          description: 'the event id to start from. This is useful for cursor based pagination. Empty or missing means omit this filter.'
+          required: false
+        - in: query
+          name: role
+          schema:
+            type: string
+          description: 'User role. Empty or missing means omit this filter. Ignored if the admin has a role'
+          required: false
+        - in: query
+          name: csv_export
+          schema:
+            type: boolean
+            default: false
+          required: false
+          description: 'If enabled, events are exported as a CSV file'
+        - in: query
+          name: limit
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 1000
+            default: 100
+          required: false
+          description: 'The maximum number of items to return. Max value is 1000, default is 100'
+        - in: query
+          name: order
+          required: false
+          description: Ordering events by timestamp. Default DESC
+          schema:
+            type: string
+            enum:
+              - ASC
+              - DESC
+            example: DESC
+      responses:
+        '200':
+          description: successful operation
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/LogEvent'
             text/csv:
               schema:
                 type: string
@@ -2789,7 +2897,7 @@ paths:
         '200':
           description: successful operation
           content:
-            application/json; charset=utf-8:
+            application/json:
               schema:
                 type: array
                 items:
@@ -2815,7 +2923,7 @@ paths:
       requestBody:
         required: true
         content:
-          application/json; charset=utf-8:
+          application/json:
             schema:
               $ref: '#/components/schemas/APIKey'
       responses:
@@ -2831,7 +2939,7 @@ paths:
                 type: string
               description: URI to retrieve the details for the new created API key
           content:
-            application/json; charset=utf-8:
+            application/json:
               schema:
                 type: object
                 properties:
@@ -2871,7 +2979,7 @@ paths:
         '200':
           description: successful operation
           content:
-            application/json; charset=utf-8:
+            application/json:
               schema:
                 $ref: '#/components/schemas/APIKey'
         '400':
@@ -2897,14 +3005,14 @@ paths:
       requestBody:
         required: true
         content:
-          application/json; charset=utf-8:
+          application/json:
             schema:
               $ref: '#/components/schemas/APIKey'
       responses:
         '200':
           description: successful operation
           content:
-            application/json; charset=utf-8:
+            application/json:
               schema:
                 $ref: '#/components/schemas/ApiResponse'
               example:
@@ -2933,7 +3041,7 @@ paths:
         '200':
           description: successful operation
           content:
-            application/json; charset=utf-8:
+            application/json:
               schema:
                 $ref: '#/components/schemas/ApiResponse'
               example:
@@ -2988,7 +3096,7 @@ paths:
         '200':
           description: successful operation
           content:
-            application/json; charset=utf-8:
+            application/json:
               schema:
                 type: array
                 items:
@@ -3012,7 +3120,7 @@ paths:
       requestBody:
         required: true
         content:
-          application/json; charset=utf-8:
+          application/json:
             schema:
               $ref: '#/components/schemas/Admin'
       responses:
@@ -3024,7 +3132,7 @@ paths:
                 type: string
               description: 'URI of the newly created object'
           content:
-            application/json; charset=utf-8:
+            application/json:
               schema:
                 $ref: '#/components/schemas/Admin'
         '400':
@@ -3055,7 +3163,7 @@ paths:
         '200':
           description: successful operation
           content:
-            application/json; charset=utf-8:
+            application/json:
               schema:
                 $ref: '#/components/schemas/Admin'
         '400':
@@ -3079,14 +3187,14 @@ paths:
       requestBody:
         required: true
         content:
-          application/json; charset=utf-8:
+          application/json:
             schema:
               $ref: '#/components/schemas/Admin'
       responses:
         '200':
           description: successful operation
           content:
-            application/json; charset=utf-8:
+            application/json:
               schema:
                 $ref: '#/components/schemas/ApiResponse'
               example:
@@ -3113,7 +3221,7 @@ paths:
         '200':
           description: successful operation
           content:
-            application/json; charset=utf-8:
+            application/json:
               schema:
                 $ref: '#/components/schemas/ApiResponse'
               example:
@@ -3148,7 +3256,7 @@ paths:
         '200':
           description: successful operation
           content:
-            application/json; charset=utf-8:
+            application/json:
               schema:
                 $ref: '#/components/schemas/ApiResponse'
               example:
@@ -3184,7 +3292,7 @@ paths:
         '200':
           description: successful operation
           content:
-            application/json; charset=utf-8:
+            application/json:
               schema:
                 $ref: '#/components/schemas/ApiResponse'
         '400':
@@ -3216,7 +3324,7 @@ paths:
       operationId: admin_reset_password
       requestBody:
         content:
-          application/json; charset=utf-8:
+          application/json:
             schema:
               type: object
               properties:
@@ -3229,7 +3337,7 @@ paths:
         '200':
           description: successful operation
           content:
-            application/json; charset=utf-8:
+            application/json:
               schema:
                 $ref: '#/components/schemas/ApiResponse'
         '400':
@@ -3282,7 +3390,7 @@ paths:
         '200':
           description: successful operation
           content:
-            application/json; charset=utf-8:
+            application/json:
               schema:
                 type: array
                 items:
@@ -3303,10 +3411,16 @@ paths:
       summary: Add user
       description: 'Adds a new user.Recovery codes and TOTP configuration cannot be set using this API: each user must use the specific APIs'
       operationId: add_user
+      parameters:
+        - in: query
+          name: confidential_data
+          schema:
+            type: integer
+          description: 'If set to 1 confidential data will not be hidden. This means that the response will contain the hash of the password and the key and additional data for secrets. If a master key is not set or an external KMS is used, the data returned are enough to get the secrets in cleartext. Ignored if the * permission is not granted.'
       requestBody:
         required: true
         content:
-          application/json; charset=utf-8:
+          application/json:
             schema:
               $ref: '#/components/schemas/User'
       responses:
@@ -3318,7 +3432,7 @@ paths:
                 type: string
               description: 'URI of the newly created object'
           content:
-            application/json; charset=utf-8:
+            application/json:
               schema:
                 $ref: '#/components/schemas/User'
         '400':
@@ -3345,11 +3459,17 @@ paths:
       summary: Find users by username
       description: Returns the user with the given username if it exists. For security reasons the hashed password is omitted in the response
       operationId: get_user_by_username
+      parameters:
+        - in: query
+          name: confidential_data
+          schema:
+            type: integer
+          description: 'If set to 1 confidential data will not be hidden. This means that the response will contain the hash of the password and the key and additional data for secrets. If a master key is not set or an external KMS is used, the data returned are enough to get the secrets in cleartext. Ignored if the * permission is not granted.'
       responses:
         '200':
           description: successful operation
           content:
-            application/json; charset=utf-8:
+            application/json:
               schema:
                 $ref: '#/components/schemas/User'
         '400':
@@ -3368,7 +3488,7 @@ paths:
       tags:
         - users
       summary: Update user
-      description: 'Updates an existing user and optionally disconnects it, if connected, to apply the new settings. Recovery codes and TOTP configuration cannot be set/updated using this API: each user must use the specific APIs'
+      description: 'Updates an existing user and optionally disconnects it, if connected, to apply the new settings. The current password will be preserved if the password field is omitted in the request body. Recovery codes and TOTP configuration cannot be set/updated using this API: each user must use the specific APIs'
       operationId: update_user
       parameters:
         - in: query
@@ -3385,14 +3505,14 @@ paths:
       requestBody:
         required: true
         content:
-          application/json; charset=utf-8:
+          application/json:
             schema:
               $ref: '#/components/schemas/User'
       responses:
         '200':
           description: successful operation
           content:
-            application/json; charset=utf-8:
+            application/json:
               schema:
                 $ref: '#/components/schemas/ApiResponse'
               example:
@@ -3419,7 +3539,7 @@ paths:
         '200':
           description: successful operation
           content:
-            application/json; charset=utf-8:
+            application/json:
               schema:
                 $ref: '#/components/schemas/ApiResponse'
               example:
@@ -3454,7 +3574,7 @@ paths:
         '200':
           description: successful operation
           content:
-            application/json; charset=utf-8:
+            application/json:
               schema:
                 $ref: '#/components/schemas/ApiResponse'
               example:
@@ -3490,7 +3610,7 @@ paths:
         '200':
           description: successful operation
           content:
-            application/json; charset=utf-8:
+            application/json:
               schema:
                 $ref: '#/components/schemas/ApiResponse'
         '400':
@@ -3522,7 +3642,7 @@ paths:
       operationId: user_reset_password
       requestBody:
         content:
-          application/json; charset=utf-8:
+          application/json:
             schema:
               type: object
               properties:
@@ -3535,7 +3655,7 @@ paths:
         '200':
           description: successful operation
           content:
-            application/json; charset=utf-8:
+            application/json:
               schema:
                 $ref: '#/components/schemas/ApiResponse'
         '400':
@@ -3561,7 +3681,7 @@ paths:
         '200':
           description: successful operation
           content:
-            application/json; charset=utf-8:
+            application/json:
               schema:
                 $ref: '#/components/schemas/ServicesStatus'
         '400':
@@ -3609,11 +3729,20 @@ paths:
             indent:
               * `0` no indentation. This is the default
               * `1` format the output JSON
+        - in: query
+          name: scopes
+          schema:
+            type: array
+            items:
+              $ref: '#/components/schemas/DumpDataScopes'
+          description: 'You can limit the dump contents to the specified scopes. Empty or missing means any supported scope. Scopes must be specified comma separated'
+          explode: false
+          required: false
       responses:
         '200':
           description: successful operation
           content:
-            application/json; charset=utf-8:
+            application/json:
               schema:
                 oneOf:
                   - $ref: '#/components/schemas/ApiResponse'
@@ -3674,7 +3803,7 @@ paths:
         '200':
           description: successful operation
           content:
-            application/json; charset=utf-8:
+            application/json:
               schema:
                 $ref: '#/components/schemas/ApiResponse'
               example:
@@ -3698,14 +3827,14 @@ paths:
       requestBody:
         required: true
         content:
-          application/json; charset=utf-8:
+          application/json:
             schema:
               $ref: '#/components/schemas/BackupData'
       responses:
         '200':
           description: successful operation
           content:
-            application/json; charset=utf-8:
+            application/json:
               schema:
                 $ref: '#/components/schemas/ApiResponse'
               example:
@@ -3732,14 +3861,14 @@ paths:
       requestBody:
         required: true
         content:
-          application/json; charset=utf-8:
+          application/json:
             schema:
               $ref: '#/components/schemas/PwdChange'
       responses:
         '200':
           description: successful operation
           content:
-            application/json; charset=utf-8:
+            application/json:
               schema:
                 $ref: '#/components/schemas/ApiResponse'
         '401':
@@ -3763,7 +3892,7 @@ paths:
         '200':
           description: successful operation
           content:
-            application/json; charset=utf-8:
+            application/json:
               schema:
                 $ref: '#/components/schemas/UserProfile'
         '401':
@@ -3785,14 +3914,14 @@ paths:
       requestBody:
         required: true
         content:
-          application/json; charset=utf-8:
+          application/json:
             schema:
               $ref: '#/components/schemas/UserProfile'
       responses:
         '200':
           description: successful operation
           content:
-            application/json; charset=utf-8:
+            application/json:
               schema:
                 $ref: '#/components/schemas/ApiResponse'
         '400':
@@ -3818,7 +3947,7 @@ paths:
         '200':
           description: successful operation
           content:
-            application/json; charset=utf-8:
+            application/json:
               schema:
                 type: array
                 items:
@@ -3843,7 +3972,7 @@ paths:
         '200':
           description: successful operation
           content:
-            application/json; charset=utf-8:
+            application/json:
               schema:
                 type: array
                 items:
@@ -3871,7 +4000,7 @@ paths:
         '200':
           description: successful operation
           content:
-            application/json; charset=utf-8:
+            application/json:
               schema:
                 type: array
                 items:
@@ -3896,7 +4025,7 @@ paths:
       requestBody:
         required: true
         content:
-          application/json; charset=utf-8:
+          application/json:
             schema:
               type: object
               properties:
@@ -3907,7 +4036,7 @@ paths:
         '200':
           description: successful operation
           content:
-            application/json; charset=utf-8:
+            application/json:
               schema:
                 type: object
                 properties:
@@ -3943,7 +4072,7 @@ paths:
       requestBody:
         required: true
         content:
-          application/json; charset=utf-8:
+          application/json:
             schema:
               type: object
               properties:
@@ -3960,7 +4089,7 @@ paths:
         '200':
           description: successful operation
           content:
-            application/json; charset=utf-8:
+            application/json:
               schema:
                 $ref: '#/components/schemas/ApiResponse'
               example:
@@ -3987,14 +4116,14 @@ paths:
       requestBody:
         required: true
         content:
-          application/json; charset=utf-8:
+          application/json:
             schema:
               $ref: '#/components/schemas/UserTOTPConfig'
       responses:
         '200':
           description: successful operation
           content:
-            application/json; charset=utf-8:
+            application/json:
               schema:
                 $ref: '#/components/schemas/ApiResponse'
               example:
@@ -4047,7 +4176,7 @@ paths:
         '200':
           description: successful operation
           content:
-            application/json; charset=utf-8:
+            application/json:
               schema:
                 type: array
                 items:
@@ -4071,7 +4200,7 @@ paths:
       requestBody:
         required: true
         content:
-          application/json; charset=utf-8:
+          application/json:
             schema:
               $ref: '#/components/schemas/Share'
       responses:
@@ -4087,7 +4216,7 @@ paths:
                 type: string
               description: URI to retrieve the details for the new created share
           content:
-            application/json; charset=utf-8:
+            application/json:
               schema:
                 $ref: '#/components/schemas/ApiResponse'
         '400':
@@ -4118,7 +4247,7 @@ paths:
         '200':
           description: successful operation
           content:
-            application/json; charset=utf-8:
+            application/json:
               schema:
                 $ref: '#/components/schemas/Share'
         '400':
@@ -4142,14 +4271,14 @@ paths:
       requestBody:
         required: true
         content:
-          application/json; charset=utf-8:
+          application/json:
             schema:
               $ref: '#/components/schemas/Share'
       responses:
         '200':
           description: successful operation
           content:
-            application/json; charset=utf-8:
+            application/json:
               schema:
                 $ref: '#/components/schemas/ApiResponse'
               example:
@@ -4176,7 +4305,7 @@ paths:
         '200':
           description: successful operation
           content:
-            application/json; charset=utf-8:
+            application/json:
               schema:
                 $ref: '#/components/schemas/ApiResponse'
               example:
@@ -4215,7 +4344,7 @@ paths:
         '200':
           description: successful operation
           content:
-            application/json; charset=utf-8:
+            application/json:
               schema:
                 $ref: '#/components/schemas/ApiResponse'
         '400':
@@ -4250,7 +4379,7 @@ paths:
         '200':
           description: successful operation
           content:
-            application/json; charset=utf-8:
+            application/json:
               schema:
                 $ref: '#/components/schemas/ApiResponse'
         '400':
@@ -4280,7 +4409,7 @@ paths:
         '200':
           description: successful operation
           content:
-            application/json; charset=utf-8:
+            application/json:
               schema:
                 type: array
                 items:
@@ -4318,7 +4447,7 @@ paths:
         '201':
           description: successful operation
           content:
-            application/json; charset=utf-8:
+            application/json:
               schema:
                 $ref: '#/components/schemas/ApiResponse'
         '400':
@@ -4355,7 +4484,7 @@ paths:
         '200':
           description: successful operation
           content:
-            application/json; charset=utf-8:
+            application/json:
               schema:
                 $ref: '#/components/schemas/ApiResponse'
         '400':
@@ -4385,7 +4514,7 @@ paths:
         '200':
           description: successful operation
           content:
-            application/json; charset=utf-8:
+            application/json:
               schema:
                 $ref: '#/components/schemas/ApiResponse'
         '400':
@@ -4479,7 +4608,7 @@ paths:
         '201':
           description: successful operation
           content:
-            application/json; charset=utf-8:
+            application/json:
               schema:
                 $ref: '#/components/schemas/ApiResponse'
         '400':
@@ -4518,7 +4647,7 @@ paths:
         '200':
           description: successful operation
           content:
-            application/json; charset=utf-8:
+            application/json:
               schema:
                 $ref: '#/components/schemas/ApiResponse'
         '400':
@@ -4548,7 +4677,7 @@ paths:
         '200':
           description: successful operation
           content:
-            application/json; charset=utf-8:
+            application/json:
               schema:
                 $ref: '#/components/schemas/ApiResponse'
         '400':
@@ -4613,7 +4742,7 @@ paths:
         '201':
           description: successful operation
           content:
-            application/json; charset=utf-8:
+            application/json:
               schema:
                 $ref: '#/components/schemas/ApiResponse'
         '400':
@@ -4644,7 +4773,7 @@ paths:
           required: true
       requestBody:
         content:
-          application/json; charset=utf-8:
+          application/json:
             schema:
               type: object
               properties:
@@ -4656,7 +4785,7 @@ paths:
         '200':
           description: successful operation
           content:
-            application/json; charset=utf-8:
+            application/json:
               schema:
                 $ref: '#/components/schemas/ApiResponse'
         '400':
@@ -4681,7 +4810,7 @@ paths:
       requestBody:
         required: true
         content:
-          application/json; charset=utf-8:
+          application/json:
             schema:
               type: array
               items:
@@ -4710,49 +4839,49 @@ components:
     BadRequest:
       description: Bad Request
       content:
-        application/json; charset=utf-8:
+        application/json:
           schema:
             $ref: '#/components/schemas/ApiResponse'
     Unauthorized:
       description: Unauthorized
       content:
-        application/json; charset=utf-8:
+        application/json:
           schema:
             $ref: '#/components/schemas/ApiResponse'
     Forbidden:
       description: Forbidden
       content:
-        application/json; charset=utf-8:
+        application/json:
           schema:
             $ref: '#/components/schemas/ApiResponse'
     NotFound:
       description: Not Found
       content:
-        application/json; charset=utf-8:
+        application/json:
           schema:
             $ref: '#/components/schemas/ApiResponse'
     Conflict:
       description: Conflict
       content:
-        application/json; charset=utf-8:
+        application/json:
           schema:
             $ref: '#/components/schemas/ApiResponse'
     RequestEntityTooLarge:
       description: Request Entity Too Large, max allowed size exceeded
       content:
-        application/json; charset=utf-8:
+        application/json:
           schema:
             $ref: '#/components/schemas/ApiResponse'
     InternalServerError:
       description: Internal Server Error
       content:
-        application/json; charset=utf-8:
+        application/json:
           schema:
             $ref: '#/components/schemas/ApiResponse'
     DefaultResponse:
       description: Unexpected Error
       content:
-        application/json; charset=utf-8:
+        application/json:
           schema:
             $ref: '#/components/schemas/ApiResponse'
   schemas:
@@ -4775,6 +4904,7 @@ components:
         - chmod
         - chown
         - chtimes
+        - copy
       description: |
         Permissions:
           * `*` - all permissions are granted
@@ -4793,6 +4923,7 @@ components:
           * `chmod` changing file or directory permissions is allowed
           * `chown` changing file or directory owner and group is allowed
           * `chtimes` changing file or directory access and modification time is allowed
+          * `copy`, copying files or directories is allowed
     AdminPermissions:
       type: string
       enum:
@@ -4804,22 +4935,16 @@ components:
         - view_conns
         - close_conns
         - view_status
-        - manage_admins
+        - manage_folders
         - manage_groups
-        - manage_apikeys
         - quota_scans
-        - manage_system
         - manage_defender
         - view_defender
-        - retention_checks
-        - metadata_checks
         - view_events
-        - manage_event_rules
-        - manage_roles
-        - manage_ip_lists
+        - disable_mfa
       description: |
         Admin permissions:
-          * `*` - all permissions are granted
+          * `*` - super admin permissions are granted
           * `add_users` - add new users is allowed
           * `edit_users` - change existing users is allowed
           * `del_users` - remove users is allowed
@@ -4827,19 +4952,13 @@ components:
           * `view_conns` - list active connections is allowed
           * `close_conns` - close active connections is allowed
           * `view_status` - view the server status is allowed
-          * `manage_admins` - manage other admins is allowed
+          * `manage_folders` - manage folders is allowed
           * `manage_groups` - manage groups is allowed
-          * `manage_apikeys` - manage API keys is allowed
           * `quota_scans` - view and start quota scans is allowed
-          * `manage_system` - backups and restores are allowed
           * `manage_defender` - remove ip from the dynamic blocklist is allowed
           * `view_defender` - list the dynamic blocklist is allowed
-          * `retention_checks` - view and start retention checks is allowed
-          * `metadata_checks` - view and start metadata checks is allowed
           * `view_events` - view and search filesystem and provider events is allowed
-          * `manage_event_rules` - manage event actions and rules is allowed
-          * `manage_roles` - manage roles is allowed
-          * `manage_ip_lists` - manage global and ratelimter allow lists and defender block and safe lists is allowed
+          * `disable_mfa` - allow to disable two-factor authentication for users and admins
     FsProviders:
       type: integer
       enum:
@@ -4871,10 +4990,11 @@ components:
         - 7
         - 8
         - 9
-        - 10
         - 11
         - 12
         - 13
+        - 14
+        - 15
       description: |
         Supported event action types:
           * `1` - HTTP
@@ -4886,10 +5006,11 @@ components:
           * `7` - Transfer quota reset
           * `8` - Data retention check
           * `9` - Filesystem
-          * `10` - Metadata check
           * `11` - Password expiration check
           * `12` - User expiration check
           * `13` - Identity Provider account check
+          * `14` - User inactivity check
+          * `15` - Rotate log file
     FilesystemActionTypes:
       type: integer
       enum:
@@ -4897,12 +5018,16 @@ components:
         - 2
         - 3
         - 4
+        - 5
+        - 6
       description: |
         Supported filesystem action types:
           * `1` - Rename
           * `2` - Delete
           * `3` - Mkdis
           * `4` - Exist
+          * `5` - Compress
+          * `6` - Copy
     EventTriggerTypes:
       type: integer
       enum:
@@ -4996,6 +5121,7 @@ components:
       type: string
       enum:
         - publickey-change-disabled
+        - tls-cert-change-disabled
         - write-disabled
         - mfa-disabled
         - password-change-disabled
@@ -5007,6 +5133,7 @@ components:
       description: |
         Options:
           * `publickey-change-disabled` - changing SSH public keys is not allowed
+          * `tls-cert-change-disabled` - changing TLS certificates is not allowed
           * `write-disabled` - upload, rename, delete are not allowed even if the user has permissions for these actions
           * `mfa-disabled` - enabling multi-factor authentication is not allowed. This option cannot be set if the user has MFA already enabled
           * `password-change-disabled` - changing password is not allowed
@@ -5056,6 +5183,35 @@ components:
         - LDAPUser
         - OSUser
       description: This is an hint for authentication plugins. It is ignored when using SFTPGo internal authentication
+    DumpDataScopes:
+      type: string
+      enum:
+        - users
+        - folders
+        - groups
+        - admins
+        - api_keys
+        - shares
+        - actions
+        - rules
+        - roles
+        - ip_lists
+        - configs
+    LogEventType:
+      type: integer
+      enum:
+        - 1
+        - 2
+        - 3
+        - 4
+        - 5
+      description: >
+        Event status:
+          * `1` - Login failed
+          * `2` - Login failed non-existent user
+          * `3` - No login tried
+          * `4` - Algorithm negotiation failed
+          * `5` - Login succeeded
     FsEventStatus:
       type: integer
       enum:
@@ -5184,7 +5340,7 @@ components:
           type: array
           items:
             type: string
-          description: 'list of, case insensitive, allowed shell like patterns.'
+          description: 'list of, case insensitive, allowed shell like patterns. Allowed patterns are evaluated before the denied ones'
           example:
             - '*.jpg'
             - a*b?.png
@@ -5192,7 +5348,7 @@ components:
           type: array
           items:
             type: string
-          description: 'list of, case insensitive, denied shell like patterns. Denied patterns are evaluated before the allowed ones'
+          description: 'list of, case insensitive, denied shell like patterns'
           example:
             - '*.zip'
         deny_policy:
@@ -5201,7 +5357,7 @@ components:
             - 0
             - 1
           description: |
-            Deny policies
+            Policies for denied patterns
               * `0` - default policy. Denied files/directories matching the filters are visible in directory listing but cannot be uploaded/downloaded/overwritten/renamed
               * `1` - deny policy hide. This policy applies the same restrictions as the default one and denied files/directories matching the filters will also be hidden in directory listing. This mode may cause performance issues for large directories
     HooksFilter:
@@ -5236,23 +5392,26 @@ components:
           type: integer
           format: int32
           description: 'Maximum download bandwidth as KB/s, 0 means unlimited'
-    DataTransferLimit:
+    TimePeriod:
       type: object
       properties:
-        sources:
-          type: array
-          items:
-            type: string
-          description: 'Source networks in CIDR notation as defined in RFC 4632 and RFC 4291 for example `192.0.2.0/24` or `2001:db8::/32`. The limit applies if the defined networks contain the client IP'
-        upload_data_transfer:
+        day_of_week:
           type: integer
-          description: 'Maximum data transfer allowed for uploads as MB. 0 means no limit'
-        download_data_transfer:
-          type: integer
-          description: 'Maximum data transfer allowed for downloads as MB. 0 means no limit'
-        total_data_transfer:
-          type: integer
-          description: 'Maximum total data transfer as MB. 0 means unlimited. You can set a total data transfer instead of the individual values for uploads and downloads'
+          enum:
+            - 0
+            - 1
+            - 2
+            - 3
+            - 4
+            - 5
+            - 6
+          description: Day of week, 0 Sunday, 6 Saturday
+        from:
+          type: string
+          description: Start time in HH:MM format
+        to:
+          type: string
+          description: End time in HH:MM format
     BaseUserFilters:
       type: object
       properties:
@@ -5292,10 +5451,11 @@ components:
           description: 'maximum allowed size, as bytes, for a single file upload. The upload will be aborted if/when the size of the file being sent exceeds this limit. 0 means unlimited. This restriction does not apply for SSH system commands such as `git` and `rsync`'
         tls_username:
           type: string
-          enum:
-            - None
-            - CommonName
-          description: 'defines the TLS certificate field to use as username. For FTP clients it must match the name provided using the "USER" command. For WebDAV, if no username is provided, the CN will be used as username. For WebDAV clients it must match the implicit or provided username. Ignored if mutual TLS is disabled'
+          description: 'defines the TLS certificate field to use as username. For FTP clients it must match the name provided using the "USER" command. For WebDAV, if no username is provided, the CN will be used as username. For WebDAV clients it must match the implicit or provided username. Ignored if mutual TLS is disabled. Currently the only supported value is `CommonName`'
+        tls_certs:
+          type: array
+          items:
+            type: string
         hooks:
           $ref: '#/components/schemas/HooksFilter'
         disable_fs_checks:
@@ -5316,10 +5476,6 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/BandwidthLimit'
-        data_transfer_limits:
-          type: array
-          items:
-            $ref: '#/components/schemas/DataTransferLimit'
         external_auth_cache_time:
           type: integer
           description: 'Defines the cache time, in seconds, for users authenticated using an external auth hook. 0 means no cache'
@@ -5343,9 +5499,19 @@ components:
         default_shares_expiration:
           type: integer
           description: 'Defines the default expiration for newly created shares as number of days. 0 means no expiration'
+        max_shares_expiration:
+          type: integer
+          description: 'Defines the maximum allowed expiration, as a number of days, when a user creates or updates a share. 0 means no expiration'
         password_expiration:
           type: integer
           description: 'The password expires after the defined number of days. 0 means no expiration'
+        password_strength:
+          type: integer
+          description: 'Defines the minimum password strength. 0 means disabled, any password will be accepted. Values in the 50-70 range are suggested for common use cases'
+        access_time:
+          type: array
+          items:
+            $ref: '#/components/schemas/TimePeriod'
       description: Additional user options
     UserFilters:
       allOf:
@@ -5402,6 +5568,9 @@ components:
         role_arn:
           type: string
           description: 'Optional IAM Role ARN to assume'
+        session_token:
+          type: string
+          description: 'Optional Session token that is a part of temporary security credentials provisioned by AWS STS'
         endpoint:
           type: string
           description: optional endpoint
@@ -5510,11 +5679,34 @@ components:
         use_emulator:
           type: boolean
       description: Azure Blob Storage configuration details
+    OSFsConfig:
+      type: object
+      properties:
+        read_buffer_size:
+          type: integer
+          minimum: 0
+          maximum: 10
+          description: "The read buffer size, as MB, to use for downloads. 0 means no buffering, that's fine in most use cases."
+        write_buffer_size:
+          type: integer
+          minimum: 0
+          maximum: 10
+          description: "The write buffer size, as MB, to use for uploads. 0 means no buffering, that's fine in most use cases."
     CryptFsConfig:
       type: object
       properties:
         passphrase:
           $ref: '#/components/schemas/Secret'
+        read_buffer_size:
+          type: integer
+          minimum: 0
+          maximum: 10
+          description: "The read buffer size, as MB, to use for downloads. 0 means no buffering, that's fine in most use cases."
+        write_buffer_size:
+          type: integer
+          minimum: 0
+          maximum: 10
+          description: "The write buffer size, as MB, to use for uploads. 0 means no buffering, that's fine in most use cases."
       description: Crypt filesystem configuration details
     SFTPFsConfig:
       type: object
@@ -5585,6 +5777,8 @@ components:
       properties:
         provider:
           $ref: '#/components/schemas/FsProviders'
+        osconfig:
+          $ref: '#/components/schemas/OSFsConfig'
         s3config:
           $ref: '#/components/schemas/S3Config'
         gcsconfig:
@@ -5682,13 +5876,16 @@ components:
         password:
           type: string
           format: password
-          description: password or public key/SSH user certificate are mandatory. If the password has no known hashing algo prefix it will be stored, by default, using bcrypt, argon2id is supported too. You can send a password hashed as bcrypt ($2a$ prefix), argon2id, pbkdf2 or unix crypt and it will be stored as is. For security reasons this field is omitted when you search/get users
+          description: If the password has no known hashing algo prefix it will be stored, by default, using bcrypt, argon2id is supported too. You can send a password hashed as bcrypt ($2a$ prefix), argon2id, pbkdf2 or unix crypt and it will be stored as is. For security reasons this field is omitted when you search/get users
         public_keys:
           type: array
           items:
             type: string
             example: ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBEUWwDwEWhTbF0MqAsp/oXK1HR2cElhM8oo1uVmL3ZeDKDiTm4ljMr92wfTgIGDqIoxmVqgYIkAOAhuykAVWBzc= user@host
-          description: Public keys in OpenSSH format. A password or at least one public key/SSH user certificate are mandatory.
+          description: Public keys in OpenSSH format.
+        has_password:
+          type: boolean
+          description: Indicates whether the password is set
         home_dir:
           type: string
           description: path to the user home directory. The user cannot upload or download files outside this directory. SFTPGo tries to automatically create this folder if missing. Must be an absolute path
@@ -5696,7 +5893,7 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/VirtualFolder'
-          description: mapping between virtual SFTPGo paths and virtual folders. If one or more of the specified folders are not inside the dataprovider they will be automatically created. You have to create the folder on the filesystem yourself
+          description: mapping between virtual SFTPGo paths and virtual folders
         uid:
           type: integer
           format: int32
@@ -5831,6 +6028,10 @@ components:
         allow_api_key_auth:
           type: boolean
           description: 'API key auth allows to impersonate this administrator with an API key'
+        require_two_factor:
+          type: boolean
+        require_password_change:
+          type: boolean
         totp_config:
           $ref: '#/components/schemas/AdminTOTPConfig'
         recovery_codes:
@@ -5896,7 +6097,7 @@ components:
           description: Last user login as unix timestamp in milliseconds. It is saved at most once every 10 minutes
         role:
           type: string
-          description: 'If set the admin can only administer users with the same role. Role admins cannot have the following permissions: "manage_admins", "manage_apikeys", "manage_system", "manage_event_rules", "manage_roles", "manage_ip_lists"'
+          description: 'If set the admin can only administer users with the same role. Role admins cannot have the "*" permission'
     AdminProfile:
       type: object
       properties:
@@ -6088,16 +6289,6 @@ components:
           type: string
           format: email
           description: 'if the notification method is set to "Email", this is the e-mail address that receives the retention check report. This field is automatically set to the email address associated with the administrator starting the check'
-    MetadataCheck:
-      type: object
-      properties:
-        username:
-          type: string
-          description: username to which the check refers
-        start_time:
-          type: integer
-          format: int64
-          description: check start time as unix timestamp in milliseconds
     QuotaScan:
       type: object
       properties:
@@ -6139,6 +6330,10 @@ components:
           type: string
         fingerprint:
           type: string
+        algorithms:
+          type: array
+          items:
+            type: string
     SSHBinding:
       type: object
       properties:
@@ -6247,6 +6442,15 @@ components:
             Active connections security:
               * `0` - require matching peer IP addresses of control and data connection
               * `1` - disable any checks
+        ignore_ascii_transfer_type:
+          type: integer
+          enum:
+            - 0
+            - 1
+          description: |
+            Ignore client requests to perform ASCII translations:
+              * `0` - ASCII translations are enabled
+              * `1` - ASCII translations are silently ignored
         debug:
           type: boolean
           description: 'If enabled any FTP command will be logged'
@@ -6273,7 +6477,7 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/SSHAuthentications'
-        host_key_algos:
+        public_key_algorithms:
           type: array
           items:
             type: string
@@ -6697,6 +6901,8 @@ components:
           type: string
         open_flags:
           type: string
+        role:
+          type: string
         instance_id:
           type: string
     ProviderEvent:
@@ -6722,6 +6928,31 @@ components:
           type: string
           format: byte
           description: 'base64 of the JSON serialized object with sensitive fields removed'
+        role:
+          type: string
+        instance_id:
+          type: string
+    LogEvent:
+      type: object
+      properties:
+        id:
+          type: string
+        timestamp:
+          type: integer
+          format: int64
+          description: 'unix timestamp in nanoseconds'
+        event:
+          $ref: '#/components/schemas/LogEventType'
+        protocol:
+          $ref: '#/components/schemas/EventProtocols'
+        username:
+          type: string
+        ip:
+          type: string
+        message:
+          type: string
+        role:
+          type: string
         instance_id:
           type: string
     KeyValue:
@@ -6776,6 +7007,7 @@ components:
             - GET
             - POST
             - PUT
+            - DELETE
         query_parameters:
           type: array
           items:
@@ -6814,10 +7046,23 @@ components:
           type: array
           items:
             type: string
+        bcc:
+          type: array
+          items:
+            type: string
         subject:
           type: string
         body:
           type: string
+        content_type:
+          type: integer
+          enum:
+            - 0
+            - 1
+          description: |
+            Content type:
+              * `0` text/plain
+              * `1` text/html
         attachments:
           type: array
           items:
@@ -6874,6 +7119,15 @@ components:
         threshold:
           type: integer
           description: 'An email notification will be generated for users whose password expires in a number of days less than or equal to this threshold'
+    EventActionUserInactivity:
+      type: object
+      properties:
+        disable_threshold:
+          type: integer
+          description: 'Inactivity threshold, in days, before disabling the account'
+        delete_threshold:
+          type: integer
+          description: 'Inactivity threshold, in days, before deleting the account'
     EventActionIDPAccountCheck:
       type: object
       properties:
@@ -6907,6 +7161,8 @@ components:
           $ref: '#/components/schemas/EventActionFilesystemConfig'
         pwd_expiration_config:
           $ref: '#/components/schemas/EventActionPasswordExpiration'
+        user_inactivity_config:
+          $ref: '#/components/schemas/EventActionUserInactivity'
         idp_config:
           $ref: '#/components/schemas/EventActionIDPAccountCheck'
     BaseEventAction:

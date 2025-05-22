@@ -1,4 +1,4 @@
-// Copyright (C) 2019-2023 Nicola Murino
+// Copyright (C) 2019 Nicola Murino
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published
@@ -15,6 +15,7 @@
 package util
 
 import (
+	"errors"
 	"fmt"
 )
 
@@ -24,12 +25,16 @@ const (
 		"sftpgo serve -c \"<path to dir containing the default config file and templates directory>\""
 )
 
+// MaxRecursion defines the maximum number of allowed recursions
+const MaxRecursion = 1000
+
 // errors definitions
 var (
-	ErrValidation     = NewValidationError("")
-	ErrNotFound       = NewRecordNotFoundError("")
-	ErrMethodDisabled = NewMethodDisabledError("")
-	ErrGeneric        = NewGenericError("")
+	ErrValidation       = NewValidationError("")
+	ErrNotFound         = NewRecordNotFoundError("")
+	ErrMethodDisabled   = NewMethodDisabledError("")
+	ErrGeneric          = NewGenericError("")
+	ErrRecursionTooDeep = errors.New("recursion too deep")
 )
 
 // ValidationError raised if input data is not valid
@@ -54,9 +59,9 @@ func (e *ValidationError) Is(target error) bool {
 }
 
 // NewValidationError returns a validation errors
-func NewValidationError(error string) *ValidationError {
+func NewValidationError(errorString string) *ValidationError {
 	return &ValidationError{
-		err: error,
+		err: errorString,
 	}
 }
 
@@ -76,9 +81,9 @@ func (e *RecordNotFoundError) Is(target error) bool {
 }
 
 // NewRecordNotFoundError returns a not found error
-func NewRecordNotFoundError(error string) *RecordNotFoundError {
+func NewRecordNotFoundError(errorString string) *RecordNotFoundError {
 	return &RecordNotFoundError{
-		err: error,
+		err: errorString,
 	}
 }
 
@@ -101,9 +106,9 @@ func (e *MethodDisabledError) Is(target error) bool {
 }
 
 // NewMethodDisabledError returns a method disabled error
-func NewMethodDisabledError(error string) *MethodDisabledError {
+func NewMethodDisabledError(errorString string) *MethodDisabledError {
 	return &MethodDisabledError{
-		err: error,
+		err: errorString,
 	}
 }
 
@@ -123,8 +128,8 @@ func (e *GenericError) Is(target error) bool {
 }
 
 // NewGenericError returns a generic error
-func NewGenericError(error string) *GenericError {
+func NewGenericError(errorString string) *GenericError {
 	return &GenericError{
-		err: error,
+		err: errorString,
 	}
 }

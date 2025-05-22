@@ -1,4 +1,4 @@
-// Copyright (C) 2019-2023 Nicola Murino
+// Copyright (C) 2019 Nicola Murino
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published
@@ -48,6 +48,10 @@ func TestTransfersCheckerDiskQuota(t *testing.T) {
 			},
 		},
 	}
+	folder := vfs.BaseVirtualFolder{
+		Name:       folderName,
+		MappedPath: filepath.Join(os.TempDir(), folderName),
+	}
 	user := dataprovider.User{
 		BaseUser: sdk.BaseUser{
 			Username:  username,
@@ -62,8 +66,7 @@ func TestTransfersCheckerDiskQuota(t *testing.T) {
 		VirtualFolders: []vfs.VirtualFolder{
 			{
 				BaseVirtualFolder: vfs.BaseVirtualFolder{
-					Name:       folderName,
-					MappedPath: filepath.Join(os.TempDir(), folderName),
+					Name: folderName,
 				},
 				VirtualPath: vdirPath,
 				QuotaSize:   100,
@@ -79,6 +82,8 @@ func TestTransfersCheckerDiskQuota(t *testing.T) {
 	err := dataprovider.AddGroup(&group, "", "", "")
 	assert.NoError(t, err)
 	group, err = dataprovider.GroupExists(groupName)
+	assert.NoError(t, err)
+	err = dataprovider.AddFolder(&folder, "", "", "")
 	assert.NoError(t, err)
 	assert.Equal(t, int64(120), group.UserSettings.QuotaSize)
 	err = dataprovider.AddUser(&user, "", "", "")
@@ -309,7 +314,7 @@ func TestTransferCheckerTransferQuota(t *testing.T) {
 	transfer1.BytesReceived.Store(1024*1024 + 1)
 	transfer2.BytesReceived.Store(0)
 	Connections.checkTransfers()
-	assert.True(t, conn1.IsQuotaExceededError(transfer1.errAbort))
+	assert.True(t, conn1.IsQuotaExceededError(transfer1.errAbort), transfer1.errAbort)
 	assert.Nil(t, transfer2.errAbort)
 	transfer1.errAbort = nil
 	transfer1.BytesReceived.Store(1024*1024 + 1)
@@ -592,7 +597,7 @@ func TestDataTransferExceeded(t *testing.T) {
 
 func TestGetUsersForQuotaCheck(t *testing.T) {
 	usersToFetch := make(map[string]bool)
-	for i := 0; i < 50; i++ {
+	for i := 0; i < 70; i++ {
 		usersToFetch[fmt.Sprintf("user%v", i)] = i%2 == 0
 	}
 
@@ -600,7 +605,11 @@ func TestGetUsersForQuotaCheck(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Len(t, users, 0)
 
-	for i := 0; i < 40; i++ {
+	for i := 0; i < 60; i++ {
+		folder := vfs.BaseVirtualFolder{
+			Name:       fmt.Sprintf("f%v", i),
+			MappedPath: filepath.Join(os.TempDir(), fmt.Sprintf("f%v", i)),
+		}
 		user := dataprovider.User{
 			BaseUser: sdk.BaseUser{
 				Username:  fmt.Sprintf("user%v", i),
@@ -615,25 +624,15 @@ func TestGetUsersForQuotaCheck(t *testing.T) {
 			VirtualFolders: []vfs.VirtualFolder{
 				{
 					BaseVirtualFolder: vfs.BaseVirtualFolder{
-						Name:       fmt.Sprintf("f%v", i),
-						MappedPath: filepath.Join(os.TempDir(), fmt.Sprintf("f%v", i)),
+						Name: folder.Name,
 					},
 					VirtualPath: "/vfolder",
 					QuotaSize:   100,
 				},
 			},
-			Filters: dataprovider.UserFilters{
-				BaseUserFilters: sdk.BaseUserFilters{
-					DataTransferLimits: []sdk.DataTransferLimit{
-						{
-							Sources:              []string{"172.16.0.0/16"},
-							UploadDataTransfer:   50,
-							DownloadDataTransfer: 80,
-						},
-					},
-				},
-			},
 		}
+		err = dataprovider.AddFolder(&folder, "", "", "")
+		assert.NoError(t, err)
 		err = dataprovider.AddUser(&user, "", "", "")
 		assert.NoError(t, err)
 		err = dataprovider.UpdateVirtualFolderQuota(&vfs.BaseVirtualFolder{Name: fmt.Sprintf("f%v", i)}, 1, 50, false)
@@ -642,7 +641,7 @@ func TestGetUsersForQuotaCheck(t *testing.T) {
 
 	users, err = dataprovider.GetUsersForQuotaCheck(usersToFetch)
 	assert.NoError(t, err)
-	assert.Len(t, users, 40)
+	assert.Len(t, users, 60)
 
 	for _, user := range users {
 		userIdxStr := strings.Replace(user.Username, "user", "", 1)
@@ -660,17 +659,13 @@ func TestGetUsersForQuotaCheck(t *testing.T) {
 				assert.Len(t, user.VirtualFolders, 0, user.Username)
 			}
 		}
-		ul, dl, total := user.GetDataTransferLimits("127.1.1.1")
+		ul, dl, total := user.GetDataTransferLimits()
 		assert.Equal(t, int64(0), ul)
 		assert.Equal(t, int64(0), dl)
 		assert.Equal(t, int64(0), total)
-		ul, dl, total = user.GetDataTransferLimits("172.16.2.3")
-		assert.Equal(t, int64(50*1024*1024), ul)
-		assert.Equal(t, int64(80*1024*1024), dl)
-		assert.Equal(t, int64(0), total)
 	}
 
-	for i := 0; i < 40; i++ {
+	for i := 0; i < 60; i++ {
 		err = dataprovider.DeleteUser(fmt.Sprintf("user%v", i), "", "", "")
 		assert.NoError(t, err)
 		err = dataprovider.DeleteFolder(fmt.Sprintf("f%v", i), "", "", "")

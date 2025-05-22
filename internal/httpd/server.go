@@ -1,4 +1,4 @@
-// Copyright (C) 2019-2023 Nicola Murino
+// Copyright (C) 2019 Nicola Murino
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published
@@ -23,6 +23,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"path/filepath"
 	"strings"
 	"time"
@@ -45,6 +46,10 @@ import (
 	"github.com/drakkan/sftpgo/v2/internal/smtp"
 	"github.com/drakkan/sftpgo/v2/internal/util"
 	"github.com/drakkan/sftpgo/v2/internal/version"
+)
+
+const (
+	jsonAPISuffix = "/json"
 )
 
 var (
@@ -98,7 +103,7 @@ func (s *httpdServer) listenAndServe() error {
 		ReadTimeout:       60 * time.Second,
 		WriteTimeout:      60 * time.Second,
 		IdleTimeout:       60 * time.Second,
-		MaxHeaderBytes:    1 << 18, // 256KB
+		MaxHeaderBytes:    1 << 16, // 64KB
 		ErrorLog:          log.New(&logger.StdLoggerWrapper{Sender: logSender}, "", 0),
 	}
 	if certMgr != nil && s.binding.EnableHTTPS {
@@ -107,16 +112,15 @@ func (s *httpdServer) listenAndServe() error {
 			certID = s.binding.GetAddress()
 		}
 		config := &tls.Config{
-			GetCertificate:           certMgr.GetCertificateFunc(certID),
-			MinVersion:               util.GetTLSVersion(s.binding.MinTLSVersion),
-			NextProtos:               []string{"http/1.1", "h2"},
-			CipherSuites:             util.GetTLSCiphersFromNames(s.binding.TLSCipherSuites),
-			PreferServerCipherSuites: true,
+			GetCertificate: certMgr.GetCertificateFunc(certID),
+			MinVersion:     util.GetTLSVersion(s.binding.MinTLSVersion),
+			NextProtos:     util.GetALPNProtocols(s.binding.Protocols),
+			CipherSuites:   util.GetTLSCiphersFromNames(s.binding.TLSCipherSuites),
 		}
 		httpServer.TLSConfig = config
 		logger.Debug(logSender, "", "configured TLS cipher suites for binding %q: %v, certID: %v",
 			s.binding.GetAddress(), httpServer.TLSConfig.CipherSuites, certID)
-		if s.binding.ClientAuthType == 1 {
+		if s.binding.isMutualTLSEnabled() {
 			httpServer.TLSConfig.ClientCAs = certMgr.GetRootCAs()
 			httpServer.TLSConfig.ClientAuth = tls.RequireAndVerifyClientCert
 			httpServer.TLSConfig.VerifyConnection = s.verifyTLSConnection
@@ -160,15 +164,19 @@ func (s *httpdServer) refreshCookie(next http.Handler) http.Handler {
 	})
 }
 
-func (s *httpdServer) renderClientLoginPage(w http.ResponseWriter, error, ip string) {
+func (s *httpdServer) renderClientLoginPage(w http.ResponseWriter, r *http.Request, err *util.I18nError, ip string) {
 	data := loginPage{
-		CurrentURL:   webClientLoginPath,
-		Version:      version.Get().Version,
-		Error:        error,
-		CSRFToken:    createCSRFToken(ip),
-		StaticURL:    webStaticFilesPath,
-		Branding:     s.binding.Branding.WebClient,
-		FormDisabled: s.binding.isWebClientLoginFormDisabled(),
+		commonBasePage: getCommonBasePage(r),
+		Title:          util.I18nLoginTitle,
+		CurrentURL:     webClientLoginPath,
+		Error:          err,
+		CSRFToken:      createCSRFToken(ip),
+		Branding:       s.binding.Branding.WebClient,
+		FormDisabled:   s.binding.isWebClientLoginFormDisabled(),
+		CheckRedirect:  true,
+	}
+	if next := r.URL.Query().Get("next"); strings.HasPrefix(next, webClientFilesPath) {
+		data.CurrentURL += "?next=" + url.QueryEscape(next)
 	}
 	if s.binding.showAdminLoginURL() {
 		data.AltLoginURL = webAdminLoginPath
@@ -180,7 +188,7 @@ func (s *httpdServer) renderClientLoginPage(w http.ResponseWriter, error, ip str
 	if s.binding.OIDC.isEnabled() && !s.binding.isWebClientOIDCLoginDisabled() {
 		data.OpenIDLoginURL = webClientOIDCLoginPath
 	}
-	renderClientTemplate(w, templateClientLogin, data)
+	renderClientTemplate(w, templateCommonLogin, data)
 }
 
 func (s *httpdServer) handleWebClientLogout(w http.ResponseWriter, r *http.Request) {
@@ -194,19 +202,18 @@ func (s *httpdServer) handleWebClientLogout(w http.ResponseWriter, r *http.Reque
 
 func (s *httpdServer) handleWebClientChangePwdPost(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxRequestSize)
-	err := r.ParseForm()
-	if err != nil {
-		s.renderClientChangePasswordPage(w, r, err.Error())
+	if err := r.ParseForm(); err != nil {
+		s.renderClientChangePasswordPage(w, r, util.NewI18nError(err, util.I18nErrorInvalidForm))
 		return
 	}
 	if err := verifyCSRFToken(r.Form.Get(csrfFormToken), util.GetIPFromRemoteAddress(r.RemoteAddr)); err != nil {
-		s.renderClientForbiddenPage(w, r, err.Error())
+		s.renderClientForbiddenPage(w, r, util.NewI18nError(err, util.I18nErrorInvalidCSRF))
 		return
 	}
-	err = doChangeUserPassword(r, r.Form.Get("current_password"), r.Form.Get("new_password1"),
-		r.Form.Get("new_password2"))
+	err := doChangeUserPassword(r, strings.TrimSpace(r.Form.Get("current_password")),
+		strings.TrimSpace(r.Form.Get("new_password1")), strings.TrimSpace(r.Form.Get("new_password2")))
 	if err != nil {
-		s.renderClientChangePasswordPage(w, r, err.Error())
+		s.renderClientChangePasswordPage(w, r, util.NewI18nError(err, util.I18nErrorChangePwdGeneric))
 		return
 	}
 	s.handleWebClientLogout(w, r)
@@ -218,7 +225,8 @@ func (s *httpdServer) handleClientWebLogin(w http.ResponseWriter, r *http.Reques
 		http.Redirect(w, r, webAdminSetupPath, http.StatusFound)
 		return
 	}
-	s.renderClientLoginPage(w, getFlashMessage(w, r), util.GetIPFromRemoteAddress(r.RemoteAddr))
+	msg := getFlashMessage(w, r)
+	s.renderClientLoginPage(w, r, msg.getI18nError(), util.GetIPFromRemoteAddress(r.RemoteAddr))
 }
 
 func (s *httpdServer) handleWebClientLoginPost(w http.ResponseWriter, r *http.Request) {
@@ -226,42 +234,44 @@ func (s *httpdServer) handleWebClientLoginPost(w http.ResponseWriter, r *http.Re
 
 	ipAddr := util.GetIPFromRemoteAddress(r.RemoteAddr)
 	if err := r.ParseForm(); err != nil {
-		s.renderClientLoginPage(w, err.Error(), ipAddr)
+		s.renderClientLoginPage(w, r, util.NewI18nError(err, util.I18nErrorInvalidForm), ipAddr)
 		return
 	}
 	protocol := common.ProtocolHTTP
-	username := r.Form.Get("username")
-	password := r.Form.Get("password")
+	username := strings.TrimSpace(r.Form.Get("username"))
+	password := strings.TrimSpace(r.Form.Get("password"))
 	if username == "" || password == "" {
 		updateLoginMetrics(&dataprovider.User{BaseUser: sdk.BaseUser{Username: username}},
 			dataprovider.LoginMethodPassword, ipAddr, common.ErrNoCredentials)
-		s.renderClientLoginPage(w, "Invalid credentials", ipAddr)
+		s.renderClientLoginPage(w, r,
+			util.NewI18nError(dataprovider.ErrInvalidCredentials, util.I18nErrorInvalidCredentials), ipAddr)
 		return
 	}
 	if err := verifyCSRFToken(r.Form.Get(csrfFormToken), ipAddr); err != nil {
 		updateLoginMetrics(&dataprovider.User{BaseUser: sdk.BaseUser{Username: username}},
 			dataprovider.LoginMethodPassword, ipAddr, err)
-		s.renderClientLoginPage(w, err.Error(), ipAddr)
+		s.renderClientLoginPage(w, r, util.NewI18nError(err, util.I18nErrorInvalidCSRF), ipAddr)
 		return
 	}
 
 	if err := common.Config.ExecutePostConnectHook(ipAddr, protocol); err != nil {
 		updateLoginMetrics(&dataprovider.User{BaseUser: sdk.BaseUser{Username: username}},
 			dataprovider.LoginMethodPassword, ipAddr, err)
-		s.renderClientLoginPage(w, fmt.Sprintf("access denied: %v", err), ipAddr)
+		s.renderClientLoginPage(w, r, util.NewI18nError(err, util.I18nError403Message), ipAddr)
 		return
 	}
 
 	user, err := dataprovider.CheckUserAndPass(username, password, ipAddr, protocol)
 	if err != nil {
 		updateLoginMetrics(&user, dataprovider.LoginMethodPassword, ipAddr, err)
-		s.renderClientLoginPage(w, dataprovider.ErrInvalidCredentials.Error(), ipAddr)
+		s.renderClientLoginPage(w, r,
+			util.NewI18nError(dataprovider.ErrInvalidCredentials, util.I18nErrorInvalidCredentials), ipAddr)
 		return
 	}
 	connectionID := fmt.Sprintf("%v_%v", protocol, xid.New().String())
 	if err := checkHTTPClientUser(&user, r, connectionID, true); err != nil {
 		updateLoginMetrics(&user, dataprovider.LoginMethodPassword, ipAddr, err)
-		s.renderClientLoginPage(w, err.Error(), ipAddr)
+		s.renderClientLoginPage(w, r, util.NewI18nError(err, util.I18nError403Message), ipAddr)
 		return
 	}
 
@@ -270,7 +280,7 @@ func (s *httpdServer) handleWebClientLoginPost(w http.ResponseWriter, r *http.Re
 	if err != nil {
 		logger.Warn(logSender, connectionID, "unable to check fs root: %v", err)
 		updateLoginMetrics(&user, dataprovider.LoginMethodPassword, ipAddr, common.ErrInternalFailure)
-		s.renderClientLoginPage(w, err.Error(), ipAddr)
+		s.renderClientLoginPage(w, r, util.NewI18nError(err, util.I18nErrorFsGeneric), ipAddr)
 		return
 	}
 	s.loginUser(w, r, &user, connectionID, ipAddr, false, s.renderClientLoginPage)
@@ -282,21 +292,24 @@ func (s *httpdServer) handleWebClientPasswordResetPost(w http.ResponseWriter, r 
 	ipAddr := util.GetIPFromRemoteAddress(r.RemoteAddr)
 	err := r.ParseForm()
 	if err != nil {
-		s.renderClientResetPwdPage(w, err.Error(), ipAddr)
+		s.renderClientResetPwdPage(w, r, util.NewI18nError(err, util.I18nErrorInvalidForm), ipAddr)
 		return
 	}
 	if err := verifyCSRFToken(r.Form.Get(csrfFormToken), ipAddr); err != nil {
-		s.renderClientForbiddenPage(w, r, err.Error())
+		s.renderClientForbiddenPage(w, r, util.NewI18nError(err, util.I18nErrorInvalidCSRF))
 		return
 	}
-	_, user, err := handleResetPassword(r, r.Form.Get("code"), r.Form.Get("password"), false)
+	newPassword := strings.TrimSpace(r.Form.Get("password"))
+	confirmPassword := strings.TrimSpace(r.Form.Get("confirm_password"))
+	_, user, err := handleResetPassword(r, strings.TrimSpace(r.Form.Get("code")),
+		newPassword, confirmPassword, false)
 	if err != nil {
-		s.renderClientResetPwdPage(w, err.Error(), ipAddr)
+		s.renderClientResetPwdPage(w, r, util.NewI18nError(err, util.I18nErrorChangePwdGeneric), ipAddr)
 		return
 	}
 	connectionID := fmt.Sprintf("%v_%v", getProtocolFromRequest(r), xid.New().String())
 	if err := checkHTTPClientUser(user, r, connectionID, true); err != nil {
-		s.renderClientResetPwdPage(w, fmt.Sprintf("Password reset successfully but unable to login: %v", err.Error()), ipAddr)
+		s.renderClientResetPwdPage(w, r, util.NewI18nError(err, util.I18nErrorLoginAfterReset), ipAddr)
 		return
 	}
 
@@ -304,7 +317,7 @@ func (s *httpdServer) handleWebClientPasswordResetPost(w http.ResponseWriter, r 
 	err = user.CheckFsRoot(connectionID)
 	if err != nil {
 		logger.Warn(logSender, connectionID, "unable to check fs root: %v", err)
-		s.renderClientResetPwdPage(w, fmt.Sprintf("Password reset successfully but unable to login: %s", err.Error()), ipAddr)
+		s.renderClientResetPwdPage(w, r, util.NewI18nError(err, util.I18nErrorLoginAfterReset), ipAddr)
 		return
 	}
 	s.loginUser(w, r, user, connectionID, ipAddr, false, s.renderClientResetPwdPage)
@@ -319,17 +332,18 @@ func (s *httpdServer) handleWebClientTwoFactorRecoveryPost(w http.ResponseWriter
 	}
 	ipAddr := util.GetIPFromRemoteAddress(r.RemoteAddr)
 	if err := r.ParseForm(); err != nil {
-		s.renderClientTwoFactorRecoveryPage(w, err.Error(), ipAddr)
+		s.renderClientTwoFactorRecoveryPage(w, r, util.NewI18nError(err, util.I18nErrorInvalidForm), ipAddr)
 		return
 	}
 	username := claims.Username
-	recoveryCode := r.Form.Get("recovery_code")
+	recoveryCode := strings.TrimSpace(r.Form.Get("recovery_code"))
 	if username == "" || recoveryCode == "" {
-		s.renderClientTwoFactorRecoveryPage(w, "Invalid credentials", ipAddr)
+		s.renderClientTwoFactorRecoveryPage(w, r,
+			util.NewI18nError(dataprovider.ErrInvalidCredentials, util.I18nErrorInvalidCredentials), ipAddr)
 		return
 	}
 	if err := verifyCSRFToken(r.Form.Get(csrfFormToken), ipAddr); err != nil {
-		s.renderClientTwoFactorRecoveryPage(w, err.Error(), ipAddr)
+		s.renderClientTwoFactorRecoveryPage(w, r, util.NewI18nError(err, util.I18nErrorInvalidCSRF), ipAddr)
 		return
 	}
 	user, userMerged, err := dataprovider.GetUserVariants(username, "")
@@ -337,11 +351,13 @@ func (s *httpdServer) handleWebClientTwoFactorRecoveryPost(w http.ResponseWriter
 		if errors.Is(err, util.ErrNotFound) {
 			handleDefenderEventLoginFailed(ipAddr, err) //nolint:errcheck
 		}
-		s.renderClientTwoFactorRecoveryPage(w, "Invalid credentials", ipAddr)
+		s.renderClientTwoFactorRecoveryPage(w, r,
+			util.NewI18nError(dataprovider.ErrInvalidCredentials, util.I18nErrorInvalidCredentials), ipAddr)
 		return
 	}
 	if !userMerged.Filters.TOTPConfig.Enabled || !util.Contains(userMerged.Filters.TOTPConfig.Protocols, common.ProtocolHTTP) {
-		s.renderClientTwoFactorPage(w, "Two factory authentication is not enabled", ipAddr)
+		s.renderClientTwoFactorPage(w, r, util.NewI18nError(
+			util.NewValidationError("two factory authentication is not enabled"), util.I18n2FADisabled), ipAddr)
 		return
 	}
 	for idx, code := range user.Filters.RecoveryCodes {
@@ -351,7 +367,8 @@ func (s *httpdServer) handleWebClientTwoFactorRecoveryPost(w http.ResponseWriter
 		}
 		if code.Secret.GetPayload() == recoveryCode {
 			if code.Used {
-				s.renderClientTwoFactorRecoveryPage(w, "This recovery code was already used", ipAddr)
+				s.renderClientTwoFactorRecoveryPage(w, r,
+					util.NewI18nError(dataprovider.ErrInvalidCredentials, util.I18nErrorInvalidCredentials), ipAddr)
 				return
 			}
 			user.Filters.RecoveryCodes[idx].Used = true
@@ -368,7 +385,8 @@ func (s *httpdServer) handleWebClientTwoFactorRecoveryPost(w http.ResponseWriter
 		}
 	}
 	handleDefenderEventLoginFailed(ipAddr, dataprovider.ErrInvalidCredentials) //nolint:errcheck
-	s.renderClientTwoFactorRecoveryPage(w, "Invalid recovery code", ipAddr)
+	s.renderClientTwoFactorRecoveryPage(w, r,
+		util.NewI18nError(dataprovider.ErrInvalidCredentials, util.I18nErrorInvalidCredentials), ipAddr)
 }
 
 func (s *httpdServer) handleWebClientTwoFactorPost(w http.ResponseWriter, r *http.Request) {
@@ -380,33 +398,34 @@ func (s *httpdServer) handleWebClientTwoFactorPost(w http.ResponseWriter, r *htt
 	}
 	ipAddr := util.GetIPFromRemoteAddress(r.RemoteAddr)
 	if err := r.ParseForm(); err != nil {
-		s.renderClientTwoFactorPage(w, err.Error(), ipAddr)
+		s.renderClientTwoFactorPage(w, r, util.NewI18nError(err, util.I18nErrorInvalidForm), ipAddr)
 		return
 	}
 	username := claims.Username
-	passcode := r.Form.Get("passcode")
+	passcode := strings.TrimSpace(r.Form.Get("passcode"))
 	if username == "" || passcode == "" {
 		updateLoginMetrics(&dataprovider.User{BaseUser: sdk.BaseUser{Username: username}},
 			dataprovider.LoginMethodPassword, ipAddr, common.ErrNoCredentials)
-		s.renderClientTwoFactorPage(w, "Invalid credentials", ipAddr)
+		s.renderClientTwoFactorPage(w, r,
+			util.NewI18nError(dataprovider.ErrInvalidCredentials, util.I18nErrorInvalidCredentials), ipAddr)
 		return
 	}
 	if err := verifyCSRFToken(r.Form.Get(csrfFormToken), ipAddr); err != nil {
 		updateLoginMetrics(&dataprovider.User{BaseUser: sdk.BaseUser{Username: username}},
 			dataprovider.LoginMethodPassword, ipAddr, err)
-		s.renderClientTwoFactorPage(w, err.Error(), ipAddr)
+		s.renderClientTwoFactorPage(w, r, util.NewI18nError(err, util.I18nErrorInvalidCSRF), ipAddr)
 		return
 	}
 	user, err := dataprovider.GetUserWithGroupSettings(username, "")
 	if err != nil {
 		updateLoginMetrics(&dataprovider.User{BaseUser: sdk.BaseUser{Username: username}},
 			dataprovider.LoginMethodPassword, ipAddr, err)
-		s.renderClientTwoFactorPage(w, "Invalid credentials", ipAddr)
+		s.renderClientTwoFactorPage(w, r, util.NewI18nError(err, util.I18nErrorInvalidCredentials), ipAddr)
 		return
 	}
 	if !user.Filters.TOTPConfig.Enabled || !util.Contains(user.Filters.TOTPConfig.Protocols, common.ProtocolHTTP) {
 		updateLoginMetrics(&user, dataprovider.LoginMethodPassword, ipAddr, common.ErrInternalFailure)
-		s.renderClientTwoFactorPage(w, "Two factory authentication is not enabled", ipAddr)
+		s.renderClientTwoFactorPage(w, r, util.NewI18nError(common.ErrInternalFailure, util.I18n2FADisabled), ipAddr)
 		return
 	}
 	err = user.Filters.TOTPConfig.Secret.Decrypt()
@@ -419,7 +438,8 @@ func (s *httpdServer) handleWebClientTwoFactorPost(w http.ResponseWriter, r *htt
 		user.Filters.TOTPConfig.Secret.GetPayload())
 	if !match || err != nil {
 		updateLoginMetrics(&user, dataprovider.LoginMethodPassword, ipAddr, dataprovider.ErrInvalidCredentials)
-		s.renderClientTwoFactorPage(w, "Invalid authentication code", ipAddr)
+		s.renderClientTwoFactorPage(w, r,
+			util.NewI18nError(dataprovider.ErrInvalidCredentials, util.I18nErrorInvalidCredentials), ipAddr)
 		return
 	}
 	connectionID := fmt.Sprintf("%s_%s", getProtocolFromRequest(r), xid.New().String())
@@ -436,17 +456,18 @@ func (s *httpdServer) handleWebAdminTwoFactorRecoveryPost(w http.ResponseWriter,
 	}
 	ipAddr := util.GetIPFromRemoteAddress(r.RemoteAddr)
 	if err := r.ParseForm(); err != nil {
-		s.renderTwoFactorRecoveryPage(w, err.Error(), ipAddr)
+		s.renderTwoFactorRecoveryPage(w, r, util.NewI18nError(err, util.I18nErrorInvalidForm), ipAddr)
 		return
 	}
 	username := claims.Username
-	recoveryCode := r.Form.Get("recovery_code")
+	recoveryCode := strings.TrimSpace(r.Form.Get("recovery_code"))
 	if username == "" || recoveryCode == "" {
-		s.renderTwoFactorRecoveryPage(w, "Invalid credentials", ipAddr)
+		s.renderTwoFactorRecoveryPage(w, r, util.NewI18nError(dataprovider.ErrInvalidCredentials, util.I18nErrorInvalidCredentials),
+			ipAddr)
 		return
 	}
 	if err := verifyCSRFToken(r.Form.Get(csrfFormToken), ipAddr); err != nil {
-		s.renderTwoFactorRecoveryPage(w, err.Error(), ipAddr)
+		s.renderTwoFactorRecoveryPage(w, r, util.NewI18nError(err, util.I18nErrorInvalidCSRF), ipAddr)
 		return
 	}
 	admin, err := dataprovider.AdminExists(username)
@@ -454,11 +475,12 @@ func (s *httpdServer) handleWebAdminTwoFactorRecoveryPost(w http.ResponseWriter,
 		if errors.Is(err, util.ErrNotFound) {
 			handleDefenderEventLoginFailed(ipAddr, err) //nolint:errcheck
 		}
-		s.renderTwoFactorRecoveryPage(w, "Invalid credentials", ipAddr)
+		s.renderTwoFactorRecoveryPage(w, r, util.NewI18nError(dataprovider.ErrInvalidCredentials, util.I18nErrorInvalidCredentials),
+			ipAddr)
 		return
 	}
 	if !admin.Filters.TOTPConfig.Enabled {
-		s.renderTwoFactorRecoveryPage(w, "Two factory authentication is not enabled", ipAddr)
+		s.renderTwoFactorRecoveryPage(w, r, util.NewI18nError(util.NewValidationError("two factory authentication is not enabled"), util.I18n2FADisabled), ipAddr)
 		return
 	}
 	for idx, code := range admin.Filters.RecoveryCodes {
@@ -468,7 +490,8 @@ func (s *httpdServer) handleWebAdminTwoFactorRecoveryPost(w http.ResponseWriter,
 		}
 		if code.Secret.GetPayload() == recoveryCode {
 			if code.Used {
-				s.renderTwoFactorRecoveryPage(w, "This recovery code was already used", ipAddr)
+				s.renderTwoFactorRecoveryPage(w, r,
+					util.NewI18nError(dataprovider.ErrInvalidCredentials, util.I18nErrorInvalidCredentials), ipAddr)
 				return
 			}
 			admin.Filters.RecoveryCodes[idx].Used = true
@@ -483,7 +506,8 @@ func (s *httpdServer) handleWebAdminTwoFactorRecoveryPost(w http.ResponseWriter,
 		}
 	}
 	handleDefenderEventLoginFailed(ipAddr, dataprovider.ErrInvalidCredentials) //nolint:errcheck
-	s.renderTwoFactorRecoveryPage(w, "Invalid recovery code", ipAddr)
+	s.renderTwoFactorRecoveryPage(w, r, util.NewI18nError(dataprovider.ErrInvalidCredentials, util.I18nErrorInvalidCredentials),
+		ipAddr)
 }
 
 func (s *httpdServer) handleWebAdminTwoFactorPost(w http.ResponseWriter, r *http.Request) {
@@ -495,18 +519,19 @@ func (s *httpdServer) handleWebAdminTwoFactorPost(w http.ResponseWriter, r *http
 	}
 	ipAddr := util.GetIPFromRemoteAddress(r.RemoteAddr)
 	if err := r.ParseForm(); err != nil {
-		s.renderTwoFactorPage(w, err.Error(), ipAddr)
+		s.renderTwoFactorPage(w, r, util.NewI18nError(err, util.I18nErrorInvalidForm), ipAddr)
 		return
 	}
 	username := claims.Username
-	passcode := r.Form.Get("passcode")
+	passcode := strings.TrimSpace(r.Form.Get("passcode"))
 	if username == "" || passcode == "" {
-		s.renderTwoFactorPage(w, "Invalid credentials", ipAddr)
+		s.renderTwoFactorPage(w, r, util.NewI18nError(dataprovider.ErrInvalidCredentials, util.I18nErrorInvalidCredentials),
+			ipAddr)
 		return
 	}
 	if err := verifyCSRFToken(r.Form.Get(csrfFormToken), ipAddr); err != nil {
-		err = handleDefenderEventLoginFailed(ipAddr, err)
-		s.renderTwoFactorPage(w, err.Error(), ipAddr)
+		handleDefenderEventLoginFailed(ipAddr, err) //nolint:errcheck
+		s.renderTwoFactorPage(w, r, util.NewI18nError(err, util.I18nErrorInvalidCSRF), ipAddr)
 		return
 	}
 	admin, err := dataprovider.AdminExists(username)
@@ -514,11 +539,11 @@ func (s *httpdServer) handleWebAdminTwoFactorPost(w http.ResponseWriter, r *http
 		if errors.Is(err, util.ErrNotFound) {
 			handleDefenderEventLoginFailed(ipAddr, err) //nolint:errcheck
 		}
-		s.renderTwoFactorPage(w, "Invalid credentials", ipAddr)
+		s.renderTwoFactorPage(w, r, util.NewI18nError(err, util.I18nErrorInvalidCredentials), ipAddr)
 		return
 	}
 	if !admin.Filters.TOTPConfig.Enabled {
-		s.renderTwoFactorPage(w, "Two factory authentication is not enabled", ipAddr)
+		s.renderTwoFactorPage(w, r, util.NewI18nError(common.ErrInternalFailure, util.I18n2FADisabled), ipAddr)
 		return
 	}
 	err = admin.Filters.TOTPConfig.Secret.Decrypt()
@@ -530,7 +555,8 @@ func (s *httpdServer) handleWebAdminTwoFactorPost(w http.ResponseWriter, r *http
 		admin.Filters.TOTPConfig.Secret.GetPayload())
 	if !match || err != nil {
 		handleDefenderEventLoginFailed(ipAddr, dataprovider.ErrInvalidCredentials) //nolint:errcheck
-		s.renderTwoFactorPage(w, "Invalid authentication code", ipAddr)
+		s.renderTwoFactorPage(w, r, util.NewI18nError(dataprovider.ErrInvalidCredentials, util.I18nErrorInvalidCredentials),
+			ipAddr)
 		return
 	}
 	s.loginAdmin(w, r, &admin, true, s.renderTwoFactorPage, ipAddr)
@@ -541,37 +567,40 @@ func (s *httpdServer) handleWebAdminLoginPost(w http.ResponseWriter, r *http.Req
 
 	ipAddr := util.GetIPFromRemoteAddress(r.RemoteAddr)
 	if err := r.ParseForm(); err != nil {
-		s.renderAdminLoginPage(w, err.Error(), ipAddr)
+		s.renderAdminLoginPage(w, r, util.NewI18nError(err, util.I18nErrorInvalidForm), ipAddr)
 		return
 	}
-	username := r.Form.Get("username")
-	password := r.Form.Get("password")
+	username := strings.TrimSpace(r.Form.Get("username"))
+	password := strings.TrimSpace(r.Form.Get("password"))
 	if username == "" || password == "" {
-		s.renderAdminLoginPage(w, "Invalid credentials", ipAddr)
+		s.renderAdminLoginPage(w, r, util.NewI18nError(dataprovider.ErrInvalidCredentials, util.I18nErrorInvalidCredentials),
+			ipAddr)
 		return
 	}
 	if err := verifyCSRFToken(r.Form.Get(csrfFormToken), ipAddr); err != nil {
-		s.renderAdminLoginPage(w, err.Error(), ipAddr)
+		s.renderAdminLoginPage(w, r, util.NewI18nError(err, util.I18nErrorInvalidCSRF), ipAddr)
 		return
 	}
 	admin, err := dataprovider.CheckAdminAndPass(username, password, ipAddr)
 	if err != nil {
-		err = handleDefenderEventLoginFailed(ipAddr, err)
-		s.renderAdminLoginPage(w, err.Error(), ipAddr)
+		handleDefenderEventLoginFailed(ipAddr, err) //nolint:errcheck
+		s.renderAdminLoginPage(w, r, util.NewI18nError(dataprovider.ErrInvalidCredentials, util.I18nErrorInvalidCredentials),
+			ipAddr)
 		return
 	}
 	s.loginAdmin(w, r, &admin, false, s.renderAdminLoginPage, ipAddr)
 }
 
-func (s *httpdServer) renderAdminLoginPage(w http.ResponseWriter, error, ip string) {
+func (s *httpdServer) renderAdminLoginPage(w http.ResponseWriter, r *http.Request, err *util.I18nError, ip string) {
 	data := loginPage{
-		CurrentURL:   webAdminLoginPath,
-		Version:      version.Get().Version,
-		Error:        error,
-		CSRFToken:    createCSRFToken(ip),
-		StaticURL:    webStaticFilesPath,
-		Branding:     s.binding.Branding.WebAdmin,
-		FormDisabled: s.binding.isWebAdminLoginFormDisabled(),
+		commonBasePage: getCommonBasePage(r),
+		Title:          util.I18nLoginTitle,
+		CurrentURL:     webAdminLoginPath,
+		Error:          err,
+		CSRFToken:      createCSRFToken(ip),
+		Branding:       s.binding.Branding.WebAdmin,
+		FormDisabled:   s.binding.isWebAdminLoginFormDisabled(),
+		CheckRedirect:  false,
 	}
 	if s.binding.showClientLoginURL() {
 		data.AltLoginURL = webClientLoginPath
@@ -583,7 +612,7 @@ func (s *httpdServer) renderAdminLoginPage(w http.ResponseWriter, error, ip stri
 	if s.binding.OIDC.hasRoles() && !s.binding.isWebAdminOIDCLoginDisabled() {
 		data.OpenIDLoginURL = webAdminOIDCLoginPath
 	}
-	renderAdminTemplate(w, templateLogin, data)
+	renderAdminTemplate(w, templateCommonLogin, data)
 }
 
 func (s *httpdServer) handleWebAdminLogin(w http.ResponseWriter, r *http.Request) {
@@ -592,7 +621,8 @@ func (s *httpdServer) handleWebAdminLogin(w http.ResponseWriter, r *http.Request
 		http.Redirect(w, r, webAdminSetupPath, http.StatusFound)
 		return
 	}
-	s.renderAdminLoginPage(w, getFlashMessage(w, r), util.GetIPFromRemoteAddress(r.RemoteAddr))
+	msg := getFlashMessage(w, r)
+	s.renderAdminLoginPage(w, r, msg.getI18nError(), util.GetIPFromRemoteAddress(r.RemoteAddr))
 }
 
 func (s *httpdServer) handleWebAdminLogout(w http.ResponseWriter, r *http.Request) {
@@ -608,17 +638,17 @@ func (s *httpdServer) handleWebAdminChangePwdPost(w http.ResponseWriter, r *http
 	r.Body = http.MaxBytesReader(w, r.Body, maxRequestSize)
 	err := r.ParseForm()
 	if err != nil {
-		s.renderChangePasswordPage(w, r, err.Error())
+		s.renderChangePasswordPage(w, r, util.NewI18nError(err, util.I18nErrorInvalidForm))
 		return
 	}
 	if err := verifyCSRFToken(r.Form.Get(csrfFormToken), util.GetIPFromRemoteAddress(r.RemoteAddr)); err != nil {
-		s.renderForbiddenPage(w, r, err.Error())
+		s.renderForbiddenPage(w, r, util.NewI18nError(err, util.I18nErrorInvalidCSRF))
 		return
 	}
-	err = doChangeAdminPassword(r, r.Form.Get("current_password"), r.Form.Get("new_password1"),
-		r.Form.Get("new_password2"))
+	err = doChangeAdminPassword(r, strings.TrimSpace(r.Form.Get("current_password")),
+		strings.TrimSpace(r.Form.Get("new_password1")), strings.TrimSpace(r.Form.Get("new_password2")))
 	if err != nil {
-		s.renderChangePasswordPage(w, r, err.Error())
+		s.renderChangePasswordPage(w, r, util.NewI18nError(err, util.I18nErrorChangePwdGeneric))
 		return
 	}
 	s.handleWebAdminLogout(w, r)
@@ -630,20 +660,19 @@ func (s *httpdServer) handleWebAdminPasswordResetPost(w http.ResponseWriter, r *
 	ipAddr := util.GetIPFromRemoteAddress(r.RemoteAddr)
 	err := r.ParseForm()
 	if err != nil {
-		s.renderResetPwdPage(w, err.Error(), ipAddr)
+		s.renderResetPwdPage(w, r, util.NewI18nError(err, util.I18nErrorInvalidForm), ipAddr)
 		return
 	}
 	if err := verifyCSRFToken(r.Form.Get(csrfFormToken), ipAddr); err != nil {
-		s.renderForbiddenPage(w, r, err.Error())
+		s.renderForbiddenPage(w, r, util.NewI18nError(err, util.I18nErrorInvalidCSRF))
 		return
 	}
-	admin, _, err := handleResetPassword(r, r.Form.Get("code"), r.Form.Get("password"), true)
+	newPassword := strings.TrimSpace(r.Form.Get("password"))
+	confirmPassword := strings.TrimSpace(r.Form.Get("confirm_password"))
+	admin, _, err := handleResetPassword(r, strings.TrimSpace(r.Form.Get("code")),
+		newPassword, confirmPassword, true)
 	if err != nil {
-		if e, ok := err.(*util.ValidationError); ok {
-			s.renderResetPwdPage(w, e.GetErrorString(), ipAddr)
-			return
-		}
-		s.renderResetPwdPage(w, err.Error(), ipAddr)
+		s.renderResetPwdPage(w, r, util.NewI18nError(err, util.I18nErrorChangePwdGeneric), ipAddr)
 		return
 	}
 
@@ -656,34 +685,41 @@ func (s *httpdServer) handleWebAdminSetupPost(w http.ResponseWriter, r *http.Req
 		s.renderBadRequestPage(w, r, errors.New("an admin user already exists"))
 		return
 	}
+	ipAddr := util.GetIPFromRemoteAddress(r.RemoteAddr)
 	err := r.ParseForm()
 	if err != nil {
-		s.renderAdminSetupPage(w, r, "", err.Error())
+		s.renderAdminSetupPage(w, r, "", ipAddr, util.NewI18nError(err, util.I18nErrorInvalidForm))
 		return
 	}
-	ipAddr := util.GetIPFromRemoteAddress(r.RemoteAddr)
 	if err := verifyCSRFToken(r.Form.Get(csrfFormToken), ipAddr); err != nil {
-		s.renderForbiddenPage(w, r, err.Error())
+		s.renderForbiddenPage(w, r, util.NewI18nError(err, util.I18nErrorInvalidCSRF))
 		return
 	}
-	username := r.Form.Get("username")
-	password := r.Form.Get("password")
-	confirmPassword := r.Form.Get("confirm_password")
-	installCode := r.Form.Get("install_code")
+	username := strings.TrimSpace(r.Form.Get("username"))
+	password := strings.TrimSpace(r.Form.Get("password"))
+	confirmPassword := strings.TrimSpace(r.Form.Get("confirm_password"))
+	installCode := strings.TrimSpace(r.Form.Get("install_code"))
 	if installationCode != "" && installCode != resolveInstallationCode() {
-		s.renderAdminSetupPage(w, r, username, fmt.Sprintf("%v mismatch", installationCodeHint))
+		s.renderAdminSetupPage(w, r, username, ipAddr,
+			util.NewI18nError(
+				util.NewValidationError(fmt.Sprintf("%v mismatch", installationCodeHint)),
+				util.I18nErrorSetupInstallCode),
+		)
 		return
 	}
 	if username == "" {
-		s.renderAdminSetupPage(w, r, username, "Please set a username")
+		s.renderAdminSetupPage(w, r, username, ipAddr,
+			util.NewI18nError(util.NewValidationError("please set a username"), util.I18nError500Message))
 		return
 	}
 	if password == "" {
-		s.renderAdminSetupPage(w, r, username, "Please set a password")
+		s.renderAdminSetupPage(w, r, username, ipAddr,
+			util.NewI18nError(util.NewValidationError("please set a password"), util.I18nError500Message))
 		return
 	}
 	if password != confirmPassword {
-		s.renderAdminSetupPage(w, r, username, "Passwords mismatch")
+		s.renderAdminSetupPage(w, r, username, ipAddr,
+			util.NewI18nError(errors.New("the two password fields do not match"), util.I18nErrorChangePwdNoMatch))
 		return
 	}
 	admin := dataprovider.Admin{
@@ -694,7 +730,7 @@ func (s *httpdServer) handleWebAdminSetupPost(w http.ResponseWriter, r *http.Req
 	}
 	err = dataprovider.AddAdmin(&admin, username, ipAddr, "")
 	if err != nil {
-		s.renderAdminSetupPage(w, r, username, err.Error())
+		s.renderAdminSetupPage(w, r, username, ipAddr, util.NewI18nError(err, util.I18nError500Message))
 		return
 	}
 	s.loginAdmin(w, r, &admin, false, nil, ipAddr)
@@ -702,7 +738,7 @@ func (s *httpdServer) handleWebAdminSetupPost(w http.ResponseWriter, r *http.Req
 
 func (s *httpdServer) loginUser(
 	w http.ResponseWriter, r *http.Request, user *dataprovider.User, connectionID, ipAddr string,
-	isSecondFactorAuth bool, errorFunc func(w http.ResponseWriter, error, ip string),
+	isSecondFactorAuth bool, errorFunc func(w http.ResponseWriter, r *http.Request, err *util.I18nError, ip string),
 ) {
 	c := jwtTokenClaims{
 		Username:                   user.Username,
@@ -724,24 +760,32 @@ func (s *httpdServer) loginUser(
 	if err != nil {
 		logger.Warn(logSender, connectionID, "unable to set user login cookie %v", err)
 		updateLoginMetrics(user, dataprovider.LoginMethodPassword, ipAddr, common.ErrInternalFailure)
-		errorFunc(w, err.Error(), ipAddr)
+		errorFunc(w, r, util.NewI18nError(err, util.I18nError500Message), ipAddr)
 		return
 	}
 	if isSecondFactorAuth {
 		invalidateToken(r)
 	}
 	if audience == tokenAudienceWebClientPartial {
-		http.Redirect(w, r, webClientTwoFactorPath, http.StatusFound)
+		redirectPath := webClientTwoFactorPath
+		if next := r.URL.Query().Get("next"); strings.HasPrefix(next, webClientFilesPath) {
+			redirectPath += "?next=" + url.QueryEscape(next)
+		}
+		http.Redirect(w, r, redirectPath, http.StatusFound)
 		return
 	}
 	updateLoginMetrics(user, dataprovider.LoginMethodPassword, ipAddr, err)
 	dataprovider.UpdateLastLogin(user)
+	if next := r.URL.Query().Get("next"); strings.HasPrefix(next, webClientFilesPath) {
+		http.Redirect(w, r, next, http.StatusFound)
+		return
+	}
 	http.Redirect(w, r, webClientFilesPath, http.StatusFound)
 }
 
 func (s *httpdServer) loginAdmin(
 	w http.ResponseWriter, r *http.Request, admin *dataprovider.Admin,
-	isSecondFactorAuth bool, errorFunc func(w http.ResponseWriter, error, ip string),
+	isSecondFactorAuth bool, errorFunc func(w http.ResponseWriter, r *http.Request, err *util.I18nError, ip string),
 	ipAddr string,
 ) {
 	c := jwtTokenClaims{
@@ -750,6 +794,8 @@ func (s *httpdServer) loginAdmin(
 		Role:                 admin.Role,
 		Signature:            admin.GetSignature(),
 		HideUserPageSections: admin.Filters.Preferences.HideUserPageSections,
+		MustSetTwoFactorAuth: admin.Filters.RequireTwoFactor && !admin.Filters.TOTPConfig.Enabled,
+		MustChangePassword:   admin.Filters.RequirePasswordChange,
 	}
 
 	audience := tokenAudienceWebAdmin
@@ -761,10 +807,10 @@ func (s *httpdServer) loginAdmin(
 	if err != nil {
 		logger.Warn(logSender, "", "unable to set admin login cookie %v", err)
 		if errorFunc == nil {
-			s.renderAdminSetupPage(w, r, admin.Username, err.Error())
+			s.renderAdminSetupPage(w, r, admin.Username, ipAddr, util.NewI18nError(err, util.I18nError500Message))
 			return
 		}
-		errorFunc(w, err.Error(), ipAddr)
+		errorFunc(w, r, util.NewI18nError(err, util.I18nError500Message), ipAddr)
 		return
 	}
 	if isSecondFactorAuth {
@@ -775,7 +821,12 @@ func (s *httpdServer) loginAdmin(
 		return
 	}
 	dataprovider.UpdateAdminLastLogin(admin)
-	http.Redirect(w, r, webUsersPath, http.StatusFound)
+	common.DelayLogin(nil)
+	redirectURL := webUsersPath
+	if errorFunc == nil {
+		redirectURL = webAdminMFAPath
+	}
+	http.Redirect(w, r, redirectURL, http.StatusFound)
 }
 
 func (s *httpdServer) logout(w http.ResponseWriter, r *http.Request) {
@@ -897,9 +948,10 @@ func (s *httpdServer) getToken(w http.ResponseWriter, r *http.Request) {
 	ipAddr := util.GetIPFromRemoteAddress(r.RemoteAddr)
 	admin, err := dataprovider.CheckAdminAndPass(username, password, ipAddr)
 	if err != nil {
-		err = handleDefenderEventLoginFailed(ipAddr, err)
+		handleDefenderEventLoginFailed(ipAddr, err) //nolint:errcheck
 		w.Header().Set(common.HTTPAuthenticationHeader, basicRealm)
-		sendAPIResponse(w, r, err, http.StatusText(http.StatusUnauthorized), http.StatusUnauthorized)
+		sendAPIResponse(w, r, dataprovider.ErrInvalidCredentials, http.StatusText(http.StatusUnauthorized),
+			http.StatusUnauthorized)
 		return
 	}
 	if admin.Filters.TOTPConfig.Enabled {
@@ -934,10 +986,12 @@ func (s *httpdServer) getToken(w http.ResponseWriter, r *http.Request) {
 
 func (s *httpdServer) generateAndSendToken(w http.ResponseWriter, r *http.Request, admin dataprovider.Admin, ip string) {
 	c := jwtTokenClaims{
-		Username:    admin.Username,
-		Permissions: admin.Permissions,
-		Role:        admin.Role,
-		Signature:   admin.GetSignature(),
+		Username:             admin.Username,
+		Permissions:          admin.Permissions,
+		Role:                 admin.Role,
+		Signature:            admin.GetSignature(),
+		MustSetTwoFactorAuth: admin.Filters.RequireTwoFactor && !admin.Filters.TOTPConfig.Enabled,
+		MustChangePassword:   admin.Filters.RequirePasswordChange,
 	}
 
 	resp, err := c.createTokenResponse(s.tokenAuth, tokenAudienceAPI, ip)
@@ -948,6 +1002,7 @@ func (s *httpdServer) generateAndSendToken(w http.ResponseWriter, r *http.Reques
 	}
 
 	dataprovider.UpdateAdminLastLogin(&admin)
+	common.DelayLogin(nil)
 	render.JSON(w, r, resp)
 }
 
@@ -983,6 +1038,10 @@ func (s *httpdServer) refreshClientToken(w http.ResponseWriter, r *http.Request,
 		logger.Debug(logSender, "", "signature mismatch for user %q, unable to refresh cookie", user.Username)
 		return
 	}
+	if err := user.CheckLoginConditions(); err != nil {
+		logger.Debug(logSender, "", "unable to refresh cookie for user %q: %v", user.Username, err)
+		return
+	}
 	if err := checkHTTPClientUser(&user, r, xid.New().String(), true); err != nil {
 		logger.Debug(logSender, "", "unable to refresh cookie for user %q: %v", user.Username, err)
 		return
@@ -999,17 +1058,13 @@ func (s *httpdServer) refreshAdminToken(w http.ResponseWriter, r *http.Request, 
 	if err != nil {
 		return
 	}
-	if admin.Status != 1 {
-		logger.Debug(logSender, "", "admin %q is disabled, unable to refresh cookie", admin.Username)
-		return
-	}
 	if admin.GetSignature() != tokenClaims.Signature {
 		logger.Debug(logSender, "", "signature mismatch for admin %q, unable to refresh cookie", admin.Username)
 		return
 	}
 	ipAddr := util.GetIPFromRemoteAddress(r.RemoteAddr)
-	if !admin.CanLoginFromIP(ipAddr) {
-		logger.Debug(logSender, "", "admin %q cannot login from %v, unable to refresh cookie", admin.Username, r.RemoteAddr)
+	if err := admin.CanLogin(ipAddr); err != nil {
+		logger.Debug(logSender, "", "unable to refresh cookie for admin %q, err: %v", admin.Username, err)
 		return
 	}
 	tokenClaims.Permissions = admin.Permissions
@@ -1033,8 +1088,9 @@ func (s *httpdServer) updateContextFromCookie(r *http.Request) *http.Request {
 	return r
 }
 
-func (s *httpdServer) checkConnection(next http.Handler) http.Handler {
+func (s *httpdServer) parseHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Server", version.GetServerVersion("/", false))
 		ipAddr := util.GetIPFromRemoteAddress(r.RemoteAddr)
 		var ip net.IP
 		isUnixSocket := filepath.IsAbs(s.binding.Address)
@@ -1065,16 +1121,26 @@ func (s *httpdServer) checkConnection(next http.Handler) http.Handler {
 			}
 		}
 
+		next.ServeHTTP(w, r)
+	})
+}
+
+func (s *httpdServer) checkConnection(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ipAddr := util.GetIPFromRemoteAddress(r.RemoteAddr)
 		common.Connections.AddClientConnection(ipAddr)
 		defer common.Connections.RemoveClientConnection(ipAddr)
 
 		if err := common.Connections.IsNewConnectionAllowed(ipAddr, common.ProtocolHTTP); err != nil {
 			logger.Log(logger.LevelDebug, common.ProtocolHTTP, "", "connection not allowed from ip %q: %v", ipAddr, err)
-			s.sendForbiddenResponse(w, r, err.Error())
+			s.sendForbiddenResponse(w, r, util.NewI18nError(err, util.I18nErrorConnectionForbidden))
 			return
 		}
 		if common.IsBanned(ipAddr, common.ProtocolHTTP) {
-			s.sendForbiddenResponse(w, r, "your IP address is banned")
+			s.sendForbiddenResponse(w, r, util.NewI18nError(
+				util.NewGenericError("your IP address is blocked"),
+				util.I18nErrorIPForbidden),
+			)
 			return
 		}
 		if delay, err := common.LimitRate(common.ProtocolHTTP, ipAddr); err != nil {
@@ -1093,28 +1159,28 @@ func (s *httpdServer) sendTooManyRequestResponse(w http.ResponseWriter, r *http.
 	if (s.enableWebAdmin || s.enableWebClient) && isWebRequest(r) {
 		r = s.updateContextFromCookie(r)
 		if s.enableWebClient && (isWebClientRequest(r) || !s.enableWebAdmin) {
-			s.renderClientMessagePage(w, r, http.StatusText(http.StatusTooManyRequests), "Rate limit exceeded",
-				http.StatusTooManyRequests, err, "")
+			s.renderClientMessagePage(w, r, util.I18nError429Title, http.StatusTooManyRequests,
+				util.NewI18nError(errors.New(http.StatusText(http.StatusTooManyRequests)), util.I18nError429Message), "")
 			return
 		}
-		s.renderMessagePage(w, r, http.StatusText(http.StatusTooManyRequests), "Rate limit exceeded", http.StatusTooManyRequests,
-			err, "")
+		s.renderMessagePage(w, r, util.I18nError429Title, http.StatusTooManyRequests,
+			util.NewI18nError(errors.New(http.StatusText(http.StatusTooManyRequests)), util.I18nError429Message), "")
 		return
 	}
 	sendAPIResponse(w, r, err, http.StatusText(http.StatusTooManyRequests), http.StatusTooManyRequests)
 }
 
-func (s *httpdServer) sendForbiddenResponse(w http.ResponseWriter, r *http.Request, message string) {
+func (s *httpdServer) sendForbiddenResponse(w http.ResponseWriter, r *http.Request, err error) {
 	if (s.enableWebAdmin || s.enableWebClient) && isWebRequest(r) {
 		r = s.updateContextFromCookie(r)
 		if s.enableWebClient && (isWebClientRequest(r) || !s.enableWebAdmin) {
-			s.renderClientForbiddenPage(w, r, message)
+			s.renderClientForbiddenPage(w, r, err)
 			return
 		}
-		s.renderForbiddenPage(w, r, message)
+		s.renderForbiddenPage(w, r, err)
 		return
 	}
-	sendAPIResponse(w, r, errors.New(message), message, http.StatusForbidden)
+	sendAPIResponse(w, r, err, "", http.StatusForbidden)
 }
 
 func (s *httpdServer) badHostHandler(w http.ResponseWriter, r *http.Request) {
@@ -1125,7 +1191,11 @@ func (s *httpdServer) badHostHandler(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 	}
-	s.sendForbiddenResponse(w, r, fmt.Sprintf("The host %q is not allowed", host))
+	logger.Debug(logSender, "", "the host %q is not allowed", host)
+	s.sendForbiddenResponse(w, r, util.NewI18nError(
+		util.NewGenericError(http.StatusText(http.StatusForbidden)),
+		util.I18nErrorConnectionForbidden,
+	))
 }
 
 func (s *httpdServer) notFoundHandler(w http.ResponseWriter, r *http.Request) {
@@ -1152,15 +1222,17 @@ func (s *httpdServer) redirectToWebPath(w http.ResponseWriter, r *http.Request, 
 	}
 }
 
-func (s *httpdServer) isStaticFileURL(r *http.Request) bool {
-	var urlPath string
-	rctx := chi.RouteContext(r.Context())
-	if rctx != nil && rctx.RoutePath != "" {
-		urlPath = rctx.RoutePath
-	} else {
-		urlPath = r.URL.Path
-	}
-	return !strings.HasPrefix(urlPath, webOpenAPIPath) && !strings.HasPrefix(urlPath, webStaticFilesPath)
+// The StripSlashes causes infinite redirects at the root path if used with http.FileServer.
+// We also don't strip paths with more than one trailing slash, see #1434
+func (s *httpdServer) mustStripSlash(r *http.Request) bool {
+	urlPath := getURLPath(r)
+	return !strings.HasSuffix(urlPath, "//") && !strings.HasPrefix(urlPath, webOpenAPIPath) &&
+		!strings.HasPrefix(urlPath, webStaticFilesPath) && !strings.HasPrefix(urlPath, acmeChallengeURI)
+}
+
+func (s *httpdServer) mustCheckPath(r *http.Request) bool {
+	urlPath := getURLPath(r)
+	return !strings.HasPrefix(urlPath, webStaticFilesPath) && !strings.HasPrefix(urlPath, acmeChallengeURI)
 }
 
 func (s *httpdServer) initializeRouter() {
@@ -1169,7 +1241,7 @@ func (s *httpdServer) initializeRouter() {
 	s.router = chi.NewRouter()
 
 	s.router.Use(middleware.RequestID)
-	s.router.Use(s.checkConnection)
+	s.router.Use(s.parseHeaders)
 	s.router.Use(logger.NewStructuredLogger(logger.GetLogger()))
 	s.router.Use(middleware.Recoverer)
 	if s.binding.Security.Enabled {
@@ -1185,9 +1257,11 @@ func (s *httpdServer) initializeRouter() {
 			ContentSecurityPolicy:   s.binding.Security.ContentSecurityPolicy,
 			PermissionsPolicy:       s.binding.Security.PermissionsPolicy,
 			CrossOriginOpenerPolicy: s.binding.Security.CrossOriginOpenerPolicy,
-			ExpectCTHeader:          s.binding.Security.ExpectCTHeader,
 		})
 		secureMiddleware.SetBadHostHandler(http.HandlerFunc(s.badHostHandler))
+		if s.binding.Security.CacheControl == "private" {
+			s.router.Use(cacheControlMiddleware)
+		}
 		s.router.Use(secureMiddleware.Handler)
 		if s.binding.Security.HTTPSRedirect {
 			s.router.Use(s.binding.Security.redirectHandler)
@@ -1208,9 +1282,9 @@ func (s *httpdServer) initializeRouter() {
 		})
 		s.router.Use(c.Handler)
 	}
+	s.router.Use(middleware.Maybe(s.checkConnection, s.mustCheckPath))
 	s.router.Use(middleware.GetHead)
-	// StripSlashes causes infinite redirects at the root path if used with http.FileServer
-	s.router.Use(middleware.Maybe(middleware.StripSlashes, s.isStaticFileURL))
+	s.router.Use(middleware.Maybe(middleware.StripSlashes, s.mustStripSlash))
 
 	s.router.NotFound(s.notFoundHandler)
 
@@ -1218,19 +1292,15 @@ func (s *httpdServer) initializeRouter() {
 		render.PlainText(w, r, "ok")
 	})
 
-	s.router.Get(robotsTxtPath, func(w http.ResponseWriter, r *http.Request) {
-		render.PlainText(w, r, "User-agent: *\nDisallow: /")
-	})
-
 	if hasHTTPSRedirect {
 		if p := acme.GetHTTP01WebRoot(); p != "" {
-			serveStaticDir(s.router, acmeChallengeURI, p)
+			serveStaticDir(s.router, acmeChallengeURI, p, true)
 		}
 	}
 
 	if s.enableRESTAPI {
 		// share API available to external users
-		s.router.Get(sharesPath+"/{id}", s.downloadFromShare)
+		s.router.Get(sharesPath+"/{id}", s.downloadFromShare) //nolint:goconst
 		s.router.Post(sharesPath+"/{id}", s.uploadFilesToShare)
 		s.router.Post(sharesPath+"/{id}/{name}", s.uploadFileToShare)
 		s.router.With(compressor.Handler).Get(sharesPath+"/{id}/dirs", s.readBrowsableShareContents)
@@ -1255,7 +1325,7 @@ func (s *httpdServer) initializeRouter() {
 
 			router.With(forbidAPIKeyAuthentication).Get(logoutPath, s.logout)
 			router.With(forbidAPIKeyAuthentication).Get(adminProfilePath, getAdminProfile)
-			router.With(forbidAPIKeyAuthentication).Put(adminProfilePath, updateAdminProfile)
+			router.With(forbidAPIKeyAuthentication, s.checkAuthRequirements).Put(adminProfilePath, updateAdminProfile)
 			router.With(forbidAPIKeyAuthentication).Put(adminPwdPath, changeAdminPassword)
 			// admin TOTP APIs
 			router.With(forbidAPIKeyAuthentication).Get(adminTOTPConfigsPath, getTOTPConfigs)
@@ -1265,94 +1335,98 @@ func (s *httpdServer) initializeRouter() {
 			router.With(forbidAPIKeyAuthentication).Get(admin2FARecoveryCodesPath, getRecoveryCodes)
 			router.With(forbidAPIKeyAuthentication).Post(admin2FARecoveryCodesPath, generateRecoveryCodes)
 
-			router.With(s.checkPerm(dataprovider.PermAdminViewServerStatus)).
-				Get(serverStatusPath, func(w http.ResponseWriter, r *http.Request) {
-					r.Body = http.MaxBytesReader(w, r.Body, maxRequestSize)
-					render.JSON(w, r, getServicesStatus())
-				})
-
-			router.With(s.checkPerm(dataprovider.PermAdminViewConnections)).Get(activeConnectionsPath, getActiveConnections)
-			router.With(s.checkPerm(dataprovider.PermAdminCloseConnections)).
-				Delete(activeConnectionsPath+"/{connectionID}", handleCloseConnection)
-			router.With(s.checkPerm(dataprovider.PermAdminQuotaScans)).Get(quotasBasePath+"/users/scans", getUsersQuotaScans)
-			router.With(s.checkPerm(dataprovider.PermAdminQuotaScans)).Post(quotasBasePath+"/users/{username}/scan", startUserQuotaScan)
-			router.With(s.checkPerm(dataprovider.PermAdminQuotaScans)).Get(quotasBasePath+"/folders/scans", getFoldersQuotaScans)
-			router.With(s.checkPerm(dataprovider.PermAdminQuotaScans)).Post(quotasBasePath+"/folders/{name}/scan", startFolderQuotaScan)
-			router.With(s.checkPerm(dataprovider.PermAdminViewUsers)).Get(userPath, getUsers)
-			router.With(s.checkPerm(dataprovider.PermAdminAddUsers)).Post(userPath, addUser)
-			router.With(s.checkPerm(dataprovider.PermAdminViewUsers)).Get(userPath+"/{username}", getUserByUsername)
-			router.With(s.checkPerm(dataprovider.PermAdminChangeUsers)).Put(userPath+"/{username}", updateUser)
-			router.With(s.checkPerm(dataprovider.PermAdminDeleteUsers)).Delete(userPath+"/{username}", deleteUser)
-			router.With(s.checkPerm(dataprovider.PermAdminChangeUsers)).Put(userPath+"/{username}/2fa/disable", disableUser2FA)
-			router.With(s.checkPerm(dataprovider.PermAdminViewUsers)).Get(folderPath, getFolders)
-			router.With(s.checkPerm(dataprovider.PermAdminViewUsers)).Get(folderPath+"/{name}", getFolderByName)
-			router.With(s.checkPerm(dataprovider.PermAdminAddUsers)).Post(folderPath, addFolder)
-			router.With(s.checkPerm(dataprovider.PermAdminChangeUsers)).Put(folderPath+"/{name}", updateFolder)
-			router.With(s.checkPerm(dataprovider.PermAdminDeleteUsers)).Delete(folderPath+"/{name}", deleteFolder)
-			router.With(s.checkPerm(dataprovider.PermAdminManageGroups)).Get(groupPath, getGroups)
-			router.With(s.checkPerm(dataprovider.PermAdminManageGroups)).Get(groupPath+"/{name}", getGroupByName)
-			router.With(s.checkPerm(dataprovider.PermAdminManageGroups)).Post(groupPath, addGroup)
-			router.With(s.checkPerm(dataprovider.PermAdminManageGroups)).Put(groupPath+"/{name}", updateGroup)
-			router.With(s.checkPerm(dataprovider.PermAdminManageGroups)).Delete(groupPath+"/{name}", deleteGroup)
-			router.With(s.checkPerm(dataprovider.PermAdminManageSystem)).Get(dumpDataPath, dumpData)
-			router.With(s.checkPerm(dataprovider.PermAdminManageSystem)).Get(loadDataPath, loadData)
-			router.With(s.checkPerm(dataprovider.PermAdminManageSystem)).Post(loadDataPath, loadDataFromRequest)
-			router.With(s.checkPerm(dataprovider.PermAdminChangeUsers)).Put(quotasBasePath+"/users/{username}/usage",
-				updateUserQuotaUsage)
-			router.With(s.checkPerm(dataprovider.PermAdminChangeUsers)).Put(quotasBasePath+"/users/{username}/transfer-usage",
-				updateUserTransferQuotaUsage)
-			router.With(s.checkPerm(dataprovider.PermAdminChangeUsers)).Put(quotasBasePath+"/folders/{name}/usage",
-				updateFolderQuotaUsage)
-			router.With(s.checkPerm(dataprovider.PermAdminViewDefender)).Get(defenderHosts, getDefenderHosts)
-			router.With(s.checkPerm(dataprovider.PermAdminViewDefender)).Get(defenderHosts+"/{id}", getDefenderHostByID)
-			router.With(s.checkPerm(dataprovider.PermAdminManageDefender)).Delete(defenderHosts+"/{id}", deleteDefenderHostByID)
-			router.With(s.checkPerm(dataprovider.PermAdminManageAdmins)).Get(adminPath, getAdmins)
-			router.With(s.checkPerm(dataprovider.PermAdminManageAdmins)).Post(adminPath, addAdmin)
-			router.With(s.checkPerm(dataprovider.PermAdminManageAdmins)).Get(adminPath+"/{username}", getAdminByUsername)
-			router.With(s.checkPerm(dataprovider.PermAdminManageAdmins)).Put(adminPath+"/{username}", updateAdmin)
-			router.With(s.checkPerm(dataprovider.PermAdminManageAdmins)).Delete(adminPath+"/{username}", deleteAdmin)
-			router.With(s.checkPerm(dataprovider.PermAdminManageAdmins)).Put(adminPath+"/{username}/2fa/disable", disableAdmin2FA)
-			router.With(s.checkPerm(dataprovider.PermAdminRetentionChecks)).Get(retentionChecksPath, getRetentionChecks)
-			router.With(s.checkPerm(dataprovider.PermAdminRetentionChecks)).Post(retentionBasePath+"/{username}/check",
-				startRetentionCheck)
-			router.With(s.checkPerm(dataprovider.PermAdminMetadataChecks)).Get(metadataChecksPath, getMetadataChecks)
-			router.With(s.checkPerm(dataprovider.PermAdminMetadataChecks)).Post(metadataBasePath+"/{username}/check",
-				startMetadataCheck)
-			router.With(s.checkPerm(dataprovider.PermAdminViewEvents), compressor.Handler).
-				Get(fsEventsPath, searchFsEvents)
-			router.With(s.checkPerm(dataprovider.PermAdminViewEvents), compressor.Handler).
-				Get(providerEventsPath, searchProviderEvents)
-			router.With(forbidAPIKeyAuthentication, s.checkPerm(dataprovider.PermAdminManageAPIKeys)).
+			router.With(forbidAPIKeyAuthentication, s.checkPerm(dataprovider.PermAdminAny)).
 				Get(apiKeysPath, getAPIKeys)
-			router.With(forbidAPIKeyAuthentication, s.checkPerm(dataprovider.PermAdminManageAPIKeys)).
+			router.With(forbidAPIKeyAuthentication, s.checkPerm(dataprovider.PermAdminAny)).
 				Post(apiKeysPath, addAPIKey)
-			router.With(forbidAPIKeyAuthentication, s.checkPerm(dataprovider.PermAdminManageAPIKeys)).
+			router.With(forbidAPIKeyAuthentication, s.checkPerm(dataprovider.PermAdminAny)).
 				Get(apiKeysPath+"/{id}", getAPIKeyByID)
-			router.With(forbidAPIKeyAuthentication, s.checkPerm(dataprovider.PermAdminManageAPIKeys)).
+			router.With(forbidAPIKeyAuthentication, s.checkPerm(dataprovider.PermAdminAny)).
 				Put(apiKeysPath+"/{id}", updateAPIKey)
-			router.With(forbidAPIKeyAuthentication, s.checkPerm(dataprovider.PermAdminManageAPIKeys)).
+			router.With(forbidAPIKeyAuthentication, s.checkPerm(dataprovider.PermAdminAny)).
 				Delete(apiKeysPath+"/{id}", deleteAPIKey)
-			router.With(s.checkPerm(dataprovider.PermAdminManageEventRules)).Get(eventActionsPath, getEventActions)
-			router.With(s.checkPerm(dataprovider.PermAdminManageEventRules)).Get(eventActionsPath+"/{name}", getEventActionByName)
-			router.With(s.checkPerm(dataprovider.PermAdminManageEventRules)).Post(eventActionsPath, addEventAction)
-			router.With(s.checkPerm(dataprovider.PermAdminManageEventRules)).Put(eventActionsPath+"/{name}", updateEventAction)
-			router.With(s.checkPerm(dataprovider.PermAdminManageEventRules)).Delete(eventActionsPath+"/{name}", deleteEventAction)
-			router.With(s.checkPerm(dataprovider.PermAdminManageEventRules)).Get(eventRulesPath, getEventRules)
-			router.With(s.checkPerm(dataprovider.PermAdminManageEventRules)).Get(eventRulesPath+"/{name}", getEventRuleByName)
-			router.With(s.checkPerm(dataprovider.PermAdminManageEventRules)).Post(eventRulesPath, addEventRule)
-			router.With(s.checkPerm(dataprovider.PermAdminManageEventRules)).Put(eventRulesPath+"/{name}", updateEventRule)
-			router.With(s.checkPerm(dataprovider.PermAdminManageEventRules)).Delete(eventRulesPath+"/{name}", deleteEventRule)
-			router.With(s.checkPerm(dataprovider.PermAdminManageEventRules)).Post(eventRulesPath+"/run/{name}", runOnDemandRule)
-			router.With(s.checkPerm(dataprovider.PermAdminManageRoles)).Get(rolesPath, getRoles)
-			router.With(s.checkPerm(dataprovider.PermAdminManageRoles)).Post(rolesPath, addRole)
-			router.With(s.checkPerm(dataprovider.PermAdminManageRoles)).Get(rolesPath+"/{name}", getRoleByName)
-			router.With(s.checkPerm(dataprovider.PermAdminManageRoles)).Put(rolesPath+"/{name}", updateRole)
-			router.With(s.checkPerm(dataprovider.PermAdminManageRoles)).Delete(rolesPath+"/{name}", deleteRole)
-			router.With(s.checkPerm(dataprovider.PermAdminManageIPLists), compressor.Handler).Get(ipListsPath+"/{type}", getIPListEntries)
-			router.With(s.checkPerm(dataprovider.PermAdminManageIPLists)).Post(ipListsPath+"/{type}", addIPListEntry)
-			router.With(s.checkPerm(dataprovider.PermAdminManageIPLists)).Get(ipListsPath+"/{type}/{ipornet}", getIPListEntry)
-			router.With(s.checkPerm(dataprovider.PermAdminManageIPLists)).Put(ipListsPath+"/{type}/{ipornet}", updateIPListEntry)
-			router.With(s.checkPerm(dataprovider.PermAdminManageIPLists)).Delete(ipListsPath+"/{type}/{ipornet}", deleteIPListEntry)
+
+			router.Group(func(router chi.Router) {
+				router.Use(s.checkAuthRequirements)
+
+				router.With(s.checkPerm(dataprovider.PermAdminViewServerStatus)).
+					Get(serverStatusPath, func(w http.ResponseWriter, r *http.Request) {
+						r.Body = http.MaxBytesReader(w, r.Body, maxRequestSize)
+						render.JSON(w, r, getServicesStatus())
+					})
+
+				router.With(s.checkPerm(dataprovider.PermAdminViewConnections)).Get(activeConnectionsPath, getActiveConnections)
+				router.With(s.checkPerm(dataprovider.PermAdminCloseConnections)).
+					Delete(activeConnectionsPath+"/{connectionID}", handleCloseConnection)
+				router.With(s.checkPerm(dataprovider.PermAdminQuotaScans)).Get(quotasBasePath+"/users/scans", getUsersQuotaScans)
+				router.With(s.checkPerm(dataprovider.PermAdminQuotaScans)).Post(quotasBasePath+"/users/{username}/scan", startUserQuotaScan)
+				router.With(s.checkPerm(dataprovider.PermAdminQuotaScans)).Get(quotasBasePath+"/folders/scans", getFoldersQuotaScans)
+				router.With(s.checkPerm(dataprovider.PermAdminQuotaScans)).Post(quotasBasePath+"/folders/{name}/scan", startFolderQuotaScan)
+				router.With(s.checkPerm(dataprovider.PermAdminViewUsers)).Get(userPath, getUsers)
+				router.With(s.checkPerm(dataprovider.PermAdminAddUsers)).Post(userPath, addUser)
+				router.With(s.checkPerm(dataprovider.PermAdminViewUsers)).Get(userPath+"/{username}", getUserByUsername) //nolint:goconst
+				router.With(s.checkPerm(dataprovider.PermAdminChangeUsers)).Put(userPath+"/{username}", updateUser)
+				router.With(s.checkPerm(dataprovider.PermAdminDeleteUsers)).Delete(userPath+"/{username}", deleteUser)
+				router.With(s.checkPerm(dataprovider.PermAdminDisableMFA)).Put(userPath+"/{username}/2fa/disable", disableUser2FA) //nolint:goconst
+				router.With(s.checkPerm(dataprovider.PermAdminManageFolders)).Get(folderPath, getFolders)
+				router.With(s.checkPerm(dataprovider.PermAdminManageFolders)).Get(folderPath+"/{name}", getFolderByName) //nolint:goconst
+				router.With(s.checkPerm(dataprovider.PermAdminManageFolders)).Post(folderPath, addFolder)
+				router.With(s.checkPerm(dataprovider.PermAdminManageFolders)).Put(folderPath+"/{name}", updateFolder)
+				router.With(s.checkPerm(dataprovider.PermAdminManageFolders)).Delete(folderPath+"/{name}", deleteFolder)
+				router.With(s.checkPerm(dataprovider.PermAdminManageGroups)).Get(groupPath, getGroups)
+				router.With(s.checkPerm(dataprovider.PermAdminManageGroups)).Get(groupPath+"/{name}", getGroupByName)
+				router.With(s.checkPerm(dataprovider.PermAdminManageGroups)).Post(groupPath, addGroup)
+				router.With(s.checkPerm(dataprovider.PermAdminManageGroups)).Put(groupPath+"/{name}", updateGroup)
+				router.With(s.checkPerm(dataprovider.PermAdminManageGroups)).Delete(groupPath+"/{name}", deleteGroup)
+				router.With(s.checkPerm(dataprovider.PermAdminAny)).Get(dumpDataPath, dumpData)
+				router.With(s.checkPerm(dataprovider.PermAdminAny)).Get(loadDataPath, loadData)
+				router.With(s.checkPerm(dataprovider.PermAdminAny)).Post(loadDataPath, loadDataFromRequest)
+				router.With(s.checkPerm(dataprovider.PermAdminChangeUsers)).Put(quotasBasePath+"/users/{username}/usage",
+					updateUserQuotaUsage)
+				router.With(s.checkPerm(dataprovider.PermAdminChangeUsers)).Put(quotasBasePath+"/users/{username}/transfer-usage",
+					updateUserTransferQuotaUsage)
+				router.With(s.checkPerm(dataprovider.PermAdminChangeUsers)).Put(quotasBasePath+"/folders/{name}/usage",
+					updateFolderQuotaUsage)
+				router.With(s.checkPerm(dataprovider.PermAdminViewDefender)).Get(defenderHosts, getDefenderHosts)
+				router.With(s.checkPerm(dataprovider.PermAdminViewDefender)).Get(defenderHosts+"/{id}", getDefenderHostByID)
+				router.With(s.checkPerm(dataprovider.PermAdminManageDefender)).Delete(defenderHosts+"/{id}", deleteDefenderHostByID)
+				router.With(s.checkPerm(dataprovider.PermAdminAny)).Get(adminPath, getAdmins)
+				router.With(s.checkPerm(dataprovider.PermAdminAny)).Post(adminPath, addAdmin)
+				router.With(s.checkPerm(dataprovider.PermAdminAny)).Get(adminPath+"/{username}", getAdminByUsername)
+				router.With(s.checkPerm(dataprovider.PermAdminAny)).Put(adminPath+"/{username}", updateAdmin)
+				router.With(s.checkPerm(dataprovider.PermAdminAny)).Delete(adminPath+"/{username}", deleteAdmin)
+				router.With(s.checkPerm(dataprovider.PermAdminDisableMFA)).Put(adminPath+"/{username}/2fa/disable", disableAdmin2FA)
+				router.With(s.checkPerm(dataprovider.PermAdminAny)).Get(retentionChecksPath, getRetentionChecks)
+				router.With(s.checkPerm(dataprovider.PermAdminAny)).Post(retentionBasePath+"/{username}/check",
+					startRetentionCheck)
+				router.With(s.checkPerm(dataprovider.PermAdminViewEvents), compressor.Handler).
+					Get(fsEventsPath, searchFsEvents)
+				router.With(s.checkPerm(dataprovider.PermAdminViewEvents), compressor.Handler).
+					Get(providerEventsPath, searchProviderEvents)
+				router.With(s.checkPerm(dataprovider.PermAdminViewEvents), compressor.Handler).
+					Get(logEventsPath, searchLogEvents)
+				router.With(s.checkPerm(dataprovider.PermAdminAny)).Get(eventActionsPath, getEventActions)
+				router.With(s.checkPerm(dataprovider.PermAdminAny)).Get(eventActionsPath+"/{name}", getEventActionByName)
+				router.With(s.checkPerm(dataprovider.PermAdminAny)).Post(eventActionsPath, addEventAction)
+				router.With(s.checkPerm(dataprovider.PermAdminAny)).Put(eventActionsPath+"/{name}", updateEventAction)
+				router.With(s.checkPerm(dataprovider.PermAdminAny)).Delete(eventActionsPath+"/{name}", deleteEventAction)
+				router.With(s.checkPerm(dataprovider.PermAdminAny)).Get(eventRulesPath, getEventRules)
+				router.With(s.checkPerm(dataprovider.PermAdminAny)).Get(eventRulesPath+"/{name}", getEventRuleByName)
+				router.With(s.checkPerm(dataprovider.PermAdminAny)).Post(eventRulesPath, addEventRule)
+				router.With(s.checkPerm(dataprovider.PermAdminAny)).Put(eventRulesPath+"/{name}", updateEventRule)
+				router.With(s.checkPerm(dataprovider.PermAdminAny)).Delete(eventRulesPath+"/{name}", deleteEventRule)
+				router.With(s.checkPerm(dataprovider.PermAdminAny)).Post(eventRulesPath+"/run/{name}", runOnDemandRule)
+				router.With(s.checkPerm(dataprovider.PermAdminAny)).Get(rolesPath, getRoles)
+				router.With(s.checkPerm(dataprovider.PermAdminAny)).Post(rolesPath, addRole)
+				router.With(s.checkPerm(dataprovider.PermAdminAny)).Get(rolesPath+"/{name}", getRoleByName)
+				router.With(s.checkPerm(dataprovider.PermAdminAny)).Put(rolesPath+"/{name}", updateRole)
+				router.With(s.checkPerm(dataprovider.PermAdminAny)).Delete(rolesPath+"/{name}", deleteRole)
+				router.With(s.checkPerm(dataprovider.PermAdminAny), compressor.Handler).Get(ipListsPath+"/{type}", getIPListEntries) //nolint:goconst
+				router.With(s.checkPerm(dataprovider.PermAdminAny)).Post(ipListsPath+"/{type}", addIPListEntry)
+				router.With(s.checkPerm(dataprovider.PermAdminAny)).Get(ipListsPath+"/{type}/{ipornet}", getIPListEntry) //nolint:goconst
+				router.With(s.checkPerm(dataprovider.PermAdminAny)).Put(ipListsPath+"/{type}/{ipornet}", updateIPListEntry)
+				router.With(s.checkPerm(dataprovider.PermAdminAny)).Delete(ipListsPath+"/{type}/{ipornet}", deleteIPListEntry)
+			})
 		})
 
 		s.router.Get(userTokenPath, s.getUserToken)
@@ -1418,16 +1492,18 @@ func (s *httpdServer) initializeRouter() {
 
 		if s.renderOpenAPI {
 			s.router.Group(func(router chi.Router) {
+				router.Use(cleanCacheControlMiddleware)
 				router.Use(compressor.Handler)
-				serveStaticDir(router, webOpenAPIPath, s.openAPIPath)
+				serveStaticDir(router, webOpenAPIPath, s.openAPIPath, false)
 			})
 		}
 	}
 
 	if s.enableWebAdmin || s.enableWebClient {
 		s.router.Group(func(router chi.Router) {
+			router.Use(cleanCacheControlMiddleware)
 			router.Use(compressor.Handler)
-			serveStaticDir(router, webStaticFilesPath, s.staticFilesPath)
+			serveStaticDir(router, webStaticFilesPath, s.staticFilesPath, true)
 		})
 		if s.binding.OIDC.isEnabled() {
 			s.router.Get(webOIDCRedirectPath, s.handleOIDCRedirect)
@@ -1490,12 +1566,16 @@ func (s *httpdServer) setupWebClientRoutes() {
 		s.router.Get(webClientPubSharesPath+"/{id}/login", s.handleClientShareLoginGet)
 		s.router.Post(webClientPubSharesPath+"/{id}/login", s.handleClientShareLoginPost)
 		s.router.Get(webClientPubSharesPath+"/{id}", s.downloadFromShare)
-		s.router.Get(webClientPubSharesPath+"/{id}/partial", s.handleClientSharePartialDownload)
+		s.router.Post(webClientPubSharesPath+"/{id}/partial", s.handleClientSharePartialDownload)
 		s.router.Get(webClientPubSharesPath+"/{id}/browse", s.handleShareGetFiles)
+		s.router.Post(webClientPubSharesPath+"/{id}/browse/exist", s.handleClientShareCheckExist)
+		s.router.Get(webClientPubSharesPath+"/{id}/download", s.handleClientSharedFile)
 		s.router.Get(webClientPubSharesPath+"/{id}/upload", s.handleClientUploadToShare)
 		s.router.With(compressor.Handler).Get(webClientPubSharesPath+"/{id}/dirs", s.handleShareGetDirContents)
 		s.router.Post(webClientPubSharesPath+"/{id}", s.uploadFilesToShare)
 		s.router.Post(webClientPubSharesPath+"/{id}/{name}", s.uploadFileToShare)
+		s.router.Get(webClientPubSharesPath+"/{id}/viewpdf", s.handleShareViewPDF)
+		s.router.Get(webClientPubSharesPath+"/{id}/getpdf", s.handleShareGetPDF)
 
 		s.router.Group(func(router chi.Router) {
 			if s.binding.OIDC.isEnabled() {
@@ -1509,8 +1589,12 @@ func (s *httpdServer) setupWebClientRoutes() {
 			router.With(s.checkAuthRequirements, s.refreshCookie).Get(webClientViewPDFPath, s.handleClientViewPDF)
 			router.With(s.checkAuthRequirements, s.refreshCookie).Get(webClientGetPDFPath, s.handleClientGetPDF)
 			router.With(s.checkAuthRequirements, s.refreshCookie, verifyCSRFHeader).Get(webClientFilePath, getUserFile)
+			router.With(s.checkAuthRequirements, s.refreshCookie, verifyCSRFHeader).Get(webClientTasksPath+"/{id}",
+				getWebTask)
 			router.With(s.checkAuthRequirements, s.checkHTTPUserPerm(sdk.WebClientWriteDisabled), verifyCSRFHeader).
 				Post(webClientFilePath, uploadUserFile)
+			router.With(s.checkAuthRequirements, s.checkHTTPUserPerm(sdk.WebClientWriteDisabled), verifyCSRFHeader).
+				Post(webClientExistPath, s.handleClientCheckExist)
 			router.With(s.checkAuthRequirements, s.refreshCookie).Get(webClientEditFilePath, s.handleClientEditFile)
 			router.With(s.checkAuthRequirements, s.checkHTTPUserPerm(sdk.WebClientWriteDisabled), verifyCSRFHeader).
 				Delete(webClientFilesPath, deleteUserFile)
@@ -1519,13 +1603,14 @@ func (s *httpdServer) setupWebClientRoutes() {
 			router.With(s.checkAuthRequirements, s.checkHTTPUserPerm(sdk.WebClientWriteDisabled), verifyCSRFHeader).
 				Post(webClientDirsPath, createUserDir)
 			router.With(s.checkAuthRequirements, s.checkHTTPUserPerm(sdk.WebClientWriteDisabled), verifyCSRFHeader).
-				Delete(webClientDirsPath, deleteUserDir)
+				Delete(webClientDirsPath, taskDeleteDir)
 			router.With(s.checkAuthRequirements, s.checkHTTPUserPerm(sdk.WebClientWriteDisabled), verifyCSRFHeader).
-				Post(webClientFileActionsPath+"/move", renameUserFsEntry)
+				Post(webClientFileActionsPath+"/move", taskRenameFsEntry)
 			router.With(s.checkAuthRequirements, s.checkHTTPUserPerm(sdk.WebClientWriteDisabled), verifyCSRFHeader).
-				Post(webClientFileActionsPath+"/copy", copyUserFsEntry)
+				Post(webClientFileActionsPath+"/copy", taskCopyFsEntry)
 			router.With(s.checkAuthRequirements, s.refreshCookie).
-				Get(webClientDownloadZipPath, s.handleWebClientDownloadZip)
+				Post(webClientDownloadZipPath, s.handleWebClientDownloadZip)
+			router.With(s.checkAuthRequirements, s.refreshCookie).Get(webClientPingPath, handlePingRequest)
 			router.With(s.checkAuthRequirements, s.refreshCookie).Get(webClientProfilePath,
 				s.handleClientGetProfile)
 			router.With(s.checkAuthRequirements).Post(webClientProfilePath, s.handleWebClientProfilePost)
@@ -1535,6 +1620,8 @@ func (s *httpdServer) setupWebClientRoutes() {
 				Post(webChangeClientPwdPath, s.handleWebClientChangePwdPost)
 			router.With(s.checkHTTPUserPerm(sdk.WebClientMFADisabled), s.refreshCookie).
 				Get(webClientMFAPath, s.handleWebClientMFA)
+			router.With(s.checkHTTPUserPerm(sdk.WebClientMFADisabled), s.refreshCookie).
+				Get(webClientMFAPath+"/qrcode", getQRCode)
 			router.With(s.checkHTTPUserPerm(sdk.WebClientMFADisabled), verifyCSRFHeader).
 				Post(webClientTOTPGeneratePath, generateTOTPSecret)
 			router.With(s.checkHTTPUserPerm(sdk.WebClientMFADisabled), verifyCSRFHeader).
@@ -1545,6 +1632,8 @@ func (s *httpdServer) setupWebClientRoutes() {
 				Get(webClientRecoveryCodesPath, getRecoveryCodes)
 			router.With(s.checkHTTPUserPerm(sdk.WebClientMFADisabled), verifyCSRFHeader).
 				Post(webClientRecoveryCodesPath, generateRecoveryCodes)
+			router.With(s.checkAuthRequirements, s.checkHTTPUserPerm(sdk.WebClientSharesDisabled), compressor.Handler, s.refreshCookie).
+				Get(webClientSharesPath+jsonAPISuffix, getAllShares)
 			router.With(s.checkAuthRequirements, s.checkHTTPUserPerm(sdk.WebClientSharesDisabled), s.refreshCookie).
 				Get(webClientSharesPath, s.handleClientGetShares)
 			router.With(s.checkAuthRequirements, s.checkHTTPUserPerm(sdk.WebClientSharesDisabled), s.refreshCookie).
@@ -1571,6 +1660,7 @@ func (s *httpdServer) setupWebAdminRoutes() {
 		if s.binding.OIDC.hasRoles() && !s.binding.isWebAdminOIDCLoginDisabled() {
 			s.router.Get(webAdminOIDCLoginPath, s.handleWebAdminOIDCLogin)
 		}
+		s.router.Get(webOAuth2RedirectPath, s.handleOAuth2TokenRedirect)
 		s.router.Get(webAdminSetupPath, s.handleWebAdminSetupGet)
 		s.router.Post(webAdminSetupPath, s.handleWebAdminSetupPost)
 		if !s.binding.isWebAdminLoginFormDisabled() {
@@ -1601,12 +1691,14 @@ func (s *httpdServer) setupWebAdminRoutes() {
 			router.Use(jwtAuthenticatorWebAdmin)
 
 			router.Get(webLogoutPath, s.handleWebAdminLogout)
-			router.With(s.refreshCookie, s.requireBuiltinLogin).Get(webAdminProfilePath, s.handleWebAdminProfile)
-			router.With(s.requireBuiltinLogin).Post(webAdminProfilePath, s.handleWebAdminProfilePost)
+			router.With(s.refreshCookie, s.checkAuthRequirements, s.requireBuiltinLogin).Get(
+				webAdminProfilePath, s.handleWebAdminProfile)
+			router.With(s.checkAuthRequirements, s.requireBuiltinLogin).Post(webAdminProfilePath, s.handleWebAdminProfilePost)
 			router.With(s.refreshCookie, s.requireBuiltinLogin).Get(webChangeAdminPwdPath, s.handleWebAdminChangePwd)
 			router.With(s.requireBuiltinLogin).Post(webChangeAdminPwdPath, s.handleWebAdminChangePwdPost)
 
 			router.With(s.refreshCookie, s.requireBuiltinLogin).Get(webAdminMFAPath, s.handleWebAdminMFA)
+			router.With(s.refreshCookie, s.requireBuiltinLogin).Get(webAdminMFAPath+"/qrcode", getQRCode)
 			router.With(verifyCSRFHeader, s.requireBuiltinLogin).Post(webAdminTOTPGeneratePath, generateTOTPSecret)
 			router.With(verifyCSRFHeader, s.requireBuiltinLogin).Post(webAdminTOTPValidatePath, validateTOTPPasscode)
 			router.With(verifyCSRFHeader, s.requireBuiltinLogin).Post(webAdminTOTPSavePath, saveTOTPConfig)
@@ -1614,133 +1706,161 @@ func (s *httpdServer) setupWebAdminRoutes() {
 				getRecoveryCodes)
 			router.With(verifyCSRFHeader, s.requireBuiltinLogin).Post(webAdminRecoveryCodesPath, generateRecoveryCodes)
 
-			router.With(s.checkPerm(dataprovider.PermAdminViewUsers), s.refreshCookie).
-				Get(webUsersPath, s.handleGetWebUsers)
-			router.With(s.checkPerm(dataprovider.PermAdminAddUsers), s.refreshCookie).
-				Get(webUserPath, s.handleWebAddUserGet)
-			router.With(s.checkPerm(dataprovider.PermAdminChangeUsers), s.refreshCookie).
-				Get(webUserPath+"/{username}", s.handleWebUpdateUserGet)
-			router.With(s.checkPerm(dataprovider.PermAdminAddUsers)).Post(webUserPath, s.handleWebAddUserPost)
-			router.With(s.checkPerm(dataprovider.PermAdminChangeUsers)).Post(webUserPath+"/{username}",
-				s.handleWebUpdateUserPost)
-			router.With(s.checkPerm(dataprovider.PermAdminManageGroups), s.refreshCookie).
-				Get(webGroupsPath, s.handleWebGetGroups)
-			router.With(s.checkPerm(dataprovider.PermAdminManageGroups), s.refreshCookie).
-				Get(webGroupPath, s.handleWebAddGroupGet)
-			router.With(s.checkPerm(dataprovider.PermAdminManageGroups)).Post(webGroupPath, s.handleWebAddGroupPost)
-			router.With(s.checkPerm(dataprovider.PermAdminManageGroups), s.refreshCookie).
-				Get(webGroupPath+"/{name}", s.handleWebUpdateGroupGet)
-			router.With(s.checkPerm(dataprovider.PermAdminManageGroups)).Post(webGroupPath+"/{name}",
-				s.handleWebUpdateGroupPost)
-			router.With(s.checkPerm(dataprovider.PermAdminManageGroups), verifyCSRFHeader).
-				Delete(webGroupPath+"/{name}", deleteGroup)
-			router.With(s.checkPerm(dataprovider.PermAdminViewConnections), s.refreshCookie).
-				Get(webConnectionsPath, s.handleWebGetConnections)
-			router.With(s.checkPerm(dataprovider.PermAdminViewUsers), s.refreshCookie).
-				Get(webFoldersPath, s.handleWebGetFolders)
-			router.With(s.checkPerm(dataprovider.PermAdminAddUsers), s.refreshCookie).
-				Get(webFolderPath, s.handleWebAddFolderGet)
-			router.With(s.checkPerm(dataprovider.PermAdminAddUsers)).Post(webFolderPath, s.handleWebAddFolderPost)
-			router.With(s.checkPerm(dataprovider.PermAdminViewServerStatus), s.refreshCookie).
-				Get(webStatusPath, s.handleWebGetStatus)
-			router.With(s.checkPerm(dataprovider.PermAdminManageAdmins), s.refreshCookie).
-				Get(webAdminsPath, s.handleGetWebAdmins)
-			router.With(s.checkPerm(dataprovider.PermAdminManageAdmins), s.refreshCookie).
-				Get(webAdminPath, s.handleWebAddAdminGet)
-			router.With(s.checkPerm(dataprovider.PermAdminManageAdmins), s.refreshCookie).
-				Get(webAdminPath+"/{username}", s.handleWebUpdateAdminGet)
-			router.With(s.checkPerm(dataprovider.PermAdminManageAdmins)).Post(webAdminPath, s.handleWebAddAdminPost)
-			router.With(s.checkPerm(dataprovider.PermAdminManageAdmins)).Post(webAdminPath+"/{username}",
-				s.handleWebUpdateAdminPost)
-			router.With(s.checkPerm(dataprovider.PermAdminManageAdmins), verifyCSRFHeader).
-				Delete(webAdminPath+"/{username}", deleteAdmin)
-			router.With(s.checkPerm(dataprovider.PermAdminCloseConnections), verifyCSRFHeader).
-				Delete(webConnectionsPath+"/{connectionID}", handleCloseConnection)
-			router.With(s.checkPerm(dataprovider.PermAdminChangeUsers), s.refreshCookie).
-				Get(webFolderPath+"/{name}", s.handleWebUpdateFolderGet)
-			router.With(s.checkPerm(dataprovider.PermAdminChangeUsers)).Post(webFolderPath+"/{name}",
-				s.handleWebUpdateFolderPost)
-			router.With(s.checkPerm(dataprovider.PermAdminDeleteUsers), verifyCSRFHeader).
-				Delete(webFolderPath+"/{name}", deleteFolder)
-			router.With(s.checkPerm(dataprovider.PermAdminQuotaScans), verifyCSRFHeader).
-				Post(webScanVFolderPath+"/{name}", startFolderQuotaScan)
-			router.With(s.checkPerm(dataprovider.PermAdminDeleteUsers), verifyCSRFHeader).
-				Delete(webUserPath+"/{username}", deleteUser)
-			router.With(s.checkPerm(dataprovider.PermAdminQuotaScans), verifyCSRFHeader).
-				Post(webQuotaScanPath+"/{username}", startUserQuotaScan)
-			router.With(s.checkPerm(dataprovider.PermAdminManageSystem)).Get(webMaintenancePath, s.handleWebMaintenance)
-			router.With(s.checkPerm(dataprovider.PermAdminManageSystem)).Get(webBackupPath, dumpData)
-			router.With(s.checkPerm(dataprovider.PermAdminManageSystem)).Post(webRestorePath, s.handleWebRestore)
-			router.With(s.checkPerm(dataprovider.PermAdminManageSystem), s.refreshCookie).
-				Get(webTemplateUser, s.handleWebTemplateUserGet)
-			router.With(s.checkPerm(dataprovider.PermAdminManageSystem)).Post(webTemplateUser, s.handleWebTemplateUserPost)
-			router.With(s.checkPerm(dataprovider.PermAdminManageSystem), s.refreshCookie).
-				Get(webTemplateFolder, s.handleWebTemplateFolderGet)
-			router.With(s.checkPerm(dataprovider.PermAdminManageSystem)).Post(webTemplateFolder, s.handleWebTemplateFolderPost)
-			router.With(s.checkPerm(dataprovider.PermAdminViewDefender)).Get(webDefenderPath, s.handleWebDefenderPage)
-			router.With(s.checkPerm(dataprovider.PermAdminViewDefender)).Get(webDefenderHostsPath, getDefenderHosts)
-			router.With(s.checkPerm(dataprovider.PermAdminManageDefender)).Delete(webDefenderHostsPath+"/{id}",
-				deleteDefenderHostByID)
-			router.With(s.checkPerm(dataprovider.PermAdminManageEventRules), s.refreshCookie).
-				Get(webAdminEventActionsPath, s.handleWebGetEventActions)
-			router.With(s.checkPerm(dataprovider.PermAdminManageEventRules), s.refreshCookie).
-				Get(webAdminEventActionPath, s.handleWebAddEventActionGet)
-			router.With(s.checkPerm(dataprovider.PermAdminManageEventRules)).Post(webAdminEventActionPath,
-				s.handleWebAddEventActionPost)
-			router.With(s.checkPerm(dataprovider.PermAdminManageEventRules), s.refreshCookie).
-				Get(webAdminEventActionPath+"/{name}", s.handleWebUpdateEventActionGet)
-			router.With(s.checkPerm(dataprovider.PermAdminManageEventRules)).Post(webAdminEventActionPath+"/{name}",
-				s.handleWebUpdateEventActionPost)
-			router.With(s.checkPerm(dataprovider.PermAdminManageEventRules), verifyCSRFHeader).
-				Delete(webAdminEventActionPath+"/{name}", deleteEventAction)
-			router.With(s.checkPerm(dataprovider.PermAdminManageEventRules), s.refreshCookie).
-				Get(webAdminEventRulesPath, s.handleWebGetEventRules)
-			router.With(s.checkPerm(dataprovider.PermAdminManageEventRules), s.refreshCookie).
-				Get(webAdminEventRulePath, s.handleWebAddEventRuleGet)
-			router.With(s.checkPerm(dataprovider.PermAdminManageEventRules)).Post(webAdminEventRulePath,
-				s.handleWebAddEventRulePost)
-			router.With(s.checkPerm(dataprovider.PermAdminManageEventRules), s.refreshCookie).
-				Get(webAdminEventRulePath+"/{name}", s.handleWebUpdateEventRuleGet)
-			router.With(s.checkPerm(dataprovider.PermAdminManageEventRules)).Post(webAdminEventRulePath+"/{name}",
-				s.handleWebUpdateEventRulePost)
-			router.With(s.checkPerm(dataprovider.PermAdminManageEventRules), verifyCSRFHeader).
-				Delete(webAdminEventRulePath+"/{name}", deleteEventRule)
-			router.With(s.checkPerm(dataprovider.PermAdminManageEventRules), verifyCSRFHeader).
-				Post(webAdminEventRulePath+"/run/{name}", runOnDemandRule)
-			router.With(s.checkPerm(dataprovider.PermAdminManageRoles), s.refreshCookie).
-				Get(webAdminRolesPath, s.handleWebGetRoles)
-			router.With(s.checkPerm(dataprovider.PermAdminManageRoles), s.refreshCookie).
-				Get(webAdminRolePath, s.handleWebAddRoleGet)
-			router.With(s.checkPerm(dataprovider.PermAdminManageRoles)).Post(webAdminRolePath, s.handleWebAddRolePost)
-			router.With(s.checkPerm(dataprovider.PermAdminManageRoles), s.refreshCookie).
-				Get(webAdminRolePath+"/{name}", s.handleWebUpdateRoleGet)
-			router.With(s.checkPerm(dataprovider.PermAdminManageRoles)).Post(webAdminRolePath+"/{name}",
-				s.handleWebUpdateRolePost)
-			router.With(s.checkPerm(dataprovider.PermAdminManageRoles), verifyCSRFHeader).
-				Delete(webAdminRolePath+"/{name}", deleteRole)
-			router.With(s.checkPerm(dataprovider.PermAdminViewEvents), s.refreshCookie).Get(webEventsPath,
-				s.handleWebGetEvents)
-			router.With(s.checkPerm(dataprovider.PermAdminViewEvents), compressor.Handler, s.refreshCookie).
-				Get(webEventsFsSearchPath, searchFsEvents)
-			router.With(s.checkPerm(dataprovider.PermAdminViewEvents), compressor.Handler, s.refreshCookie).
-				Get(webEventsProviderSearchPath, searchProviderEvents)
-			router.With(s.checkPerm(dataprovider.PermAdminManageIPLists)).Get(webIPListsPath, s.handleWebIPListsPage)
-			router.With(s.checkPerm(dataprovider.PermAdminManageIPLists), compressor.Handler, s.refreshCookie).
-				Get(webIPListsPath+"/{type}", getIPListEntries)
-			router.With(s.checkPerm(dataprovider.PermAdminManageIPLists), s.refreshCookie).Get(webIPListPath+"/{type}",
-				s.handleWebAddIPListEntryGet)
-			router.With(s.checkPerm(dataprovider.PermAdminManageIPLists)).Post(webIPListPath+"/{type}",
-				s.handleWebAddIPListEntryPost)
-			router.With(s.checkPerm(dataprovider.PermAdminManageIPLists), s.refreshCookie).Get(webIPListPath+"/{type}/{ipornet}",
-				s.handleWebUpdateIPListEntryGet)
-			router.With(s.checkPerm(dataprovider.PermAdminManageIPLists)).Post(webIPListPath+"/{type}/{ipornet}",
-				s.handleWebUpdateIPListEntryPost)
-			router.With(s.checkPerm(dataprovider.PermAdminManageIPLists), verifyCSRFHeader).
-				Delete(webIPListPath+"/{type}/{ipornet}", deleteIPListEntry)
-			router.With(s.checkPerm(dataprovider.PermAdminManageSystem), s.refreshCookie).Get(webConfigsPath, s.handleWebConfigs)
-			router.With(s.checkPerm(dataprovider.PermAdminManageSystem)).Post(webConfigsPath, s.handleWebConfigsPost)
-			router.With(s.checkPerm(dataprovider.PermAdminManageSystem), verifyCSRFHeader, s.refreshCookie).
-				Post(webConfigsPath+"/smtp/test", testSMTPConfig)
+			router.Group(func(router chi.Router) {
+				router.Use(s.checkAuthRequirements)
+
+				router.With(s.checkPerm(dataprovider.PermAdminViewUsers), s.refreshCookie).
+					Get(webUsersPath, s.handleGetWebUsers)
+				router.With(s.checkPerm(dataprovider.PermAdminViewUsers), compressor.Handler, s.refreshCookie).
+					Get(webUsersPath+jsonAPISuffix, getAllUsers)
+				router.With(s.checkPerm(dataprovider.PermAdminAddUsers), s.refreshCookie).
+					Get(webUserPath, s.handleWebAddUserGet)
+				router.With(s.checkPerm(dataprovider.PermAdminChangeUsers), s.refreshCookie).
+					Get(webUserPath+"/{username}", s.handleWebUpdateUserGet)
+				router.With(s.checkPerm(dataprovider.PermAdminAddUsers)).Post(webUserPath, s.handleWebAddUserPost)
+				router.With(s.checkPerm(dataprovider.PermAdminChangeUsers)).Post(webUserPath+"/{username}",
+					s.handleWebUpdateUserPost)
+				router.With(s.checkPerm(dataprovider.PermAdminManageGroups), s.refreshCookie).
+					Get(webGroupsPath, s.handleWebGetGroups)
+				router.With(s.checkPerm(dataprovider.PermAdminManageGroups), compressor.Handler, s.refreshCookie).
+					Get(webGroupsPath+jsonAPISuffix, getAllGroups)
+				router.With(s.checkPerm(dataprovider.PermAdminManageGroups), s.refreshCookie).
+					Get(webGroupPath, s.handleWebAddGroupGet)
+				router.With(s.checkPerm(dataprovider.PermAdminManageGroups)).Post(webGroupPath, s.handleWebAddGroupPost)
+				router.With(s.checkPerm(dataprovider.PermAdminManageGroups), s.refreshCookie).
+					Get(webGroupPath+"/{name}", s.handleWebUpdateGroupGet)
+				router.With(s.checkPerm(dataprovider.PermAdminManageGroups)).Post(webGroupPath+"/{name}",
+					s.handleWebUpdateGroupPost)
+				router.With(s.checkPerm(dataprovider.PermAdminManageGroups), verifyCSRFHeader).
+					Delete(webGroupPath+"/{name}", deleteGroup)
+				router.With(s.checkPerm(dataprovider.PermAdminViewConnections), s.refreshCookie).
+					Get(webConnectionsPath, s.handleWebGetConnections)
+				router.With(s.checkPerm(dataprovider.PermAdminViewConnections), s.refreshCookie).
+					Get(webConnectionsPath+jsonAPISuffix, getActiveConnections)
+				router.With(s.checkPerm(dataprovider.PermAdminManageFolders), s.refreshCookie).
+					Get(webFoldersPath, s.handleWebGetFolders)
+				router.With(s.checkPerm(dataprovider.PermAdminManageFolders), compressor.Handler, s.refreshCookie).
+					Get(webFoldersPath+jsonAPISuffix, getAllFolders)
+				router.With(s.checkPerm(dataprovider.PermAdminManageFolders), s.refreshCookie).
+					Get(webFolderPath, s.handleWebAddFolderGet)
+				router.With(s.checkPerm(dataprovider.PermAdminManageFolders)).Post(webFolderPath, s.handleWebAddFolderPost)
+				router.With(s.checkPerm(dataprovider.PermAdminViewServerStatus), s.refreshCookie).
+					Get(webStatusPath, s.handleWebGetStatus)
+				router.With(s.checkPerm(dataprovider.PermAdminAny), s.refreshCookie).
+					Get(webAdminsPath, s.handleGetWebAdmins)
+				router.With(s.checkPerm(dataprovider.PermAdminAny), compressor.Handler, s.refreshCookie).
+					Get(webAdminsPath+jsonAPISuffix, getAllAdmins)
+				router.With(s.checkPerm(dataprovider.PermAdminAny), s.refreshCookie).
+					Get(webAdminPath, s.handleWebAddAdminGet)
+				router.With(s.checkPerm(dataprovider.PermAdminAny), s.refreshCookie).
+					Get(webAdminPath+"/{username}", s.handleWebUpdateAdminGet)
+				router.With(s.checkPerm(dataprovider.PermAdminAny)).Post(webAdminPath, s.handleWebAddAdminPost)
+				router.With(s.checkPerm(dataprovider.PermAdminAny)).Post(webAdminPath+"/{username}",
+					s.handleWebUpdateAdminPost)
+				router.With(s.checkPerm(dataprovider.PermAdminAny), verifyCSRFHeader).
+					Delete(webAdminPath+"/{username}", deleteAdmin)
+				router.With(s.checkPerm(dataprovider.PermAdminDisableMFA), verifyCSRFHeader).
+					Put(webAdminPath+"/{username}/2fa/disable", disableAdmin2FA)
+				router.With(s.checkPerm(dataprovider.PermAdminCloseConnections), verifyCSRFHeader).
+					Delete(webConnectionsPath+"/{connectionID}", handleCloseConnection)
+				router.With(s.checkPerm(dataprovider.PermAdminManageFolders), s.refreshCookie).
+					Get(webFolderPath+"/{name}", s.handleWebUpdateFolderGet)
+				router.With(s.checkPerm(dataprovider.PermAdminManageFolders)).Post(webFolderPath+"/{name}",
+					s.handleWebUpdateFolderPost)
+				router.With(s.checkPerm(dataprovider.PermAdminManageFolders), verifyCSRFHeader).
+					Delete(webFolderPath+"/{name}", deleteFolder)
+				router.With(s.checkPerm(dataprovider.PermAdminQuotaScans), verifyCSRFHeader).
+					Post(webScanVFolderPath+"/{name}", startFolderQuotaScan)
+				router.With(s.checkPerm(dataprovider.PermAdminDeleteUsers), verifyCSRFHeader).
+					Delete(webUserPath+"/{username}", deleteUser)
+				router.With(s.checkPerm(dataprovider.PermAdminDisableMFA), verifyCSRFHeader).
+					Put(webUserPath+"/{username}/2fa/disable", disableUser2FA)
+				router.With(s.checkPerm(dataprovider.PermAdminQuotaScans), verifyCSRFHeader).
+					Post(webQuotaScanPath+"/{username}", startUserQuotaScan)
+				router.With(s.checkPerm(dataprovider.PermAdminAny)).Get(webMaintenancePath, s.handleWebMaintenance)
+				router.With(s.checkPerm(dataprovider.PermAdminAny)).Get(webBackupPath, dumpData)
+				router.With(s.checkPerm(dataprovider.PermAdminAny)).Post(webRestorePath, s.handleWebRestore)
+				router.With(s.checkPerm(dataprovider.PermAdminAny), s.refreshCookie).
+					Get(webTemplateUser, s.handleWebTemplateUserGet)
+				router.With(s.checkPerm(dataprovider.PermAdminAny)).Post(webTemplateUser, s.handleWebTemplateUserPost)
+				router.With(s.checkPerm(dataprovider.PermAdminAny), s.refreshCookie).
+					Get(webTemplateFolder, s.handleWebTemplateFolderGet)
+				router.With(s.checkPerm(dataprovider.PermAdminAny)).Post(webTemplateFolder, s.handleWebTemplateFolderPost)
+				router.With(s.checkPerm(dataprovider.PermAdminViewDefender)).Get(webDefenderPath, s.handleWebDefenderPage)
+				router.With(s.checkPerm(dataprovider.PermAdminViewDefender)).Get(webDefenderHostsPath, getDefenderHosts)
+				router.With(s.checkPerm(dataprovider.PermAdminManageDefender), verifyCSRFHeader).
+					Delete(webDefenderHostsPath+"/{id}", deleteDefenderHostByID)
+				router.With(s.checkPerm(dataprovider.PermAdminAny), compressor.Handler, s.refreshCookie).
+					Get(webAdminEventActionsPath+jsonAPISuffix, getAllActions)
+				router.With(s.checkPerm(dataprovider.PermAdminAny), s.refreshCookie).
+					Get(webAdminEventActionsPath, s.handleWebGetEventActions)
+				router.With(s.checkPerm(dataprovider.PermAdminAny), s.refreshCookie).
+					Get(webAdminEventActionPath, s.handleWebAddEventActionGet)
+				router.With(s.checkPerm(dataprovider.PermAdminAny)).Post(webAdminEventActionPath,
+					s.handleWebAddEventActionPost)
+				router.With(s.checkPerm(dataprovider.PermAdminAny), s.refreshCookie).
+					Get(webAdminEventActionPath+"/{name}", s.handleWebUpdateEventActionGet)
+				router.With(s.checkPerm(dataprovider.PermAdminAny)).Post(webAdminEventActionPath+"/{name}",
+					s.handleWebUpdateEventActionPost)
+				router.With(s.checkPerm(dataprovider.PermAdminAny), verifyCSRFHeader).
+					Delete(webAdminEventActionPath+"/{name}", deleteEventAction)
+				router.With(s.checkPerm(dataprovider.PermAdminAny), compressor.Handler, s.refreshCookie).
+					Get(webAdminEventRulesPath+jsonAPISuffix, getAllRules)
+				router.With(s.checkPerm(dataprovider.PermAdminAny), s.refreshCookie).
+					Get(webAdminEventRulesPath, s.handleWebGetEventRules)
+				router.With(s.checkPerm(dataprovider.PermAdminAny), s.refreshCookie).
+					Get(webAdminEventRulePath, s.handleWebAddEventRuleGet)
+				router.With(s.checkPerm(dataprovider.PermAdminAny)).Post(webAdminEventRulePath,
+					s.handleWebAddEventRulePost)
+				router.With(s.checkPerm(dataprovider.PermAdminAny), s.refreshCookie).
+					Get(webAdminEventRulePath+"/{name}", s.handleWebUpdateEventRuleGet)
+				router.With(s.checkPerm(dataprovider.PermAdminAny)).Post(webAdminEventRulePath+"/{name}",
+					s.handleWebUpdateEventRulePost)
+				router.With(s.checkPerm(dataprovider.PermAdminAny), verifyCSRFHeader).
+					Delete(webAdminEventRulePath+"/{name}", deleteEventRule)
+				router.With(s.checkPerm(dataprovider.PermAdminAny), verifyCSRFHeader).
+					Post(webAdminEventRulePath+"/run/{name}", runOnDemandRule)
+				router.With(s.checkPerm(dataprovider.PermAdminAny), s.refreshCookie).
+					Get(webAdminRolesPath, s.handleWebGetRoles)
+				router.With(s.checkPerm(dataprovider.PermAdminAny), compressor.Handler, s.refreshCookie).
+					Get(webAdminRolesPath+jsonAPISuffix, getAllRoles)
+				router.With(s.checkPerm(dataprovider.PermAdminAny), s.refreshCookie).
+					Get(webAdminRolePath, s.handleWebAddRoleGet)
+				router.With(s.checkPerm(dataprovider.PermAdminAny)).Post(webAdminRolePath, s.handleWebAddRolePost)
+				router.With(s.checkPerm(dataprovider.PermAdminAny), s.refreshCookie).
+					Get(webAdminRolePath+"/{name}", s.handleWebUpdateRoleGet)
+				router.With(s.checkPerm(dataprovider.PermAdminAny)).Post(webAdminRolePath+"/{name}",
+					s.handleWebUpdateRolePost)
+				router.With(s.checkPerm(dataprovider.PermAdminAny), verifyCSRFHeader).
+					Delete(webAdminRolePath+"/{name}", deleteRole)
+				router.With(s.checkPerm(dataprovider.PermAdminViewEvents), s.refreshCookie).Get(webEventsPath,
+					s.handleWebGetEvents)
+				router.With(s.checkPerm(dataprovider.PermAdminViewEvents), compressor.Handler, s.refreshCookie).
+					Get(webEventsFsSearchPath, searchFsEvents)
+				router.With(s.checkPerm(dataprovider.PermAdminViewEvents), compressor.Handler, s.refreshCookie).
+					Get(webEventsProviderSearchPath, searchProviderEvents)
+				router.With(s.checkPerm(dataprovider.PermAdminViewEvents), compressor.Handler, s.refreshCookie).
+					Get(webEventsLogSearchPath, searchLogEvents)
+				router.With(s.checkPerm(dataprovider.PermAdminAny)).Get(webIPListsPath, s.handleWebIPListsPage)
+				router.With(s.checkPerm(dataprovider.PermAdminAny), compressor.Handler, s.refreshCookie).
+					Get(webIPListsPath+"/{type}", getIPListEntries)
+				router.With(s.checkPerm(dataprovider.PermAdminAny), s.refreshCookie).Get(webIPListPath+"/{type}",
+					s.handleWebAddIPListEntryGet)
+				router.With(s.checkPerm(dataprovider.PermAdminAny)).Post(webIPListPath+"/{type}",
+					s.handleWebAddIPListEntryPost)
+				router.With(s.checkPerm(dataprovider.PermAdminAny), s.refreshCookie).Get(webIPListPath+"/{type}/{ipornet}",
+					s.handleWebUpdateIPListEntryGet)
+				router.With(s.checkPerm(dataprovider.PermAdminAny)).Post(webIPListPath+"/{type}/{ipornet}",
+					s.handleWebUpdateIPListEntryPost)
+				router.With(s.checkPerm(dataprovider.PermAdminAny), verifyCSRFHeader).
+					Delete(webIPListPath+"/{type}/{ipornet}", deleteIPListEntry)
+				router.With(s.checkPerm(dataprovider.PermAdminAny), s.refreshCookie).Get(webConfigsPath, s.handleWebConfigs)
+				router.With(s.checkPerm(dataprovider.PermAdminAny)).Post(webConfigsPath, s.handleWebConfigsPost)
+				router.With(s.checkPerm(dataprovider.PermAdminAny), verifyCSRFHeader, s.refreshCookie).
+					Post(webConfigsPath+"/smtp/test", testSMTPConfig)
+				router.With(s.checkPerm(dataprovider.PermAdminAny), verifyCSRFHeader, s.refreshCookie).
+					Post(webOAuth2TokenPath, handleSMTPOAuth2TokenRequestPost)
+			})
 		})
 	}
 }

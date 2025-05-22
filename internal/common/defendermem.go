@@ -1,4 +1,4 @@
-// Copyright (C) 2019-2023 Nicola Murino
+// Copyright (C) 2019 Nicola Murino
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published
@@ -170,10 +170,11 @@ func (d *memoryDefender) DeleteHost(ip string) bool {
 }
 
 // AddEvent adds an event for the given IP.
-// This method must be called for clients not yet banned
-func (d *memoryDefender) AddEvent(ip, protocol string, event HostEvent) {
+// This method must be called for clients not yet banned.
+// Returns true if the IP is in the defender's safe list.
+func (d *memoryDefender) AddEvent(ip, protocol string, event HostEvent) bool {
 	if d.IsSafe(ip, protocol) {
-		return
+		return true
 	}
 
 	d.Lock()
@@ -182,7 +183,7 @@ func (d *memoryDefender) AddEvent(ip, protocol string, event HostEvent) {
 	// ignore events for already banned hosts
 	if v, ok := d.banned[ip]; ok {
 		if v.After(time.Now()) {
-			return
+			return false
 		}
 		delete(d.banned, ip)
 	}
@@ -206,28 +207,32 @@ func (d *memoryDefender) AddEvent(ip, protocol string, event HostEvent) {
 				idx++
 			}
 		}
+		d.baseDefender.logEvent(ip, protocol, event, hs.TotalScore)
 
 		hs.Events = hs.Events[:idx]
 		if hs.TotalScore >= d.config.Threshold {
+			d.baseDefender.logBan(ip, protocol)
 			d.banned[ip] = time.Now().Add(time.Duration(d.config.BanTime) * time.Minute)
 			delete(d.hosts, ip)
 			d.cleanupBanned()
 			eventManager.handleIPBlockedEvent(EventParams{
 				Event:     ipBlockedEventName,
 				IP:        ip,
-				Timestamp: time.Now().UnixNano(),
+				Timestamp: time.Now(),
 				Status:    1,
 			})
 		} else {
 			d.hosts[ip] = hs
 		}
 	} else {
+		d.baseDefender.logEvent(ip, protocol, event, ev.score)
 		d.hosts[ip] = hostScore{
 			TotalScore: ev.score,
 			Events:     []hostEvent{ev},
 		}
 		d.cleanupHosts()
 	}
+	return false
 }
 
 func (d *memoryDefender) countBanned() int {

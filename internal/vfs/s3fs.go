@@ -1,4 +1,4 @@
-// Copyright (C) 2019-2023 Nicola Murino
+// Copyright (C) 2019 Nicola Murino
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published
@@ -19,8 +19,10 @@ package vfs
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
+	"io"
 	"mime"
 	"net"
 	"net/http"
@@ -48,19 +50,20 @@ import (
 
 	"github.com/drakkan/sftpgo/v2/internal/logger"
 	"github.com/drakkan/sftpgo/v2/internal/metric"
-	"github.com/drakkan/sftpgo/v2/internal/plugin"
 	"github.com/drakkan/sftpgo/v2/internal/util"
 	"github.com/drakkan/sftpgo/v2/internal/version"
 )
 
 const (
 	// using this mime type for directories improves compatibility with s3fs-fuse
-	s3DirMimeType        = "application/x-directory"
-	s3TransferBufferSize = 256 * 1024
+	s3DirMimeType         = "application/x-directory"
+	s3TransferBufferSize  = 256 * 1024
+	s3CopyObjectThreshold = 500 * 1024 * 1024
 )
 
 var (
-	s3DirMimeTypes = []string{s3DirMimeType, "httpd/unix-directory"}
+	s3DirMimeTypes    = []string{s3DirMimeType, "httpd/unix-directory"}
+	s3DefaultPageSize = int32(5000)
 )
 
 // S3Fs is a Fs implementation for AWS S3 compatible object storages
@@ -82,11 +85,7 @@ func init() {
 // object storage
 func NewS3Fs(connectionID, localTempDir, mountPath string, s3Config S3FsConfig) (Fs, error) {
 	if localTempDir == "" {
-		if tempPath != "" {
-			localTempDir = tempPath
-		} else {
-			localTempDir = filepath.Clean(os.TempDir())
-		}
+		localTempDir = getLocalTempDir()
 	}
 	fs := &S3Fs{
 		connectionID: connectionID,
@@ -101,7 +100,9 @@ func NewS3Fs(connectionID, localTempDir, mountPath string, s3Config S3FsConfig) 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	awsConfig, err := config.LoadDefaultConfig(ctx, config.WithHTTPClient(getAWSHTTPClient(0, 30*time.Second)))
+	awsConfig, err := config.LoadDefaultConfig(ctx, config.WithHTTPClient(
+		getAWSHTTPClient(0, 30*time.Second, fs.config.SkipTLSVerify)),
+	)
 	if err != nil {
 		return fs, fmt.Errorf("unable to get AWS config: %w", err)
 	}
@@ -113,19 +114,11 @@ func NewS3Fs(connectionID, localTempDir, mountPath string, s3Config S3FsConfig) 
 			return fs, err
 		}
 		awsConfig.Credentials = aws.NewCredentialsCache(
-			credentials.NewStaticCredentialsProvider(fs.config.AccessKey, fs.config.AccessSecret.GetPayload(), ""))
-	}
-	if fs.config.Endpoint != "" {
-		endpointResolver := aws.EndpointResolverWithOptionsFunc(func(service, region string, options ...any) (aws.Endpoint, error) {
-			return aws.Endpoint{
-				URL:               fs.config.Endpoint,
-				HostnameImmutable: fs.config.ForcePathStyle,
-				PartitionID:       "aws",
-				SigningRegion:     fs.config.Region,
-				Source:            aws.EndpointSourceCustom,
-			}, nil
-		})
-		awsConfig.EndpointResolverWithOptions = endpointResolver
+			credentials.NewStaticCredentialsProvider(
+				fs.config.AccessKey,
+				fs.config.AccessSecret.GetPayload(),
+				fs.config.SessionToken),
+		)
 	}
 
 	fs.setConfigDefaults()
@@ -136,7 +129,11 @@ func NewS3Fs(connectionID, localTempDir, mountPath string, s3Config S3FsConfig) 
 		awsConfig.Credentials = creds
 	}
 	fs.svc = s3.NewFromConfig(awsConfig, func(o *s3.Options) {
+		o.AppID = version.GetVersionHash()
 		o.UsePathStyle = fs.config.ForcePathStyle
+		if fs.config.Endpoint != "" {
+			o.BaseEndpoint = aws.String(fs.config.Endpoint)
+		}
 	})
 	return fs, nil
 }
@@ -155,22 +152,21 @@ func (fs *S3Fs) ConnectionID() string {
 func (fs *S3Fs) Stat(name string) (os.FileInfo, error) {
 	var result *FileInfo
 	if name == "" || name == "/" || name == "." {
-		return updateFileInfoModTime(fs.getStorageID(), name, NewFileInfo(name, true, 0, time.Unix(0, 0), false))
+		return NewFileInfo(name, true, 0, time.Unix(0, 0), false), nil
 	}
 	if fs.config.KeyPrefix == name+"/" {
-		return updateFileInfoModTime(fs.getStorageID(), name, NewFileInfo(name, true, 0, time.Unix(0, 0), false))
+		return NewFileInfo(name, true, 0, time.Unix(0, 0), false), nil
 	}
 	obj, err := fs.headObject(name)
 	if err == nil {
 		// Some S3 providers (like SeaweedFS) remove the trailing '/' from object keys.
 		// So we check some common content types to detect if this is a "directory".
 		isDir := util.Contains(s3DirMimeTypes, util.GetStringFromPointer(obj.ContentType))
-		if obj.ContentLength == 0 && !isDir {
+		if util.GetIntFromPointer(obj.ContentLength) == 0 && !isDir {
 			_, err = fs.headObject(name + "/")
 			isDir = err == nil
 		}
-		return updateFileInfoModTime(fs.getStorageID(), name, NewFileInfo(name, isDir, obj.ContentLength,
-			util.GetTimeFromPointer(obj.LastModified), false))
+		return NewFileInfo(name, isDir, util.GetIntFromPointer(obj.ContentLength), util.GetTimeFromPointer(obj.LastModified), false), nil
 	}
 	if !fs.IsNotExist(err) {
 		return result, err
@@ -178,7 +174,7 @@ func (fs *S3Fs) Stat(name string) (os.FileInfo, error) {
 	// now check if this is a prefix (virtual directory)
 	hasContents, err := fs.hasContents(name)
 	if err == nil && hasContents {
-		return updateFileInfoModTime(fs.getStorageID(), name, NewFileInfo(name, true, 0, time.Unix(0, 0), false))
+		return NewFileInfo(name, true, 0, time.Unix(0, 0), false), nil
 	} else if err != nil {
 		return nil, err
 	}
@@ -195,8 +191,7 @@ func (fs *S3Fs) getStatForDir(name string) (os.FileInfo, error) {
 	if err != nil {
 		return result, err
 	}
-	return updateFileInfoModTime(fs.getStorageID(), name, NewFileInfo(name, true, obj.ContentLength,
-		util.GetTimeFromPointer(obj.LastModified), false))
+	return NewFileInfo(name, true, util.GetIntFromPointer(obj.ContentLength), util.GetTimeFromPointer(obj.LastModified), false), nil
 }
 
 // Lstat returns a FileInfo describing the named file
@@ -205,18 +200,30 @@ func (fs *S3Fs) Lstat(name string) (os.FileInfo, error) {
 }
 
 // Open opens the named file for reading
-func (fs *S3Fs) Open(name string, offset int64) (File, *pipeat.PipeReaderAt, func(), error) {
+func (fs *S3Fs) Open(name string, offset int64) (File, PipeReader, func(), error) {
 	r, w, err := pipeat.PipeInDir(fs.localTempDir)
 	if err != nil {
 		return nil, nil, nil, err
 	}
+	p := NewPipeReader(r)
+	if readMetadata > 0 {
+		attrs, err := fs.headObject(name)
+		if err != nil {
+			r.Close()
+			w.Close()
+			return nil, nil, nil, err
+		}
+		p.setMetadata(attrs.Metadata)
+	}
+
 	ctx, cancelFn := context.WithCancel(context.Background())
 	downloader := manager.NewDownloader(fs.svc, func(d *manager.Downloader) {
 		d.Concurrency = fs.config.DownloadConcurrency
 		d.PartSize = fs.config.DownloadPartSize
 		if offset == 0 && fs.config.DownloadPartMaxTime > 0 {
 			d.ClientOptions = append(d.ClientOptions, func(o *s3.Options) {
-				o.HTTPClient = getAWSHTTPClient(fs.config.DownloadPartMaxTime, 100*time.Millisecond)
+				o.HTTPClient = getAWSHTTPClient(fs.config.DownloadPartMaxTime, 100*time.Millisecond,
+					fs.config.SkipTLSVerify)
 			})
 		}
 	})
@@ -238,23 +245,35 @@ func (fs *S3Fs) Open(name string, offset int64) (File, *pipeat.PipeReaderAt, fun
 		fsLog(fs, logger.LevelDebug, "download completed, path: %q size: %v, err: %+v", name, n, err)
 		metric.S3TransferCompleted(n, 1, err)
 	}()
-	return nil, r, cancelFn, nil
+	return nil, p, cancelFn, nil
 }
 
 // Create creates or opens the named file for writing
-func (fs *S3Fs) Create(name string, flag int) (File, *PipeWriter, func(), error) {
+func (fs *S3Fs) Create(name string, flag, checks int) (File, PipeWriter, func(), error) {
+	if checks&CheckParentDir != 0 {
+		_, err := fs.Stat(path.Dir(name))
+		if err != nil {
+			return nil, nil, nil, err
+		}
+	}
 	r, w, err := pipeat.PipeInDir(fs.localTempDir)
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	p := NewPipeWriter(w)
+	var p PipeWriter
+	if checks&CheckResume != 0 {
+		p = newPipeWriterAtOffset(w, 0)
+	} else {
+		p = NewPipeWriter(w)
+	}
 	ctx, cancelFn := context.WithCancel(context.Background())
 	uploader := manager.NewUploader(fs.svc, func(u *manager.Uploader) {
 		u.Concurrency = fs.config.UploadConcurrency
 		u.PartSize = fs.config.UploadPartSize
 		if fs.config.UploadPartMaxTime > 0 {
 			u.ClientOptions = append(u.ClientOptions, func(o *s3.Options) {
-				o.HTTPClient = getAWSHTTPClient(fs.config.UploadPartMaxTime, 100*time.Millisecond)
+				o.HTTPClient = getAWSHTTPClient(fs.config.UploadPartMaxTime, 100*time.Millisecond,
+					fs.config.SkipTLSVerify)
 			})
 		}
 	})
@@ -278,10 +297,34 @@ func (fs *S3Fs) Create(name string, flag int) (File, *PipeWriter, func(), error)
 		})
 		r.CloseWithError(err) //nolint:errcheck
 		p.Done(err)
-		fsLog(fs, logger.LevelDebug, "upload completed, path: %q, acl: %q, readed bytes: %v, err: %+v",
+		fsLog(fs, logger.LevelDebug, "upload completed, path: %q, acl: %q, readed bytes: %d, err: %+v",
 			name, fs.config.ACL, r.GetReadedBytes(), err)
 		metric.S3TransferCompleted(r.GetReadedBytes(), 0, err)
 	}()
+
+	if checks&CheckResume != 0 {
+		readCh := make(chan error, 1)
+
+		go func() {
+			n, err := fs.downloadToWriter(name, p)
+			pw := p.(*pipeWriterAtOffset)
+			pw.offset = 0
+			pw.writeOffset = n
+			readCh <- err
+		}()
+
+		err = <-readCh
+		if err != nil {
+			cancelFn()
+			p.Close()
+			fsLog(fs, logger.LevelDebug, "download before resume failed, writer closed and read cancelled")
+			return nil, nil, nil, err
+		}
+	}
+
+	if uploadMode&4 != 0 {
+		return nil, p, nil, nil
+	}
 	return nil, p, cancelFn, nil
 }
 
@@ -290,11 +333,15 @@ func (fs *S3Fs) Rename(source, target string) (int, int64, error) {
 	if source == target {
 		return -1, -1, nil
 	}
+	_, err := fs.Stat(path.Dir(target))
+	if err != nil {
+		return -1, -1, err
+	}
 	fi, err := fs.Stat(source)
 	if err != nil {
 		return -1, -1, err
 	}
-	return fs.renameInternal(source, target, fi)
+	return fs.renameInternal(source, target, fi, 0)
 }
 
 // Remove removes the named file or (empty) directory.
@@ -319,11 +366,6 @@ func (fs *S3Fs) Remove(name string, isDir bool) error {
 		Key:    aws.String(name),
 	})
 	metric.S3DeleteObjectCompleted(err)
-	if plugin.Handler.HasMetadater() && err == nil && !isDir {
-		if errMetadata := plugin.Handler.RemoveMetadata(fs.getStorageID(), ensureAbsPath(name)); errMetadata != nil {
-			fsLog(fs, logger.LevelWarn, "unable to remove metadata for path %q: %+v", name, errMetadata)
-		}
-	}
 	return err
 }
 
@@ -357,21 +399,8 @@ func (*S3Fs) Chmod(_ string, _ os.FileMode) error {
 }
 
 // Chtimes changes the access and modification times of the named file.
-func (fs *S3Fs) Chtimes(name string, _, mtime time.Time, isUploading bool) error {
-	if !plugin.Handler.HasMetadater() {
-		return ErrVfsUnsupported
-	}
-	if !isUploading {
-		info, err := fs.Stat(name)
-		if err != nil {
-			return err
-		}
-		if info.IsDir() {
-			return ErrVfsUnsupported
-		}
-	}
-	return plugin.Handler.SetModificationTime(fs.getStorageID(), ensureAbsPath(name),
-		util.GetTimeAsMsSinceEpoch(mtime))
+func (fs *S3Fs) Chtimes(_ string, _, _ time.Time, _ bool) error {
+	return ErrVfsUnsupported
 }
 
 // Truncate changes the size of the named file.
@@ -383,72 +412,34 @@ func (*S3Fs) Truncate(_ string, _ int64) error {
 
 // ReadDir reads the directory named by dirname and returns
 // a list of directory entries.
-func (fs *S3Fs) ReadDir(dirname string) ([]os.FileInfo, error) {
-	var result []os.FileInfo
+func (fs *S3Fs) ReadDir(dirname string) (DirLister, error) {
 	// dirname must be already cleaned
 	prefix := fs.getPrefix(dirname)
-
-	modTimes, err := getFolderModTimes(fs.getStorageID(), dirname)
-	if err != nil {
-		return result, err
-	}
-	prefixes := make(map[string]bool)
-
 	paginator := s3.NewListObjectsV2Paginator(fs.svc, &s3.ListObjectsV2Input{
 		Bucket:    aws.String(fs.config.Bucket),
 		Prefix:    aws.String(prefix),
 		Delimiter: aws.String("/"),
+		MaxKeys:   &s3DefaultPageSize,
 	})
 
-	for paginator.HasMorePages() {
-		ctx, cancelFn := context.WithDeadline(context.Background(), time.Now().Add(fs.ctxTimeout))
-		defer cancelFn()
-
-		page, err := paginator.NextPage(ctx)
-		if err != nil {
-			metric.S3ListObjectsCompleted(err)
-			return result, err
-		}
-		for _, p := range page.CommonPrefixes {
-			// prefixes have a trailing slash
-			name, _ := fs.resolve(p.Prefix, prefix)
-			if name == "" {
-				continue
-			}
-			if _, ok := prefixes[name]; ok {
-				continue
-			}
-			result = append(result, NewFileInfo(name, true, 0, time.Unix(0, 0), false))
-			prefixes[name] = true
-		}
-		for _, fileObject := range page.Contents {
-			objectModTime := util.GetTimeFromPointer(fileObject.LastModified)
-			name, isDir := fs.resolve(fileObject.Key, prefix)
-			if name == "" || name == "/" {
-				continue
-			}
-			if isDir {
-				if _, ok := prefixes[name]; ok {
-					continue
-				}
-				prefixes[name] = true
-			}
-			if t, ok := modTimes[name]; ok {
-				objectModTime = util.GetTimeFromMsecSinceEpoch(t)
-			}
-			result = append(result, NewFileInfo(name, (isDir && fileObject.Size == 0), fileObject.Size,
-				objectModTime, false))
-		}
-	}
-
-	metric.S3ListObjectsCompleted(nil)
-	return result, nil
+	return &s3DirLister{
+		paginator: paginator,
+		timeout:   fs.ctxTimeout,
+		prefix:    prefix,
+		prefixes:  make(map[string]bool),
+	}, nil
 }
 
 // IsUploadResumeSupported returns true if resuming uploads is supported.
 // Resuming uploads is not supported on S3
 func (*S3Fs) IsUploadResumeSupported() bool {
 	return false
+}
+
+// IsConditionalUploadResumeSupported returns if resuming uploads is supported
+// for the specified size
+func (*S3Fs) IsConditionalUploadResumeSupported(size int64) bool {
+	return size <= resumeMaxSize
 }
 
 // IsAtomicUploadSupported returns true if atomic upload is supported.
@@ -496,13 +487,13 @@ func (*S3Fs) IsNotSupported(err error) bool {
 	if err == nil {
 		return false
 	}
-	return err == ErrVfsUnsupported
+	return errors.Is(err, ErrVfsUnsupported)
 }
 
 // CheckRootPath creates the specified local root directory if it does not exists
 func (fs *S3Fs) CheckRootPath(username string, uid int, gid int) bool {
 	// we need a local directory for temporary files
-	osFs := NewOsFs(fs.ConnectionID(), fs.localTempDir, "")
+	osFs := NewOsFs(fs.ConnectionID(), fs.localTempDir, "", nil)
 	return osFs.CheckRootPath(username, uid, gid)
 }
 
@@ -510,49 +501,6 @@ func (fs *S3Fs) CheckRootPath(username string, uid int, gid int) bool {
 // and their size
 func (fs *S3Fs) ScanRootDirContents() (int, int64, error) {
 	return fs.GetDirSize(fs.config.KeyPrefix)
-}
-
-func (fs *S3Fs) getFileNamesInPrefix(fsPrefix string) (map[string]bool, error) {
-	fileNames := make(map[string]bool)
-	prefix := ""
-	if fsPrefix != "/" {
-		prefix = strings.TrimPrefix(fsPrefix, "/")
-	}
-
-	paginator := s3.NewListObjectsV2Paginator(fs.svc, &s3.ListObjectsV2Input{
-		Bucket:    aws.String(fs.config.Bucket),
-		Prefix:    aws.String(prefix),
-		Delimiter: aws.String("/"),
-	})
-
-	for paginator.HasMorePages() {
-		ctx, cancelFn := context.WithDeadline(context.Background(), time.Now().Add(fs.ctxTimeout))
-		defer cancelFn()
-
-		page, err := paginator.NextPage(ctx)
-		if err != nil {
-			metric.S3ListObjectsCompleted(err)
-			if err != nil {
-				fsLog(fs, logger.LevelError, "unable to get content for prefix %q: %+v", prefix, err)
-				return nil, err
-			}
-			return fileNames, err
-		}
-		for _, fileObject := range page.Contents {
-			name, isDir := fs.resolve(fileObject.Key, prefix)
-			if name != "" && !isDir {
-				fileNames[name] = true
-			}
-		}
-	}
-
-	metric.S3ListObjectsCompleted(nil)
-	return fileNames, nil
-}
-
-// CheckMetadata checks the metadata consistency
-func (fs *S3Fs) CheckMetadata() error {
-	return fsMetadataCheck(fs, fs.getStorageID(), fs.config.KeyPrefix)
 }
 
 // GetDirSize returns the number of files and the size for a folder
@@ -563,8 +511,9 @@ func (fs *S3Fs) GetDirSize(dirname string) (int, int64, error) {
 	size := int64(0)
 
 	paginator := s3.NewListObjectsV2Paginator(fs.svc, &s3.ListObjectsV2Input{
-		Bucket: aws.String(fs.config.Bucket),
-		Prefix: aws.String(prefix),
+		Bucket:  aws.String(fs.config.Bucket),
+		Prefix:  aws.String(prefix),
+		MaxKeys: &s3DefaultPageSize,
 	})
 
 	for paginator.HasMorePages() {
@@ -578,15 +527,14 @@ func (fs *S3Fs) GetDirSize(dirname string) (int, int64, error) {
 		}
 		for _, fileObject := range page.Contents {
 			isDir := strings.HasSuffix(util.GetStringFromPointer(fileObject.Key), "/")
-			if isDir && fileObject.Size == 0 {
+			objectSize := util.GetIntFromPointer(fileObject.Size)
+			if isDir && objectSize == 0 {
 				continue
 			}
 			numFiles++
-			size += fileObject.Size
-			if numFiles%1000 == 0 {
-				fsLog(fs, logger.LevelDebug, "dirname %q scan in progress, files: %d, size: %d", dirname, numFiles, size)
-			}
+			size += objectSize
 		}
+		fsLog(fs, logger.LevelDebug, "scan in progress for %q, files: %d, size: %d", dirname, numFiles, size)
 	}
 
 	metric.S3ListObjectsCompleted(nil)
@@ -627,8 +575,9 @@ func (fs *S3Fs) Walk(root string, walkFn filepath.WalkFunc) error {
 	prefix := fs.getPrefix(root)
 
 	paginator := s3.NewListObjectsV2Paginator(fs.svc, &s3.ListObjectsV2Input{
-		Bucket: aws.String(fs.config.Bucket),
-		Prefix: aws.String(prefix),
+		Bucket:  aws.String(fs.config.Bucket),
+		Prefix:  aws.String(prefix),
+		MaxKeys: &s3DefaultPageSize,
 	})
 
 	for paginator.HasMorePages() {
@@ -647,7 +596,8 @@ func (fs *S3Fs) Walk(root string, walkFn filepath.WalkFunc) error {
 				continue
 			}
 			err := walkFn(util.GetStringFromPointer(fileObject.Key),
-				NewFileInfo(name, isDir, fileObject.Size, util.GetTimeFromPointer(fileObject.LastModified), false), nil)
+				NewFileInfo(name, isDir, util.GetIntFromPointer(fileObject.Size),
+					util.GetTimeFromPointer(fileObject.LastModified), false), nil)
 			if err != nil {
 				return err
 			}
@@ -681,8 +631,22 @@ func (fs *S3Fs) ResolvePath(virtualPath string) (string, error) {
 }
 
 // CopyFile implements the FsFileCopier interface
-func (fs *S3Fs) CopyFile(source, target string, srcSize int64) error {
-	return fs.copyFileInternal(source, target, srcSize)
+func (fs *S3Fs) CopyFile(source, target string, srcSize int64) (int, int64, error) {
+	numFiles := 1
+	sizeDiff := srcSize
+	attrs, err := fs.headObject(target)
+	if err == nil {
+		sizeDiff -= util.GetIntFromPointer(attrs.ContentLength)
+		numFiles = 0
+	} else {
+		if !fs.IsNotExist(err) {
+			return 0, 0, err
+		}
+	}
+	if err := fs.copyFileInternal(source, target, srcSize); err != nil {
+		return 0, 0, err
+	}
+	return numFiles, sizeDiff, nil
 }
 
 func (fs *S3Fs) resolve(name *string, prefix string) (string, bool) {
@@ -721,7 +685,7 @@ func (fs *S3Fs) copyFileInternal(source, target string, fileSize int64) error {
 	contentType := mime.TypeByExtension(path.Ext(source))
 	copySource := pathEscape(fs.Join(fs.config.Bucket, source))
 
-	if fileSize > 500*1024*1024 {
+	if fileSize > s3CopyObjectThreshold {
 		fsLog(fs, logger.LevelDebug, "renaming file %q with size %d using multipart copy",
 			source, fileSize)
 		err := fs.doMultipartCopy(copySource, target, contentType, fileSize)
@@ -744,7 +708,7 @@ func (fs *S3Fs) copyFileInternal(source, target string, fileSize int64) error {
 	return err
 }
 
-func (fs *S3Fs) renameInternal(source, target string, fi os.FileInfo) (int, int64, error) {
+func (fs *S3Fs) renameInternal(source, target string, fi os.FileInfo, recursion int) (int, int64, error) {
 	var numFiles int
 	var filesSize int64
 
@@ -755,26 +719,18 @@ func (fs *S3Fs) renameInternal(source, target string, fi os.FileInfo) (int, int6
 				return numFiles, filesSize, err
 			}
 			if hasContents {
-				return numFiles, filesSize, fmt.Errorf("cannot rename non empty directory: %q", source)
+				return numFiles, filesSize, fmt.Errorf("%w: cannot rename non empty directory: %q", ErrVfsUnsupported, source)
 			}
 		}
 		if err := fs.mkdirInternal(target); err != nil {
 			return numFiles, filesSize, err
 		}
 		if renameMode == 1 {
-			entries, err := fs.ReadDir(source)
+			files, size, err := doRecursiveRename(fs, source, target, fs.renameInternal, recursion)
+			numFiles += files
+			filesSize += size
 			if err != nil {
 				return numFiles, filesSize, err
-			}
-			for _, info := range entries {
-				sourceEntry := fs.Join(source, info.Name())
-				targetEntry := fs.Join(target, info.Name())
-				files, size, err := fs.renameInternal(sourceEntry, targetEntry, info)
-				if err != nil {
-					return numFiles, filesSize, err
-				}
-				numFiles += files
-				filesSize += size
 			}
 		}
 	} else {
@@ -783,14 +739,6 @@ func (fs *S3Fs) renameInternal(source, target string, fi os.FileInfo) (int, int6
 		}
 		numFiles++
 		filesSize += fi.Size()
-		if plugin.Handler.HasMetadater() {
-			err := plugin.Handler.SetModificationTime(fs.getStorageID(), ensureAbsPath(target),
-				util.GetTimeAsMsSinceEpoch(fi.ModTime()))
-			if err != nil {
-				fsLog(fs, logger.LevelWarn, "unable to preserve modification time after renaming %q -> %q: %+v",
-					source, target, err)
-			}
-		}
 	}
 	err := fs.Remove(source, fi.IsDir())
 	if fs.IsNotExist(err) {
@@ -803,7 +751,7 @@ func (fs *S3Fs) mkdirInternal(name string) error {
 	if !strings.HasSuffix(name, "/") {
 		name += "/"
 	}
-	_, w, _, err := fs.Create(name, -1)
+	_, w, _, err := fs.Create(name, -1, 0)
 	if err != nil {
 		return err
 	}
@@ -812,10 +760,11 @@ func (fs *S3Fs) mkdirInternal(name string) error {
 
 func (fs *S3Fs) hasContents(name string) (bool, error) {
 	prefix := fs.getPrefix(name)
+	maxKeys := int32(2)
 	paginator := s3.NewListObjectsV2Paginator(fs.svc, &s3.ListObjectsV2Input{
 		Bucket:  aws.String(fs.config.Bucket),
 		Prefix:  aws.String(prefix),
-		MaxKeys: 2,
+		MaxKeys: &maxKeys,
 	})
 
 	if paginator.HasMorePages() {
@@ -909,7 +858,7 @@ func (fs *S3Fs) doMultipartCopy(source, target, contentType string, fileSize int
 				Bucket:          aws.String(fs.config.Bucket),
 				CopySource:      aws.String(source),
 				Key:             aws.String(target),
-				PartNumber:      partNum,
+				PartNumber:      &partNum,
 				UploadId:        aws.String(uploadID),
 				CopySourceRange: aws.String(fmt.Sprintf("bytes=%d-%d", partStart, partEnd-1)),
 			})
@@ -938,7 +887,7 @@ func (fs *S3Fs) doMultipartCopy(source, target, contentType string, fileSize int
 			partMutex.Lock()
 			completedParts = append(completedParts, types.CompletedPart{
 				ETag:       partResp.CopyPartResult.ETag,
-				PartNumber: partNum,
+				PartNumber: &partNum,
 			})
 			partMutex.Unlock()
 		}(partNumber, start, end)
@@ -951,7 +900,14 @@ func (fs *S3Fs) doMultipartCopy(source, target, contentType string, fileSize int
 		return copyError
 	}
 	sort.Slice(completedParts, func(i, j int) bool {
-		return completedParts[i].PartNumber < completedParts[j].PartNumber
+		getPartNumber := func(number *int32) int32 {
+			if number == nil {
+				return 0
+			}
+			return *number
+		}
+
+		return getPartNumber(completedParts[i].PartNumber) < getPartNumber(completedParts[j].PartNumber)
 	})
 
 	completeCtx, completeCancelFn := context.WithDeadline(context.Background(), time.Now().Add(fs.ctxTimeout))
@@ -1013,17 +969,108 @@ func (*S3Fs) GetAvailableDiskSize(_ string) (*sftp.StatVFS, error) {
 	return nil, ErrStorageSizeUnavailable
 }
 
-func (fs *S3Fs) getStorageID() string {
-	if fs.config.Endpoint != "" {
-		if !strings.HasSuffix(fs.config.Endpoint, "/") {
-			return fmt.Sprintf("s3://%v/%v", fs.config.Endpoint, fs.config.Bucket)
+func (fs *S3Fs) downloadToWriter(name string, w PipeWriter) (int64, error) {
+	fsLog(fs, logger.LevelDebug, "starting download before resuming upload, path %q", name)
+	ctx, cancelFn := context.WithTimeout(context.Background(), preResumeTimeout)
+	defer cancelFn()
+
+	downloader := manager.NewDownloader(fs.svc, func(d *manager.Downloader) {
+		d.Concurrency = fs.config.DownloadConcurrency
+		d.PartSize = fs.config.DownloadPartSize
+		if fs.config.DownloadPartMaxTime > 0 {
+			d.ClientOptions = append(d.ClientOptions, func(o *s3.Options) {
+				o.HTTPClient = getAWSHTTPClient(fs.config.DownloadPartMaxTime, 100*time.Millisecond,
+					fs.config.SkipTLSVerify)
+			})
 		}
-		return fmt.Sprintf("s3://%v%v", fs.config.Endpoint, fs.config.Bucket)
-	}
-	return fmt.Sprintf("s3://%v", fs.config.Bucket)
+	})
+
+	n, err := downloader.Download(ctx, w, &s3.GetObjectInput{
+		Bucket: aws.String(fs.config.Bucket),
+		Key:    aws.String(name),
+	})
+	fsLog(fs, logger.LevelDebug, "download before resuming upload completed, path %q size: %d, err: %+v",
+		name, n, err)
+	metric.S3TransferCompleted(n, 1, err)
+	return n, err
 }
 
-func getAWSHTTPClient(timeout int, idleConnectionTimeout time.Duration) *awshttp.BuildableClient {
+type s3DirLister struct {
+	baseDirLister
+	paginator     *s3.ListObjectsV2Paginator
+	timeout       time.Duration
+	prefix        string
+	prefixes      map[string]bool
+	metricUpdated bool
+}
+
+func (l *s3DirLister) resolve(name *string) (string, bool) {
+	result := strings.TrimPrefix(util.GetStringFromPointer(name), l.prefix)
+	isDir := strings.HasSuffix(result, "/")
+	if isDir {
+		result = strings.TrimSuffix(result, "/")
+	}
+	return result, isDir
+}
+
+func (l *s3DirLister) Next(limit int) ([]os.FileInfo, error) {
+	if limit <= 0 {
+		return nil, errInvalidDirListerLimit
+	}
+	if len(l.cache) >= limit {
+		return l.returnFromCache(limit), nil
+	}
+	if !l.paginator.HasMorePages() {
+		if !l.metricUpdated {
+			l.metricUpdated = true
+			metric.S3ListObjectsCompleted(nil)
+		}
+		return l.returnFromCache(limit), io.EOF
+	}
+	ctx, cancelFn := context.WithDeadline(context.Background(), time.Now().Add(l.timeout))
+	defer cancelFn()
+
+	page, err := l.paginator.NextPage(ctx)
+	if err != nil {
+		metric.S3ListObjectsCompleted(err)
+		return l.cache, err
+	}
+	for _, p := range page.CommonPrefixes {
+		// prefixes have a trailing slash
+		name, _ := l.resolve(p.Prefix)
+		if name == "" {
+			continue
+		}
+		if _, ok := l.prefixes[name]; ok {
+			continue
+		}
+		l.cache = append(l.cache, NewFileInfo(name, true, 0, time.Unix(0, 0), false))
+		l.prefixes[name] = true
+	}
+	for _, fileObject := range page.Contents {
+		objectModTime := util.GetTimeFromPointer(fileObject.LastModified)
+		objectSize := util.GetIntFromPointer(fileObject.Size)
+		name, isDir := l.resolve(fileObject.Key)
+		if name == "" || name == "/" {
+			continue
+		}
+		if isDir {
+			if _, ok := l.prefixes[name]; ok {
+				continue
+			}
+			l.prefixes[name] = true
+		}
+
+		l.cache = append(l.cache, NewFileInfo(name, (isDir && objectSize == 0), objectSize, objectModTime, false))
+	}
+	return l.returnFromCache(limit), nil
+}
+
+func (l *s3DirLister) Close() error {
+	return l.baseDirLister.Close()
+}
+
+func getAWSHTTPClient(timeout int, idleConnectionTimeout time.Duration, skipTLSVerify bool) *awshttp.BuildableClient {
 	c := awshttp.NewBuildableClient().
 		WithDialerOptions(func(d *net.Dialer) {
 			d.Timeout = 8 * time.Second
@@ -1032,6 +1079,16 @@ func getAWSHTTPClient(timeout int, idleConnectionTimeout time.Duration) *awshttp
 			tr.IdleConnTimeout = idleConnectionTimeout
 			tr.WriteBufferSize = s3TransferBufferSize
 			tr.ReadBufferSize = s3TransferBufferSize
+			if skipTLSVerify {
+				if tr.TLSClientConfig != nil {
+					tr.TLSClientConfig.InsecureSkipVerify = skipTLSVerify
+				} else {
+					tr.TLSClientConfig = &tls.Config{
+						MinVersion:         awshttp.DefaultHTTPTransportTLSMinVersion,
+						InsecureSkipVerify: skipTLSVerify,
+					}
+				}
+			}
 		})
 	if timeout > 0 {
 		c = c.WithTimeout(time.Duration(timeout) * time.Second)

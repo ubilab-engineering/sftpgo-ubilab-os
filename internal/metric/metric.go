@@ -1,4 +1,4 @@
-// Copyright (C) 2019-2023 Nicola Murino
+// Copyright (C) 2019 Nicola Murino
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published
@@ -108,9 +108,9 @@ var (
 		Help: "The total number of login attempts",
 	})
 
-	// totalNoAuthTryed is te metric that reports the total number of clients disconnected
+	// totalNoAuthTried is te metric that reports the total number of clients disconnected
 	// for inactivity before trying to login
-	totalNoAuthTryed = promauto.NewCounter(prometheus.CounterOpts{
+	totalNoAuthTried = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "sftpgo_no_auth_total",
 		Help: "The total number of clients disconnected for inactivity before trying to login",
 	})
@@ -984,10 +984,10 @@ func AddLoginResult(authMethod string, err error) {
 	}
 }
 
-// AddNoAuthTryed increments the metric for clients disconnected
+// AddNoAuthTried increments the metric for clients disconnected
 // for inactivity before trying to login
-func AddNoAuthTryed() {
-	totalNoAuthTryed.Inc()
+func AddNoAuthTried() {
+	totalNoAuthTried.Inc()
 }
 
 // HTTPRequestServed increments the metrics for HTTP requests

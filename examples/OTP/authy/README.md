@@ -45,7 +45,7 @@ curl -i "https://api.authy.com/protected/json/verify/${TOKEN}/${AUTHY_ID}" \
 So inside your hook you need to check:
 
 - the HTTP response code for the verify request, it must be `200`
-- the JSON reponse body, it must contains the key `success` with the value `true` (as string)
+- the JSON response body, it must contains the key `success` with the value `true` (as string)
 
 If these conditions are met the token is valid and you allow the user to login.
 
@@ -56,3 +56,5 @@ We provide the following examples:
 - [Check password hook](./checkpwd/README.md) for 2FA using a password consisting of a fixed string and a One Time Token.
 
 Please note that these are sample programs not intended for production use, you should write your own hook based on them and you should prefer HTTP based hooks if performance is a concern.
+
+:warning: SFTPGo has also built-in 2FA support.

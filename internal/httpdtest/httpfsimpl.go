@@ -1,4 +1,4 @@
-// Copyright (C) 2019-2023 Nicola Murino
+// Copyright (C) 2019 Nicola Murino
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published
@@ -52,12 +52,19 @@ const (
 	statvfsPath  = "/api/v1/statvfs"
 )
 
+// HTTPFsCallbacks defines additional callbacks to customize the HTTPfs responses
+type HTTPFsCallbacks struct {
+	Readdir func(string) []os.FileInfo
+}
+
 // StartTestHTTPFs starts a test HTTP service that implements httpfs
 // and listens on the specified port
-func StartTestHTTPFs(port int) error {
+func StartTestHTTPFs(port int, callbacks *HTTPFsCallbacks) error {
 	fs := httpFsImpl{
-		port: port,
+		port:      port,
+		callbacks: callbacks,
 	}
+
 	return fs.Run()
 }
 
@@ -75,6 +82,7 @@ type httpFsImpl struct {
 	basePath       string
 	port           int
 	unixSocketPath string
+	callbacks      *HTTPFsCallbacks
 }
 
 type apiResponse struct {
@@ -358,6 +366,11 @@ func (fs *httpFsImpl) readdir(w http.ResponseWriter, r *http.Request) {
 	for _, fi := range list {
 		result = append(result, getStatFromInfo(fi))
 	}
+	if fs.callbacks != nil && fs.callbacks.Readdir != nil {
+		for _, fi := range fs.callbacks.Readdir(name) {
+			result = append(result, getStatFromInfo(fi))
+		}
+	}
 	render.JSON(w, r, result)
 }
 
@@ -465,7 +478,7 @@ func (fs *httpFsImpl) configureRouter() {
 	fs.router = chi.NewRouter()
 	fs.router.Use(middleware.Recoverer)
 
-	fs.router.Get(statPath+"/{name}", fs.stat)
+	fs.router.Get(statPath+"/{name}", fs.stat) //nolint:goconst
 	fs.router.Get(openPath+"/{name}", fs.open)
 	fs.router.Post(createPath+"/{name}", fs.create)
 	fs.router.Patch(renamePath+"/{name}", fs.rename)

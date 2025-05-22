@@ -1,4 +1,4 @@
-// Copyright (C) 2019-2023 Nicola Murino
+// Copyright (C) 2019 Nicola Murino
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published
@@ -91,8 +91,8 @@ func (s *Service) initLogger() {
 // Start initializes and starts the service
 func (s *Service) Start(disableAWSInstallationCode bool) error {
 	s.initLogger()
-	logger.Info(logSender, "", "starting SFTPGo %v, config dir: %v, config file: %v, log max size: %v log max backups: %v "+
-		"log max age: %v log level: %v, log compress: %v, log utc time: %v, load data from: %q, grace time: %d secs",
+	logger.Info(logSender, "", "starting SFTPGo %s, config dir: %s, config file: %s, log max size: %d log max backups: %d "+
+		"log max age: %d log level: %s, log compress: %t, log utc time: %t, load data from: %q, grace time: %d secs",
 		version.GetAsString(), s.ConfigDir, s.ConfigFile, s.LogMaxSize, s.LogMaxBackups, s.LogMaxAge, s.LogLevel,
 		s.LogCompress, s.LogUTCTime, s.LoadDataFrom, graceTime)
 	// in portable mode we don't read configuration from file
@@ -104,7 +104,7 @@ func (s *Service) Start(disableAWSInstallationCode bool) error {
 		}
 	}
 	if !config.HasServicesToStart() {
-		infoString := "no service configured, nothing to do"
+		const infoString = "no service configured, nothing to do"
 		logger.Info(logSender, "", infoString)
 		logger.InfoToConsole(infoString)
 		return errors.New(infoString)
@@ -129,6 +129,13 @@ func (s *Service) initializeServices(disableAWSInstallationCode bool) error {
 		logger.ErrorToConsole("unable to initialize KMS: %v", err)
 		return err
 	}
+	// We may have KMS plugins and their schema needs to be registered before
+	// initializing the data provider which may contain KMS secrets.
+	if err := plugin.Initialize(config.GetPluginsConfig(), s.LogLevel); err != nil {
+		logger.Error(logSender, "", "unable to initialize plugin system: %v", err)
+		logger.ErrorToConsole("unable to initialize plugin system: %v", err)
+		return err
+	}
 	mfaConfig := config.GetMFAConfig()
 	err = mfaConfig.Initialize()
 	if err != nil {
@@ -140,11 +147,6 @@ func (s *Service) initializeServices(disableAWSInstallationCode bool) error {
 	if err != nil {
 		logger.Error(logSender, "", "error initializing data provider: %v", err)
 		logger.ErrorToConsole("error initializing data provider: %v", err)
-		return err
-	}
-	if err := plugin.Initialize(config.GetPluginsConfig(), s.LogLevel); err != nil {
-		logger.Error(logSender, "", "unable to initialize plugin system: %v", err)
-		logger.ErrorToConsole("unable to initialize plugin system: %v", err)
 		return err
 	}
 	smtpConfig := config.GetSMTPConfig()

@@ -1,4 +1,4 @@
-// Copyright (C) 2019-2023 Nicola Murino
+// Copyright (C) 2019 Nicola Murino
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published
@@ -100,6 +100,17 @@ func disableAdmin2FA(w http.ResponseWriter, r *http.Request) {
 		sendAPIResponse(w, r, err, "", getRespStatus(err))
 		return
 	}
+	if !admin.Filters.TOTPConfig.Enabled {
+		sendAPIResponse(w, r, nil, "two-factor authentication is not enabled", http.StatusBadRequest)
+		return
+	}
+	if admin.Username == claims.Username {
+		if admin.Filters.RequireTwoFactor {
+			err := util.NewValidationError("two-factor authentication must be enabled")
+			sendAPIResponse(w, r, err, "", getRespStatus(err))
+			return
+		}
+	}
 	admin.Filters.RecoveryCodes = nil
 	admin.Filters.TOTPConfig = dataprovider.AdminTOTPConfig{
 		Enabled: false,
@@ -138,8 +149,8 @@ func updateAdmin(w http.ResponseWriter, r *http.Request) {
 				http.StatusBadRequest)
 			return
 		}
-		if claims.isCriticalPermRemoved(updatedAdmin.Permissions) {
-			sendAPIResponse(w, r, errors.New("you cannot remove these permissions to yourself"), "", http.StatusBadRequest)
+		if !util.SlicesEqual(admin.Permissions, updatedAdmin.Permissions) {
+			sendAPIResponse(w, r, errors.New("you cannot change your permissions"), "", http.StatusBadRequest)
 			return
 		}
 		if updatedAdmin.Status == 0 {
@@ -150,6 +161,8 @@ func updateAdmin(w http.ResponseWriter, r *http.Request) {
 			sendAPIResponse(w, r, errors.New("you cannot add/change your role"), "", http.StatusBadRequest)
 			return
 		}
+		updatedAdmin.Filters.RequirePasswordChange = admin.Filters.RequirePasswordChange
+		updatedAdmin.Filters.RequireTwoFactor = admin.Filters.RequireTwoFactor
 	}
 	updatedAdmin.ID = admin.ID
 	updatedAdmin.Username = admin.Username
@@ -262,7 +275,7 @@ func resetAdminPassword(w http.ResponseWriter, r *http.Request) {
 		sendAPIResponse(w, r, err, "", http.StatusBadRequest)
 		return
 	}
-	_, _, err = handleResetPassword(r, req.Code, req.Password, true)
+	_, _, err = handleResetPassword(r, req.Code, req.Password, req.Password, true)
 	if err != nil {
 		sendAPIResponse(w, r, err, "", getRespStatus(err))
 		return
@@ -284,22 +297,29 @@ func changeAdminPassword(w http.ResponseWriter, r *http.Request) {
 		sendAPIResponse(w, r, err, "", getRespStatus(err))
 		return
 	}
+	invalidateToken(r)
 	sendAPIResponse(w, r, err, "Password updated", http.StatusOK)
 }
 
 func doChangeAdminPassword(r *http.Request, currentPassword, newPassword, confirmNewPassword string) error {
 	if currentPassword == "" || newPassword == "" || confirmNewPassword == "" {
-		return util.NewValidationError("please provide the current password and the new one two times")
+		return util.NewI18nError(
+			util.NewValidationError("please provide the current password and the new one two times"),
+			util.I18nErrorChangePwdRequiredFields,
+		)
 	}
 	if newPassword != confirmNewPassword {
-		return util.NewValidationError("the two password fields do not match")
+		return util.NewI18nError(util.NewValidationError("the two password fields do not match"), util.I18nErrorChangePwdNoMatch)
 	}
 	if currentPassword == newPassword {
-		return util.NewValidationError("the new password must be different from the current one")
+		return util.NewI18nError(
+			util.NewValidationError("the new password must be different from the current one"),
+			util.I18nErrorChangePwdNoDifferent,
+		)
 	}
 	claims, err := getTokenClaims(r)
 	if err != nil {
-		return err
+		return util.NewI18nError(errInvalidTokenClaims, util.I18nErrorInvalidToken)
 	}
 	admin, err := dataprovider.AdminExists(claims.Username)
 	if err != nil {
@@ -307,10 +327,11 @@ func doChangeAdminPassword(r *http.Request, currentPassword, newPassword, confir
 	}
 	match, err := admin.CheckPassword(currentPassword)
 	if !match || err != nil {
-		return util.NewValidationError("current password does not match")
+		return util.NewI18nError(util.NewValidationError("current password does not match"), util.I18nErrorChangePwdCurrentNoMatch)
 	}
 
 	admin.Password = newPassword
+	admin.Filters.RequirePasswordChange = false
 
 	return dataprovider.UpdateAdmin(&admin, dataprovider.ActionExecutorSelf, util.GetIPFromRemoteAddress(r.RemoteAddr), claims.Role)
 }

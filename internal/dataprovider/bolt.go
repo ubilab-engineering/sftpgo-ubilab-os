@@ -1,4 +1,4 @@
-// Copyright (C) 2019-2023 Nicola Murino
+// Copyright (C) 2019 Nicola Murino
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published
@@ -37,7 +37,7 @@ import (
 )
 
 const (
-	boltDatabaseVersion = 28
+	boltDatabaseVersion = 29
 )
 
 var (
@@ -387,7 +387,10 @@ func (p *BoltProvider) addAdmin(admin *Admin) error {
 			return err
 		}
 		if a := bucket.Get([]byte(admin.Username)); a != nil {
-			return fmt.Errorf("admin %q already exists", admin.Username)
+			return util.NewI18nError(
+				fmt.Errorf("%w: admin %q already exists", ErrDuplicatedKey, admin.Username),
+				util.I18nErrorDuplicatedUsername,
+			)
 		}
 		id, err := bucket.NextSequence()
 		if err != nil {
@@ -397,6 +400,9 @@ func (p *BoltProvider) addAdmin(admin *Admin) error {
 		admin.LastLogin = 0
 		admin.CreatedAt = util.GetTimeAsMsSinceEpoch(time.Now())
 		admin.UpdatedAt = util.GetTimeAsMsSinceEpoch(time.Now())
+		sort.Slice(admin.Groups, func(i, j int) bool {
+			return admin.Groups[i].Name < admin.Groups[j].Name
+		})
 		for idx := range admin.Groups {
 			err = p.addAdminToGroupMapping(admin.Username, admin.Groups[idx].Name, groupBucket)
 			if err != nil {
@@ -455,6 +461,9 @@ func (p *BoltProvider) updateAdmin(admin *Admin) error {
 		if err = p.addAdminToRole(admin.Username, admin.Role, rolesBucket); err != nil {
 			return err
 		}
+		sort.Slice(admin.Groups, func(i, j int) bool {
+			return admin.Groups[i].Name < admin.Groups[j].Name
+		})
 		for idx := range admin.Groups {
 			err = p.addAdminToGroupMapping(admin.Username, admin.Groups[idx].Name, groupBucket)
 			if err != nil {
@@ -643,7 +652,10 @@ func (p *BoltProvider) addUser(user *User) error {
 			return err
 		}
 		if u := bucket.Get([]byte(user.Username)); u != nil {
-			return fmt.Errorf("username %v already exists", user.Username)
+			return util.NewI18nError(
+				fmt.Errorf("%w: username %v already exists", ErrDuplicatedKey, user.Username),
+				util.I18nErrorDuplicatedUsername,
+			)
 		}
 		id, err := bucket.NextSequence()
 		if err != nil {
@@ -663,12 +675,18 @@ func (p *BoltProvider) addUser(user *User) error {
 		if err := p.addUserToRole(user.Username, user.Role, rolesBucket); err != nil {
 			return err
 		}
+		sort.Slice(user.VirtualFolders, func(i, j int) bool {
+			return user.VirtualFolders[i].Name < user.VirtualFolders[j].Name
+		})
 		for idx := range user.VirtualFolders {
-			err = p.addRelationToFolderMapping(&user.VirtualFolders[idx].BaseVirtualFolder, user, nil, foldersBucket)
+			err = p.addRelationToFolderMapping(user.VirtualFolders[idx].Name, user, nil, foldersBucket)
 			if err != nil {
 				return err
 			}
 		}
+		sort.Slice(user.Groups, func(i, j int) bool {
+			return user.Groups[i].Name < user.Groups[j].Name
+		})
 		for idx := range user.Groups {
 			err = p.addUserToGroupMapping(user.Username, user.Groups[idx].Name, groupBucket)
 			if err != nil {
@@ -797,6 +815,7 @@ func (p *BoltProvider) updateUserPassword(username, password string) error {
 			return err
 		}
 		user.Password = password
+		user.UpdatedAt = util.GetTimeAsMsSinceEpoch(time.Now())
 		buf, err := json.Marshal(user)
 		if err != nil {
 			return err
@@ -1108,7 +1127,10 @@ func (p *BoltProvider) addFolder(folder *vfs.BaseVirtualFolder) error {
 			return err
 		}
 		if f := bucket.Get([]byte(folder.Name)); f != nil {
-			return fmt.Errorf("folder %v already exists", folder.Name)
+			return util.NewI18nError(
+				fmt.Errorf("%w: folder %q already exists", ErrDuplicatedKey, folder.Name),
+				util.I18nErrorDuplicatedUsername,
+			)
 		}
 		folder.Users = nil
 		folder.Groups = nil
@@ -1422,7 +1444,10 @@ func (p *BoltProvider) addGroup(group *Group) error {
 			return err
 		}
 		if u := bucket.Get([]byte(group.Name)); u != nil {
-			return fmt.Errorf("group %v already exists", group.Name)
+			return util.NewI18nError(
+				fmt.Errorf("%w: group %q already exists", ErrDuplicatedKey, group.Name),
+				util.I18nErrorDuplicatedUsername,
+			)
 		}
 		id, err := bucket.NextSequence()
 		if err != nil {
@@ -1433,8 +1458,11 @@ func (p *BoltProvider) addGroup(group *Group) error {
 		group.UpdatedAt = util.GetTimeAsMsSinceEpoch(time.Now())
 		group.Users = nil
 		group.Admins = nil
+		sort.Slice(group.VirtualFolders, func(i, j int) bool {
+			return group.VirtualFolders[i].Name < group.VirtualFolders[j].Name
+		})
 		for idx := range group.VirtualFolders {
-			err = p.addRelationToFolderMapping(&group.VirtualFolders[idx].BaseVirtualFolder, nil, group, foldersBucket)
+			err = p.addRelationToFolderMapping(group.VirtualFolders[idx].Name, nil, group, foldersBucket)
 			if err != nil {
 				return err
 			}
@@ -1475,8 +1503,11 @@ func (p *BoltProvider) updateGroup(group *Group) error {
 				return err
 			}
 		}
+		sort.Slice(group.VirtualFolders, func(i, j int) bool {
+			return group.VirtualFolders[i].Name < group.VirtualFolders[j].Name
+		})
 		for idx := range group.VirtualFolders {
-			err = p.addRelationToFolderMapping(&group.VirtualFolders[idx].BaseVirtualFolder, nil, group, foldersBucket)
+			err = p.addRelationToFolderMapping(group.VirtualFolders[idx].Name, nil, group, foldersBucket)
 			if err != nil {
 				return err
 			}
@@ -1605,12 +1636,12 @@ func (p *BoltProvider) addAPIKey(apiKey *APIKey) error {
 		apiKey.LastUseAt = 0
 		if apiKey.User != "" {
 			if err := p.userExistsInternal(tx, apiKey.User); err != nil {
-				return util.NewValidationError(fmt.Sprintf("related user %q does not exists", apiKey.User))
+				return fmt.Errorf("%w: related user %q does not exists", ErrForeignKeyViolated, apiKey.User)
 			}
 		}
 		if apiKey.Admin != "" {
 			if err := p.adminExistsInternal(tx, apiKey.Admin); err != nil {
-				return util.NewValidationError(fmt.Sprintf("related admin %q does not exists", apiKey.User))
+				return fmt.Errorf("%w: related admin %q does not exists", ErrForeignKeyViolated, apiKey.Admin)
 			}
 		}
 		buf, err := json.Marshal(apiKey)
@@ -1650,12 +1681,12 @@ func (p *BoltProvider) updateAPIKey(apiKey *APIKey) error {
 		apiKey.UpdatedAt = util.GetTimeAsMsSinceEpoch(time.Now())
 		if apiKey.User != "" {
 			if err := p.userExistsInternal(tx, apiKey.User); err != nil {
-				return util.NewValidationError(fmt.Sprintf("related user %q does not exists", apiKey.User))
+				return fmt.Errorf("%w: related user %q does not exists", ErrForeignKeyViolated, apiKey.User)
 			}
 		}
 		if apiKey.Admin != "" {
 			if err := p.adminExistsInternal(tx, apiKey.Admin); err != nil {
-				return util.NewValidationError(fmt.Sprintf("related admin %q does not exists", apiKey.User))
+				return fmt.Errorf("%w: related admin %q does not exists", ErrForeignKeyViolated, apiKey.Admin)
 			}
 		}
 		buf, err := json.Marshal(apiKey)
@@ -1789,7 +1820,7 @@ func (p *BoltProvider) addShare(share *Share) error {
 			return err
 		}
 		if a := bucket.Get([]byte(share.ShareID)); a != nil {
-			return fmt.Errorf("share %v already exists", share.ShareID)
+			return fmt.Errorf("share %q already exists", share.ShareID)
 		}
 		id, err := bucket.NextSequence()
 		if err != nil {
@@ -2169,7 +2200,10 @@ func (p *BoltProvider) addEventAction(action *BaseEventAction) error {
 			return err
 		}
 		if a := bucket.Get([]byte(action.Name)); a != nil {
-			return fmt.Errorf("event action %s already exists", action.Name)
+			return util.NewI18nError(
+				fmt.Errorf("%w: event action %q already exists", ErrDuplicatedKey, action.Name),
+				util.I18nErrorDuplicatedName,
+			)
 		}
 		id, err := bucket.NextSequence()
 		if err != nil {
@@ -2430,7 +2464,10 @@ func (p *BoltProvider) addEventRule(rule *EventRule) error {
 			return err
 		}
 		if r := bucket.Get([]byte(rule.Name)); r != nil {
-			return fmt.Errorf("event rule %q already exists", rule.Name)
+			return util.NewI18nError(
+				fmt.Errorf("%w: event rule %q already exists", ErrDuplicatedKey, rule.Name),
+				util.I18nErrorDuplicatedName,
+			)
 		}
 		id, err := bucket.NextSequence()
 		if err != nil {
@@ -2599,7 +2636,10 @@ func (p *BoltProvider) addRole(role *Role) error {
 			return err
 		}
 		if r := bucket.Get([]byte(role.Name)); r != nil {
-			return fmt.Errorf("role %q already exists", role.Name)
+			return util.NewI18nError(
+				fmt.Errorf("%w: role %q already exists", ErrDuplicatedKey, role.Name),
+				util.I18nErrorDuplicatedName,
+			)
 		}
 		id, err := bucket.NextSequence()
 		if err != nil {
@@ -2787,7 +2827,10 @@ func (p *BoltProvider) addIPListEntry(entry *IPListEntry) error {
 			return err
 		}
 		if e := bucket.Get([]byte(entry.getKey())); e != nil {
-			return fmt.Errorf("entry %q already exists", entry.IPOrNet)
+			return util.NewI18nError(
+				fmt.Errorf("%w: entry %q already exists", ErrDuplicatedKey, entry.IPOrNet),
+				util.I18nErrorDuplicatedIPNet,
+			)
 		}
 		entry.CreatedAt = util.GetTimeAsMsSinceEpoch(time.Now())
 		entry.UpdatedAt = util.GetTimeAsMsSinceEpoch(time.Now())
@@ -3091,46 +3134,15 @@ func (p *BoltProvider) migrateDatabase() error {
 	case version == boltDatabaseVersion:
 		providerLog(logger.LevelDebug, "bolt database is up to date, current version: %d", version)
 		return ErrNoInitRequired
-	case version < 23:
-		err = fmt.Errorf("database schema version %d is too old, please see the upgrading docs", version)
+	case version < 28:
+		err = errSchemaVersionTooOld(version)
 		providerLog(logger.LevelError, "%v", err)
 		logger.ErrorToConsole("%v", err)
 		return err
-	case version == 23, version == 24, version == 25, version == 26, version == 27:
-		logger.InfoToConsole("updating database schema version: %d -> 28", version)
-		providerLog(logger.LevelInfo, "updating database schema version: %d -> 28", version)
-		err := p.dbHandle.Update(func(tx *bolt.Tx) error {
-			rules, err := p.dumpEventRules()
-			if err != nil {
-				return err
-			}
-			bucket, err := p.getRulesBucket(tx)
-			if err != nil {
-				return err
-			}
-			for idx := range rules {
-				rule := rules[idx]
-				if rule.Status == 1 {
-					continue
-				}
-				logger.InfoToConsole("setting status to active for rule %q", rule.Name)
-				providerLog(logger.LevelInfo, "setting status to 1 for rule %q", rule.Name)
-				rule.Status = 1
-				rule.UpdatedAt = util.GetTimeAsMsSinceEpoch(time.Now())
-				buf, err := json.Marshal(rule)
-				if err != nil {
-					return err
-				}
-				if err := bucket.Put([]byte(rule.Name), buf); err != nil {
-					return err
-				}
-			}
-			return nil
-		})
-		if err != nil {
-			return err
-		}
-		return updateBoltDatabaseVersion(p.dbHandle, 28)
+	case version == 28:
+		logger.InfoToConsole("updating database schema version: %d -> 29", version)
+		providerLog(logger.LevelInfo, "updating database schema version: %d -> 29", version)
+		return updateBoltDatabaseVersion(p.dbHandle, 29)
 	default:
 		if version > boltDatabaseVersion {
 			providerLog(logger.LevelError, "database schema version %d is newer than the supported one: %d", version,
@@ -3152,46 +3164,10 @@ func (p *BoltProvider) revertDatabase(targetVersion int) error { //nolint:gocycl
 		return errors.New("current version match target version, nothing to do")
 	}
 	switch dbVersion.Version {
-	case 24, 25, 26, 27, 28:
-		logger.InfoToConsole("downgrading database schema version: %d -> 23", dbVersion.Version)
-		providerLog(logger.LevelInfo, "downgrading database schema version: %d -> 23", dbVersion.Version)
-		err := p.dbHandle.Update(func(tx *bolt.Tx) error {
-			roles, err := p.dumpRoles()
-			if err != nil {
-				return err
-			}
-			adminsBucket, err := p.getAdminsBucket(tx)
-			if err != nil {
-				return err
-			}
-			usersBucket, err := p.getUsersBucket(tx)
-			if err != nil {
-				return err
-			}
-			for _, role := range roles {
-				for _, admin := range role.Admins {
-					if err := p.removeRoleFromAdmin(admin, role.Name, adminsBucket); err != nil {
-						return err
-					}
-				}
-				for _, user := range role.Users {
-					if err := p.removeRoleFromUser(user, role.Name, usersBucket); err != nil {
-						return err
-					}
-				}
-			}
-			for _, b := range [][]byte{rolesBucket, configsBucket} {
-				err = tx.DeleteBucket(b)
-				if err != nil && !errors.Is(err, bolt.ErrBucketNotFound) {
-					return err
-				}
-			}
-			return nil
-		})
-		if err != nil {
-			return err
-		}
-		return updateBoltDatabaseVersion(p.dbHandle, 23)
+	case 29:
+		logger.InfoToConsole("downgrading database schema version: %d -> 28", dbVersion.Version)
+		providerLog(logger.LevelInfo, "downgrading database schema version: %d -> 28", dbVersion.Version)
+		return updateBoltDatabaseVersion(p.dbHandle, 28)
 	default:
 		return fmt.Errorf("database schema version not handled: %v", dbVersion.Version)
 	}
@@ -3339,36 +3315,13 @@ func (p *BoltProvider) removeRoleFromUser(username, role string, bucket *bolt.Bu
 	return nil
 }
 
-func (p *BoltProvider) removeRoleFromAdmin(username, role string, bucket *bolt.Bucket) error {
-	a := bucket.Get([]byte(username))
-	if a == nil {
-		providerLog(logger.LevelWarn, "admin %q does not exist, cannot remove role %q", username, role)
-		return nil
-	}
-	var admin Admin
-	err := json.Unmarshal(a, &admin)
-	if err != nil {
-		return err
-	}
-	if admin.Role == role {
-		admin.Role = ""
-		buf, err := json.Marshal(admin)
-		if err != nil {
-			return err
-		}
-		return bucket.Put([]byte(admin.Username), buf)
-	}
-	providerLog(logger.LevelError, "admin %q does not have the expected role %q, actual %q", username, role, admin.Role)
-	return nil
-}
-
 func (p *BoltProvider) addAdminToRole(username, roleName string, bucket *bolt.Bucket) error {
 	if roleName == "" {
 		return nil
 	}
 	r := bucket.Get([]byte(roleName))
 	if r == nil {
-		return util.NewGenericError(fmt.Sprintf("role %q does not exist", roleName))
+		return fmt.Errorf("%w: role %q does not exist", ErrForeignKeyViolated, roleName)
 	}
 	var role Role
 	err := json.Unmarshal(r, &role)
@@ -3423,7 +3376,7 @@ func (p *BoltProvider) addUserToRole(username, roleName string, bucket *bolt.Buc
 	}
 	r := bucket.Get([]byte(roleName))
 	if r == nil {
-		return util.NewGenericError(fmt.Sprintf("role %q does not exist", roleName))
+		return fmt.Errorf("%w: role %q does not exist", ErrForeignKeyViolated, roleName)
 	}
 	var role Role
 	err := json.Unmarshal(r, &role)
@@ -3525,7 +3478,7 @@ func (p *BoltProvider) removeRuleFromActionMapping(ruleName, actionName string, 
 func (p *BoltProvider) addUserToGroupMapping(username, groupname string, bucket *bolt.Bucket) error {
 	g := bucket.Get([]byte(groupname))
 	if g == nil {
-		return util.NewRecordNotFoundError(fmt.Sprintf("group %q does not exist", groupname))
+		return util.NewGenericError(fmt.Sprintf("group %q does not exist", groupname))
 	}
 	var group Group
 	err := json.Unmarshal(g, &group)
@@ -3637,43 +3590,33 @@ func (p *BoltProvider) removeGroupFromAdminMapping(groupName, adminName string, 
 	return bucket.Put([]byte(adminName), buf)
 }
 
-func (p *BoltProvider) addRelationToFolderMapping(baseFolder *vfs.BaseVirtualFolder, user *User, group *Group, bucket *bolt.Bucket) error {
-	f := bucket.Get([]byte(baseFolder.Name))
+func (p *BoltProvider) addRelationToFolderMapping(folderName string, user *User, group *Group, bucket *bolt.Bucket) error {
+	f := bucket.Get([]byte(folderName))
 	if f == nil {
-		// folder does not exists, try to create
-		baseFolder.LastQuotaUpdate = 0
-		baseFolder.UsedQuotaFiles = 0
-		baseFolder.UsedQuotaSize = 0
-		if user != nil {
-			baseFolder.Users = []string{user.Username}
-		}
-		if group != nil {
-			baseFolder.Groups = []string{group.Name}
-		}
-		return p.addFolderInternal(*baseFolder, bucket)
+		return util.NewGenericError(fmt.Sprintf("folder %q does not exist", folderName))
 	}
-	var oldFolder vfs.BaseVirtualFolder
-	err := json.Unmarshal(f, &oldFolder)
+	var folder vfs.BaseVirtualFolder
+	err := json.Unmarshal(f, &folder)
 	if err != nil {
 		return err
 	}
-	baseFolder.ID = oldFolder.ID
-	baseFolder.LastQuotaUpdate = oldFolder.LastQuotaUpdate
-	baseFolder.UsedQuotaFiles = oldFolder.UsedQuotaFiles
-	baseFolder.UsedQuotaSize = oldFolder.UsedQuotaSize
-	baseFolder.Users = oldFolder.Users
-	baseFolder.Groups = oldFolder.Groups
-	if user != nil && !util.Contains(baseFolder.Users, user.Username) {
-		baseFolder.Users = append(baseFolder.Users, user.Username)
+	updated := false
+	if user != nil && !util.Contains(folder.Users, user.Username) {
+		folder.Users = append(folder.Users, user.Username)
+		updated = true
 	}
-	if group != nil && !util.Contains(baseFolder.Groups, group.Name) {
-		baseFolder.Groups = append(baseFolder.Groups, group.Name)
+	if group != nil && !util.Contains(folder.Groups, group.Name) {
+		folder.Groups = append(folder.Groups, group.Name)
+		updated = true
 	}
-	buf, err := json.Marshal(baseFolder)
+	if !updated {
+		return nil
+	}
+	buf, err := json.Marshal(folder)
 	if err != nil {
 		return err
 	}
-	return bucket.Put([]byte(baseFolder.Name), buf)
+	return bucket.Put([]byte(folder.Name), buf)
 }
 
 func (p *BoltProvider) removeRelationFromFolderMapping(folder vfs.VirtualFolder, username, groupname string,
@@ -3748,12 +3691,18 @@ func (p *BoltProvider) updateUserRelations(tx *bolt.Tx, user *User, oldUser User
 	if err = p.removeUserFromRole(oldUser.Username, oldUser.Role, rolesBucket); err != nil {
 		return err
 	}
+	sort.Slice(user.VirtualFolders, func(i, j int) bool {
+		return user.VirtualFolders[i].Name < user.VirtualFolders[j].Name
+	})
 	for idx := range user.VirtualFolders {
-		err = p.addRelationToFolderMapping(&user.VirtualFolders[idx].BaseVirtualFolder, user, nil, foldersBucket)
+		err = p.addRelationToFolderMapping(user.VirtualFolders[idx].Name, user, nil, foldersBucket)
 		if err != nil {
 			return err
 		}
 	}
+	sort.Slice(user.Groups, func(i, j int) bool {
+		return user.Groups[i].Name < user.Groups[j].Name
+	})
 	for idx := range user.Groups {
 		err = p.addUserToGroupMapping(user.Username, user.Groups[idx].Name, groupsBucket)
 		if err != nil {
@@ -3950,7 +3899,7 @@ func getBoltDatabaseVersion(dbHandle *bolt.DB) (schemaVersion, error) {
 		v := bucket.Get(dbVersionKey)
 		if v == nil {
 			dbVersion = schemaVersion{
-				Version: 23,
+				Version: 28,
 			}
 			return nil
 		}

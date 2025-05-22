@@ -1,4 +1,4 @@
-// Copyright (C) 2019-2023 Nicola Murino
+// Copyright (C) 2019 Nicola Murino
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published
@@ -291,7 +291,7 @@ func (c *Connection) Symlink(oldname, newname string) error {
 }
 
 // ReadDir implements ClientDriverExtensionFilelist
-func (c *Connection) ReadDir(name string) ([]os.FileInfo, error) {
+func (c *Connection) ReadDir(name string) (ftpserver.DirLister, error) {
 	c.UpdateLastActivity()
 
 	if c.doWildcardListDir {
@@ -302,7 +302,17 @@ func (c *Connection) ReadDir(name string) ([]os.FileInfo, error) {
 		// - dir*/*.xml is not supported
 		name = path.Dir(name)
 		c.clientContext.SetListPath(name)
-		return c.getListDirWithWildcards(name, baseName)
+		lister, err := c.ListDir(name)
+		if err != nil {
+			return nil, err
+		}
+		return &patternDirLister{
+			DirLister:      lister,
+			pattern:        baseName,
+			lastCommand:    c.clientContext.GetLastCommand(),
+			dirName:        name,
+			connectionPath: c.clientContext.Path(),
+		}, nil
 	}
 
 	return c.ListDir(name)
@@ -408,7 +418,7 @@ func (c *Connection) handleFTPUploadToNewFile(fs vfs.Fs, flags int, resolvedPath
 		c.Log(logger.LevelDebug, "upload for file %q denied by pre action: %v", requestPath, err)
 		return nil, ftpserver.ErrFileNameNotAllowed
 	}
-	file, w, cancelFn, err := fs.Create(filePath, flags)
+	file, w, cancelFn, err := fs.Create(filePath, flags, c.GetCreateChecks(requestPath, true, false))
 	if err != nil {
 		c.Log(logger.LevelError, "error creating file %q, flags %v: %+v", resolvedPath, flags, err)
 		return nil, c.GetFsError(fs, err)
@@ -444,7 +454,7 @@ func (c *Connection) handleFTPUploadToExistingFile(fs vfs.Fs, flags int, resolve
 	isResume := flags&os.O_TRUNC == 0
 	// if there is a size limit remaining size cannot be 0 here, since quotaResult.HasSpace
 	// will return false in this case and we deny the upload before
-	maxWriteSize, err := c.GetMaxWriteSize(diskQuota, isResume, fileSize, fs.IsUploadResumeSupported())
+	maxWriteSize, err := c.GetMaxWriteSize(diskQuota, isResume, fileSize, vfs.IsUploadResumeSupported(fs, fileSize))
 	if err != nil {
 		c.Log(logger.LevelDebug, "unable to get max write size: %v", err)
 		return nil, err
@@ -463,7 +473,7 @@ func (c *Connection) handleFTPUploadToExistingFile(fs vfs.Fs, flags int, resolve
 		}
 	}
 
-	file, w, cancelFn, err := fs.Create(filePath, flags)
+	file, w, cancelFn, err := fs.Create(filePath, flags, c.GetCreateChecks(requestPath, false, isResume))
 	if err != nil {
 		c.Log(logger.LevelError, "error opening existing file, flags: %v, source: %q, err: %+v", flags, filePath, err)
 		return nil, c.GetFsError(fs, err)
@@ -501,34 +511,9 @@ func (c *Connection) handleFTPUploadToExistingFile(fs vfs.Fs, flags int, resolve
 	baseTransfer := common.NewBaseTransfer(file, c.BaseConnection, cancelFn, resolvedPath, filePath, requestPath,
 		common.TransferUpload, minWriteOffset, initialSize, maxWriteSize, truncatedSize, false, fs, transferQuota)
 	baseTransfer.SetFtpMode(c.getFTPMode())
-	t := newTransfer(baseTransfer, w, nil, 0)
+	t := newTransfer(baseTransfer, w, nil, minWriteOffset)
 
 	return t, nil
-}
-
-func (c *Connection) getListDirWithWildcards(dirName, pattern string) ([]os.FileInfo, error) {
-	files, err := c.ListDir(dirName)
-	if err != nil {
-		return files, err
-	}
-	validIdx := 0
-	var relativeBase string
-	if c.clientContext.GetLastCommand() != "NLST" {
-		relativeBase = getPathRelativeTo(c.clientContext.Path(), dirName)
-	}
-	for _, fi := range files {
-		match, err := path.Match(pattern, fi.Name())
-		if err != nil {
-			return files, err
-		}
-		if match {
-			files[validIdx] = vfs.NewFileInfo(path.Join(relativeBase, fi.Name()), fi.IsDir(), fi.Size(),
-				fi.ModTime(), true)
-			validIdx++
-		}
-	}
-
-	return files[:validIdx], nil
 }
 
 func (c *Connection) isListDirWithWildcards(name string) bool {
@@ -557,5 +542,42 @@ func getPathRelativeTo(base, target string) string {
 		}
 		sb.WriteString("../")
 		base = path.Dir(path.Clean(base))
+	}
+}
+
+type patternDirLister struct {
+	vfs.DirLister
+	pattern        string
+	lastCommand    string
+	dirName        string
+	connectionPath string
+}
+
+func (l *patternDirLister) Next(limit int) ([]os.FileInfo, error) {
+	for {
+		files, err := l.DirLister.Next(limit)
+		if len(files) == 0 {
+			return files, err
+		}
+		validIdx := 0
+		var relativeBase string
+		if l.lastCommand != "NLST" {
+			relativeBase = getPathRelativeTo(l.connectionPath, l.dirName)
+		}
+		for _, fi := range files {
+			match, errMatch := path.Match(l.pattern, fi.Name())
+			if errMatch != nil {
+				return nil, errMatch
+			}
+			if match {
+				files[validIdx] = vfs.NewFileInfo(path.Join(relativeBase, fi.Name()), fi.IsDir(), fi.Size(),
+					fi.ModTime(), true)
+				validIdx++
+			}
+		}
+		files = files[:validIdx]
+		if err != nil || len(files) > 0 {
+			return files, err
+		}
 	}
 }

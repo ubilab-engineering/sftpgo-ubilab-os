@@ -1,4 +1,4 @@
-// Copyright (C) 2019-2023 Nicola Murino
+// Copyright (C) 2019 Nicola Murino
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published
@@ -61,7 +61,7 @@ func addGroup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Add("Location", fmt.Sprintf("%s/%s", groupPath, url.PathEscape(group.Name)))
-	renderGroup(w, r, group.Name, http.StatusCreated)
+	renderGroup(w, r, group.Name, &claims, http.StatusCreated)
 }
 
 func updateGroup(w http.ResponseWriter, r *http.Request) {
@@ -79,17 +79,6 @@ func updateGroup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	currentS3AccessSecret := group.UserSettings.FsConfig.S3Config.AccessSecret
-	currentAzAccountKey := group.UserSettings.FsConfig.AzBlobConfig.AccountKey
-	currentAzSASUrl := group.UserSettings.FsConfig.AzBlobConfig.SASURL
-	currentGCSCredentials := group.UserSettings.FsConfig.GCSConfig.Credentials
-	currentCryptoPassphrase := group.UserSettings.FsConfig.CryptConfig.Passphrase
-	currentSFTPPassword := group.UserSettings.FsConfig.SFTPConfig.Password
-	currentSFTPKey := group.UserSettings.FsConfig.SFTPConfig.PrivateKey
-	currentSFTPKeyPassphrase := group.UserSettings.FsConfig.SFTPConfig.KeyPassphrase
-	currentHTTPPassword := group.UserSettings.FsConfig.HTTPConfig.Password
-	currentHTTPAPIKey := group.UserSettings.FsConfig.HTTPConfig.APIKey
-
 	var updatedGroup dataprovider.Group
 	err = render.DecodeJSON(r.Body, &updatedGroup)
 	if err != nil {
@@ -99,9 +88,7 @@ func updateGroup(w http.ResponseWriter, r *http.Request) {
 	updatedGroup.ID = group.ID
 	updatedGroup.Name = group.Name
 	updatedGroup.UserSettings.FsConfig.SetEmptySecretsIfNil()
-	updateEncryptedSecrets(&updatedGroup.UserSettings.FsConfig, currentS3AccessSecret, currentAzAccountKey, currentAzSASUrl,
-		currentGCSCredentials, currentCryptoPassphrase, currentSFTPPassword, currentSFTPKey, currentSFTPKeyPassphrase,
-		currentHTTPPassword, currentHTTPAPIKey)
+	updateEncryptedSecrets(&updatedGroup.UserSettings.FsConfig, &group.UserSettings.FsConfig)
 	err = dataprovider.UpdateGroup(&updatedGroup, group.Users, claims.Username, util.GetIPFromRemoteAddress(r.RemoteAddr),
 		claims.Role)
 	if err != nil {
@@ -111,13 +98,15 @@ func updateGroup(w http.ResponseWriter, r *http.Request) {
 	sendAPIResponse(w, r, nil, "Group updated", http.StatusOK)
 }
 
-func renderGroup(w http.ResponseWriter, r *http.Request, name string, status int) {
+func renderGroup(w http.ResponseWriter, r *http.Request, name string, claims *jwtTokenClaims, status int) {
 	group, err := dataprovider.GroupExists(name)
 	if err != nil {
 		sendAPIResponse(w, r, err, "", getRespStatus(err))
 		return
 	}
-	group.PrepareForRendering()
+	if hideConfidentialData(claims, r) {
+		group.PrepareForRendering()
+	}
 	if status != http.StatusOK {
 		ctx := context.WithValue(r.Context(), render.StatusCtxKey, status)
 		render.JSON(w, r.WithContext(ctx), group)
@@ -128,8 +117,13 @@ func renderGroup(w http.ResponseWriter, r *http.Request, name string, status int
 
 func getGroupByName(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxRequestSize)
+	claims, err := getTokenClaims(r)
+	if err != nil || claims.Username == "" {
+		sendAPIResponse(w, r, err, "Invalid token claims", http.StatusBadRequest)
+		return
+	}
 	name := getURLParam(r, "name")
-	renderGroup(w, r, name, http.StatusOK)
+	renderGroup(w, r, name, &claims, http.StatusOK)
 }
 
 func deleteGroup(w http.ResponseWriter, r *http.Request) {

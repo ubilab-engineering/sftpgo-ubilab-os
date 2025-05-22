@@ -1,4 +1,4 @@
-// Copyright (C) 2019-2023 Nicola Murino
+// Copyright (C) 2019 Nicola Murino
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published
@@ -40,6 +40,7 @@ const (
 	tokenAudienceAPI              tokenAudience = "API"
 	tokenAudienceAPIUser          tokenAudience = "APIUser"
 	tokenAudienceCSRF             tokenAudience = "CSRF"
+	tokenAudienceOAuth2           tokenAudience = "OAuth2"
 )
 
 type tokenValidation = int
@@ -65,7 +66,7 @@ const (
 
 var (
 	tokenDuration      = 20 * time.Minute
-	shareTokenDuration = 12 * time.Hour
+	shareTokenDuration = 2 * time.Hour
 	// csrf token duration is greater than normal token duration to reduce issues
 	// with the login form
 	csrfTokenDuration     = 6 * time.Hour
@@ -210,19 +211,6 @@ func (c *jwtTokenClaims) Decode(token map[string]any) {
 	}
 }
 
-func (c *jwtTokenClaims) isCriticalPermRemoved(permissions []string) bool {
-	if util.Contains(permissions, dataprovider.PermAdminAny) {
-		return false
-	}
-	if (util.Contains(c.Permissions, dataprovider.PermAdminManageAdmins) ||
-		util.Contains(c.Permissions, dataprovider.PermAdminAny)) &&
-		!util.Contains(permissions, dataprovider.PermAdminManageAdmins) &&
-		!util.Contains(permissions, dataprovider.PermAdminAny) {
-		return true
-	}
-	return false
-}
-
 func (c *jwtTokenClaims) hasPerm(perm string) bool {
 	if util.Contains(c.Permissions, dataprovider.PermAdminAny) {
 		return true
@@ -330,7 +318,7 @@ func isTokenInvalidated(r *http.Request) bool {
 		token := fn(r)
 		if token != "" {
 			isTokenFound = true
-			if _, ok := invalidatedJWTTokens.Load(token); ok {
+			if invalidatedJWTTokens.Get(token) {
 				return true
 			}
 		}
@@ -342,11 +330,11 @@ func isTokenInvalidated(r *http.Request) bool {
 func invalidateToken(r *http.Request) {
 	tokenString := jwtauth.TokenFromHeader(r)
 	if tokenString != "" {
-		invalidatedJWTTokens.Store(tokenString, time.Now().Add(tokenDuration).UTC())
+		invalidatedJWTTokens.Add(tokenString, time.Now().Add(tokenDuration).UTC())
 	}
 	tokenString = jwtauth.TokenFromCookie(r)
 	if tokenString != "" {
-		invalidatedJWTTokens.Store(tokenString, time.Now().Add(tokenDuration).UTC())
+		invalidatedJWTTokens.Add(tokenString, time.Now().Add(tokenDuration).UTC())
 	}
 }
 
@@ -416,4 +404,51 @@ func verifyCSRFToken(tokenString, ip string) error {
 	}
 
 	return nil
+}
+
+func createOAuth2Token(state, ip string) string {
+	claims := make(map[string]any)
+	now := time.Now().UTC()
+
+	claims[jwt.JwtIDKey] = state
+	claims[jwt.NotBeforeKey] = now.Add(-30 * time.Second)
+	claims[jwt.ExpirationKey] = now.Add(3 * time.Minute)
+	claims[jwt.AudienceKey] = []string{tokenAudienceOAuth2, ip}
+
+	_, tokenString, err := csrfTokenAuth.Encode(claims)
+	if err != nil {
+		logger.Debug(logSender, "", "unable to create OAuth2 token: %v", err)
+		return ""
+	}
+	return tokenString
+}
+
+func verifyOAuth2Token(tokenString, ip string) (string, error) {
+	token, err := jwtauth.VerifyToken(csrfTokenAuth, tokenString)
+	if err != nil || token == nil {
+		logger.Debug(logSender, "", "error validating OAuth2 token %q: %v", tokenString, err)
+		return "", util.NewI18nError(
+			fmt.Errorf("unable to verify OAuth2 state: %v", err),
+			util.I18nOAuth2ErrorVerifyState,
+		)
+	}
+
+	if !util.Contains(token.Audience(), tokenAudienceOAuth2) {
+		logger.Debug(logSender, "", "error validating OAuth2 token audience")
+		return "", util.NewI18nError(errors.New("invalid OAuth2 state"), util.I18nOAuth2InvalidState)
+	}
+
+	if tokenValidationMode != tokenValidationNoIPMatch {
+		if !util.Contains(token.Audience(), ip) {
+			logger.Debug(logSender, "", "error validating OAuth2 token IP audience")
+			return "", util.NewI18nError(errors.New("invalid OAuth2 state"), util.I18nOAuth2InvalidState)
+		}
+	}
+	if val, ok := token.Get(jwt.JwtIDKey); ok {
+		if state, ok := val.(string); ok {
+			return state, nil
+		}
+	}
+	logger.Debug(logSender, "", "jti not found in OAuth2 token")
+	return "", util.NewI18nError(errors.New("invalid OAuth2 state"), util.I18nOAuth2InvalidState)
 }

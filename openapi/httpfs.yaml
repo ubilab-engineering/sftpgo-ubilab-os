@@ -33,7 +33,7 @@ paths:
         200:
           description: successful operation
           content:
-            application/json; charset=utf-8:
+            application/json:
               schema:
                 $ref: '#/components/schemas/FileInfo'
         401:
@@ -97,6 +97,13 @@ paths:
       - name: flags
         in: query
         description: 'flags to use for opening the file, if omitted O_RDWR|O_CREATE|O_TRUNC must be assumed. Supported flags: https://pkg.go.dev/os#pkg-constants'
+        required: false
+        schema:
+          type: integer
+          format: int32
+      - name: checks
+        in: query
+        description: 'If set to `1`, the parent directory must exist before creating the file'
         required: false
         schema:
           type: integer
@@ -343,7 +350,7 @@ paths:
         200:
           description: successful operation
           content:
-            application/json; charset=utf-8:
+            application/json:
               schema:
                 type: array
                 items:
@@ -377,7 +384,7 @@ paths:
         200:
           description: successful operation
           content:
-            application/json; charset=utf-8:
+            application/json:
               schema:
                 type: object
                 properties:
@@ -417,7 +424,7 @@ paths:
         200:
           description: successful operation
           content:
-            application/json; charset=utf-8:
+            application/json:
               schema:
                 type: object
                 properties:
@@ -452,7 +459,7 @@ paths:
         200:
           description: successful operation
           content:
-            application/json; charset=utf-8:
+            application/json:
               schema:
                 $ref: '#/components/schemas/StatVFS'
         401:
@@ -472,61 +479,61 @@ components:
     OKResponse:
       description: successful operation
       content:
-        application/json; charset=utf-8:
+        application/json:
           schema:
             $ref: '#/components/schemas/ApiResponse'
     BadRequest:
       description: Bad Request
       content:
-        application/json; charset=utf-8:
+        application/json:
           schema:
             $ref: '#/components/schemas/ApiResponse'
     Unauthorized:
       description: Unauthorized
       content:
-        application/json; charset=utf-8:
+        application/json:
           schema:
             $ref: '#/components/schemas/ApiResponse'
     Forbidden:
       description: Forbidden
       content:
-        application/json; charset=utf-8:
+        application/json:
           schema:
             $ref: '#/components/schemas/ApiResponse'
     NotFound:
       description: Not Found
       content:
-        application/json; charset=utf-8:
+        application/json:
           schema:
             $ref: '#/components/schemas/ApiResponse'
     NotImplemented:
       description: Not Implemented
       content:
-        application/json; charset=utf-8:
+        application/json:
           schema:
             $ref: '#/components/schemas/ApiResponse'
     Conflict:
       description: Conflict
       content:
-        application/json; charset=utf-8:
+        application/json:
           schema:
             $ref: '#/components/schemas/ApiResponse'
     RequestEntityTooLarge:
       description: Request Entity Too Large, max allowed size exceeded
       content:
-        application/json; charset=utf-8:
+        application/json:
           schema:
             $ref: '#/components/schemas/ApiResponse'
     InternalServerError:
       description: Internal Server Error
       content:
-        application/json; charset=utf-8:
+        application/json:
           schema:
             $ref: '#/components/schemas/ApiResponse'
     DefaultResponse:
       description: Unexpected Error
       content:
-        application/json; charset=utf-8:
+        application/json:
           schema:
             $ref: '#/components/schemas/ApiResponse'
   schemas:

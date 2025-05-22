@@ -1,4 +1,4 @@
-// Copyright (C) 2019-2023 Nicola Murino
+// Copyright (C) 2019 Nicola Murino
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published
@@ -22,40 +22,39 @@ import (
 	"net"
 	"os"
 	"path/filepath"
-	"sync"
 
 	ftpserver "github.com/fclairamb/ftpserverlib"
+	"github.com/sftpgo/sdk/plugin/notifier"
 
 	"github.com/drakkan/sftpgo/v2/internal/common"
 	"github.com/drakkan/sftpgo/v2/internal/dataprovider"
 	"github.com/drakkan/sftpgo/v2/internal/logger"
 	"github.com/drakkan/sftpgo/v2/internal/metric"
+	"github.com/drakkan/sftpgo/v2/internal/plugin"
 	"github.com/drakkan/sftpgo/v2/internal/util"
 	"github.com/drakkan/sftpgo/v2/internal/version"
 )
 
 // Server implements the ftpserverlib MainDriver interface
 type Server struct {
-	ID               int
-	config           *Configuration
-	initialMsg       string
-	statusBanner     string
-	binding          Binding
-	tlsConfig        *tls.Config
-	mu               sync.RWMutex
-	verifiedTLSConns map[uint32]bool
+	ID           int
+	config       *Configuration
+	initialMsg   string
+	statusBanner string
+	binding      Binding
+	tlsConfig    *tls.Config
 }
 
 // NewServer returns a new FTP server driver
 func NewServer(config *Configuration, configDir string, binding Binding, id int) *Server {
 	binding.setCiphers()
+	vers := version.GetServerVersion("_", false)
 	server := &Server{
-		config:           config,
-		initialMsg:       config.Banner,
-		statusBanner:     fmt.Sprintf("SFTPGo %v FTP Server", version.Get().Version),
-		binding:          binding,
-		ID:               id,
-		verifiedTLSConns: make(map[uint32]bool),
+		config:       config,
+		initialMsg:   vers,
+		statusBanner: fmt.Sprintf("%s FTP Server", vers),
+		binding:      binding,
+		ID:           id,
 	}
 	if config.BannerFile != "" {
 		bannerFilePath := config.BannerFile
@@ -64,7 +63,7 @@ func NewServer(config *Configuration, configDir string, binding Binding, id int)
 		}
 		bannerContent, err := os.ReadFile(bannerFilePath)
 		if err == nil {
-			server.initialMsg = string(bannerContent)
+			server.initialMsg = util.BytesToString(bannerContent)
 		} else {
 			logger.WarnToConsole("unable to read FTPD banner file: %v", err)
 			logger.Warn(logSender, "", "unable to read banner file: %v", err)
@@ -72,27 +71,6 @@ func NewServer(config *Configuration, configDir string, binding Binding, id int)
 	}
 	server.buildTLSConfig()
 	return server
-}
-
-func (s *Server) isTLSConnVerified(id uint32) bool {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	return s.verifiedTLSConns[id]
-}
-
-func (s *Server) setTLSConnVerified(id uint32, value bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	s.verifiedTLSConns[id] = value
-}
-
-func (s *Server) cleanTLSConnVerification(id uint32) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	delete(s.verifiedTLSConns, id)
 }
 
 // GetSettings returns FTP server settings
@@ -127,11 +105,15 @@ func (s *Server) GetSettings() (*ftpserver.Settings, error) {
 		}
 	}
 
-	if s.binding.TLSMode < 0 || s.binding.TLSMode > 2 {
-		return nil, errors.New("unsupported TLS mode")
+	if !s.binding.isTLSModeValid() {
+		return nil, fmt.Errorf("unsupported TLS mode: %d", s.binding.TLSMode)
 	}
 
-	if s.binding.TLSMode > 0 && certMgr == nil {
+	if !s.binding.isTLSSessionReuseValid() {
+		return nil, fmt.Errorf("unsupported TLS reuse mode %d", s.binding.TLSSessionReuse)
+	}
+
+	if (s.binding.TLSMode > 0 || s.binding.TLSSessionReuse > 0) && certMgr == nil {
 		return nil, errors.New("to enable TLS you need to provide a certificate")
 	}
 
@@ -145,11 +127,13 @@ func (s *Server) GetSettings() (*ftpserver.Settings, error) {
 		ConnectionTimeout:        20,
 		Banner:                   s.statusBanner,
 		TLSRequired:              ftpserver.TLSRequirement(s.binding.TLSMode),
+		TLSSessionReuse:          ftpserver.TLSSessionReuse(s.binding.TLSSessionReuse),
 		DisableSite:              !s.config.EnableSite,
 		DisableActiveMode:        s.config.DisableActiveMode,
 		EnableHASH:               s.config.HASHSupport > 0,
 		EnableCOMB:               s.config.CombineSupport > 0,
 		DefaultTransferType:      ftpserver.TransferTypeBinary,
+		IgnoreASCIITranferType:   s.binding.IgnoreASCIITransferType == 1,
 		ActiveConnectionsCheck:   ftpserver.DataConnectionRequirement(s.binding.ActiveConnectionsSecurity),
 		PasvConnectionsCheck:     ftpserver.DataConnectionRequirement(s.binding.PassiveConnectionsSecurity),
 	}, nil
@@ -188,7 +172,6 @@ func (s *Server) ClientConnected(cc ftpserver.ClientContext) (string, error) {
 
 // ClientDisconnected is called when the user disconnects, even if he never authenticated
 func (s *Server) ClientDisconnected(cc ftpserver.ClientContext) {
-	s.cleanTLSConnVerification(cc.ID())
 	connID := fmt.Sprintf("%v_%v_%v", common.ProtocolFTP, s.ID, cc.ID())
 	common.Connections.Remove(connID)
 	common.Connections.RemoveClientConnection(util.GetIPFromRemoteAddress(cc.RemoteAddr().String()))
@@ -197,7 +180,7 @@ func (s *Server) ClientDisconnected(cc ftpserver.ClientContext) {
 // AuthUser authenticates the user and selects an handling driver
 func (s *Server) AuthUser(cc ftpserver.ClientContext, username, password string) (ftpserver.ClientDriver, error) {
 	loginMethod := dataprovider.LoginMethodPassword
-	if s.isTLSConnVerified(cc.ID()) {
+	if verified, ok := cc.Extra().(bool); ok && verified {
 		loginMethod = dataprovider.LoginMethodTLSCertificateAndPwd
 	}
 	ipAddr := util.GetIPFromRemoteAddress(cc.RemoteAddr().String())
@@ -216,7 +199,8 @@ func (s *Server) AuthUser(cc ftpserver.ClientContext, username, password string)
 		return nil, err
 	}
 	setStartDirectory(user.Filters.StartDirectory, cc)
-	connection.Log(logger.LevelInfo, "User %q logged in with %q from ip %q", user.Username, loginMethod, ipAddr)
+	connection.Log(logger.LevelInfo, "User %q logged in with %q from ip %q, TLS enabled? %t",
+		user.Username, loginMethod, ipAddr, cc.HasTLSForControl())
 	dataprovider.UpdateLastLogin(&user)
 	return connection, nil
 }
@@ -253,7 +237,7 @@ func (s *Server) VerifyConnection(cc ftpserver.ClientContext, user string, tlsCo
 	if !s.binding.isMutualTLSEnabled() {
 		return nil, nil
 	}
-	s.setTLSConnVerified(cc.ID(), false)
+	cc.SetExtra(false)
 	if tlsConn != nil {
 		state := tlsConn.ConnectionState()
 		if len(state.PeerCertificates) > 0 {
@@ -264,15 +248,15 @@ func (s *Server) VerifyConnection(cc ftpserver.ClientContext, user string, tlsCo
 				updateLoginMetrics(&dbUser, ipAddr, dataprovider.LoginMethodTLSCertificate, err)
 				return nil, dataprovider.ErrInvalidCredentials
 			}
-			if dbUser.IsTLSUsernameVerificationEnabled() {
+			if dbUser.IsTLSVerificationEnabled() {
 				dbUser, err = dataprovider.CheckUserAndTLSCert(user, ipAddr, common.ProtocolFTP, state.PeerCertificates[0])
 				if err != nil {
 					return nil, err
 				}
 
-				s.setTLSConnVerified(cc.ID(), true)
+				cc.SetExtra(true)
 
-				if dbUser.IsLoginMethodAllowed(dataprovider.LoginMethodTLSCertificate, common.ProtocolFTP, nil) {
+				if dbUser.IsLoginMethodAllowed(dataprovider.LoginMethodTLSCertificate, common.ProtocolFTP) {
 					connection, err := s.validateUser(dbUser, cc, dataprovider.LoginMethodTLSCertificate)
 
 					defer updateLoginMetrics(&dbUser, ipAddr, dataprovider.LoginMethodTLSCertificate, err)
@@ -299,17 +283,21 @@ func (s *Server) buildTLSConfig() {
 		if getConfigPath(s.binding.CertificateFile, "") != "" && getConfigPath(s.binding.CertificateKeyFile, "") != "" {
 			certID = s.binding.GetAddress()
 		}
+		if !certMgr.HasCertificate(certID) {
+			return
+		}
 		s.tlsConfig = &tls.Config{
-			GetCertificate:           certMgr.GetCertificateFunc(certID),
-			MinVersion:               util.GetTLSVersion(s.binding.MinTLSVersion),
-			CipherSuites:             s.binding.ciphers,
-			PreferServerCipherSuites: true,
+			GetCertificate: certMgr.GetCertificateFunc(certID),
+			MinVersion:     util.GetTLSVersion(s.binding.MinTLSVersion),
+			CipherSuites:   s.binding.ciphers,
 		}
 		logger.Debug(logSender, "", "configured TLS cipher suites for binding %q: %v, certID: %v",
 			s.binding.GetAddress(), s.binding.ciphers, certID)
 		if s.binding.isMutualTLSEnabled() {
 			s.tlsConfig.ClientCAs = certMgr.GetRootCAs()
-			s.tlsConfig.VerifyConnection = s.verifyTLSConnection
+			if s.binding.TLSSessionReuse != int(ftpserver.TLSSessionReuseRequired) {
+				s.tlsConfig.VerifyConnection = s.verifyTLSConnection
+			}
 			switch s.binding.ClientAuthType {
 			case 1:
 				s.tlsConfig.ClientAuth = tls.RequireAndVerifyClientCert
@@ -326,6 +314,14 @@ func (s *Server) GetTLSConfig() (*tls.Config, error) {
 		return s.tlsConfig, nil
 	}
 	return nil, errors.New("no TLS certificate configured")
+}
+
+// VerifyTLSConnectionState implements the MainDriverExtensionTLSConnectionStateVerifier extension
+func (s *Server) VerifyTLSConnectionState(_ ftpserver.ClientContext, cs tls.ConnectionState) error {
+	if !s.binding.isMutualTLSEnabled() {
+		return nil
+	}
+	return s.verifyTLSConnection(cs)
 }
 
 func (s *Server) verifyTLSConnection(state tls.ConnectionState) error {
@@ -369,7 +365,7 @@ func (s *Server) validateUser(user dataprovider.User, cc ftpserver.ClientContext
 		logger.Info(logSender, connectionID, "cannot login user %q, protocol FTP is not allowed", user.Username)
 		return nil, fmt.Errorf("protocol FTP is not allowed for user %q", user.Username)
 	}
-	if !user.IsLoginMethodAllowed(loginMethod, common.ProtocolFTP, nil) {
+	if !user.IsLoginMethodAllowed(loginMethod, common.ProtocolFTP) {
 		logger.Info(logSender, connectionID, "cannot login user %q, %v login method is not allowed",
 			user.Username, loginMethod)
 		return nil, fmt.Errorf("login method %v is not allowed for user %q", loginMethod, user.Username)
@@ -422,14 +418,22 @@ func setStartDirectory(startDirectory string, cc ftpserver.ClientContext) {
 
 func updateLoginMetrics(user *dataprovider.User, ip, loginMethod string, err error) {
 	metric.AddLoginAttempt(loginMethod)
-	if err != nil && err != common.ErrInternalFailure {
-		logger.ConnectionFailedLog(user.Username, ip, loginMethod,
-			common.ProtocolFTP, err.Error())
+	if err == nil {
+		plugin.Handler.NotifyLogEvent(notifier.LogEventTypeLoginOK, common.ProtocolFTP, user.Username, ip, "", nil)
+		common.DelayLogin(nil)
+	} else if err != common.ErrInternalFailure {
+		logger.ConnectionFailedLog(user.Username, ip, loginMethod, common.ProtocolFTP, err.Error())
 		event := common.HostEventLoginFailed
+		logEv := notifier.LogEventTypeLoginFailed
 		if errors.Is(err, util.ErrNotFound) {
 			event = common.HostEventUserNotFound
+			logEv = notifier.LogEventTypeLoginNoUser
 		}
 		common.AddDefenderEvent(ip, common.ProtocolFTP, event)
+		plugin.Handler.NotifyLogEvent(logEv, common.ProtocolFTP, user.Username, ip, "", err)
+		if loginMethod != dataprovider.LoginMethodTLSCertificate {
+			common.DelayLogin(err)
+		}
 	}
 	metric.AddLoginResult(loginMethod, err)
 	dataprovider.ExecutePostLoginHook(user, loginMethod, ip, common.ProtocolFTP, err)

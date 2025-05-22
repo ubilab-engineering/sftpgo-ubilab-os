@@ -1,4 +1,4 @@
-// Copyright (C) 2019-2023 Nicola Murino
+// Copyright (C) 2019 Nicola Murino
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published
@@ -18,12 +18,19 @@
 package sftpd
 
 import (
+	"os"
 	"os/exec"
 	"syscall"
 )
 
+var (
+	processUID = os.Geteuid()
+	processGID = os.Getegid()
+)
+
 func wrapCmd(cmd *exec.Cmd, uid, gid int) *exec.Cmd {
-	if uid > 0 || gid > 0 {
+	isCurrentUser := processUID == uid && processGID == gid
+	if (uid > 0 || gid > 0) && !isCurrentUser {
 		cmd.SysProcAttr = &syscall.SysProcAttr{}
 		cmd.SysProcAttr.Credential = &syscall.Credential{Uid: uint32(uid), Gid: uint32(gid)}
 	}

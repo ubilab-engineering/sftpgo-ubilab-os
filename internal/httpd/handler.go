@@ -1,4 +1,4 @@
-// Copyright (C) 2019-2023 Nicola Murino
+// Copyright (C) 2019 Nicola Murino
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published
@@ -88,7 +88,7 @@ func (c *Connection) Stat(name string, mode int) (os.FileInfo, error) {
 }
 
 // ReadDir returns a list of directory entries
-func (c *Connection) ReadDir(name string) ([]os.FileInfo, error) {
+func (c *Connection) ReadDir(name string) (vfs.DirLister, error) {
 	c.UpdateLastActivity()
 
 	return c.ListDir(name)
@@ -100,16 +100,16 @@ func (c *Connection) getFileReader(name string, offset int64, method string) (io
 	transferQuota := c.GetTransferQuota()
 	if !transferQuota.HasDownloadSpace() {
 		c.Log(logger.LevelInfo, "denying file read due to quota limits")
-		return nil, c.GetReadQuotaExceededError()
+		return nil, util.NewI18nError(c.GetReadQuotaExceededError(), util.I18nErrorQuotaRead)
 	}
 
 	if !c.User.HasPerm(dataprovider.PermDownload, path.Dir(name)) {
-		return nil, c.GetPermissionDeniedError()
+		return nil, util.NewI18nError(c.GetPermissionDeniedError(), util.I18nError403Message)
 	}
 
 	if ok, policy := c.User.IsFileAllowed(name); !ok {
 		c.Log(logger.LevelWarn, "reading file %q is not allowed", name)
-		return nil, c.GetErrorForDeniedFile(policy)
+		return nil, util.NewI18nError(c.GetErrorForDeniedFile(policy), util.I18nError403Message)
 	}
 
 	fs, p, err := c.GetFsAndResolvedPath(name)
@@ -120,7 +120,7 @@ func (c *Connection) getFileReader(name string, offset int64, method string) (io
 	if method != http.MethodHead {
 		if _, err := common.ExecutePreAction(c.BaseConnection, common.OperationPreDownload, p, name, 0, 0); err != nil {
 			c.Log(logger.LevelDebug, "download for file %q denied by pre action: %v", name, err)
-			return nil, c.GetPermissionDeniedError()
+			return nil, util.NewI18nError(c.GetPermissionDeniedError(), util.I18nError403Message)
 		}
 	}
 
@@ -201,7 +201,7 @@ func (c *Connection) handleUploadFile(fs vfs.Fs, resolvedPath, filePath, request
 
 	maxWriteSize, _ := c.GetMaxWriteSize(diskQuota, false, fileSize, fs.IsUploadResumeSupported())
 
-	file, w, cancelFn, err := fs.Create(filePath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC)
+	file, w, cancelFn, err := fs.Create(filePath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, c.GetCreateChecks(requestPath, isNewFile, false))
 	if err != nil {
 		c.Log(logger.LevelError, "error opening existing file, source: %q, err: %+v", filePath, err)
 		return nil, c.GetFsError(fs, err)

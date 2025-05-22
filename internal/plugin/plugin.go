@@ -1,4 +1,4 @@
-// Copyright (C) 2019-2023 Nicola Murino
+// Copyright (C) 2019 Nicola Murino
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published
@@ -21,6 +21,10 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -31,7 +35,6 @@ import (
 	"github.com/sftpgo/sdk/plugin/eventsearcher"
 	"github.com/sftpgo/sdk/plugin/ipfilter"
 	kmsplugin "github.com/sftpgo/sdk/plugin/kms"
-	"github.com/sftpgo/sdk/plugin/metadata"
 	"github.com/sftpgo/sdk/plugin/notifier"
 
 	"github.com/drakkan/sftpgo/v2/internal/kms"
@@ -49,8 +52,6 @@ var (
 	pluginsLogLevel = hclog.Debug
 	// ErrNoSearcher defines the error to return for events searches if no plugin is configured
 	ErrNoSearcher = errors.New("no events searcher plugin defined")
-	// ErrNoMetadater returns the error to return for metadata methods if no plugin is configured
-	ErrNoMetadater = errors.New("no metadata plugin defined")
 )
 
 // Renderer defines the interface for generic objects rendering
@@ -81,6 +82,16 @@ type Config struct {
 	// rejected. The client will also refuse to connect to any server that isn't
 	// the original instance started by the client.
 	AutoMTLS bool `json:"auto_mtls" mapstructure:"auto_mtls"`
+	// EnvPrefix defines the prefix for env vars to pass from the SFTPGo process
+	// environment to the plugin. Set to "none" to not pass any environment
+	// variable, set to "*" to pass all environment variables. If empty, the
+	// prefix is returned as the plugin name in uppercase with "-" replaced with
+	// "_" and a trailing "_". For example if the plugin name is
+	// sftpgo-plugin-eventsearch the prefix will be SFTPGO_PLUGIN_EVENTSEARCH_
+	EnvPrefix string `json:"env_prefix" mapstructure:"env_prefix"`
+	// Additional environment variable names to pass from the SFTPGo process
+	// environment to the plugin.
+	EnvVars []string `json:"env_vars" mapstructure:"env_vars"`
 	// unique identifier for kms plugins
 	kmsID int
 }
@@ -97,6 +108,44 @@ func (c *Config) getSecureConfig() (*plugin.SecureConfig, error) {
 		}, nil
 	}
 	return nil, nil
+}
+
+func (c *Config) getEnvVarPrefix() string {
+	if c.EnvPrefix == "none" {
+		return ""
+	}
+	if c.EnvPrefix != "" {
+		return c.EnvPrefix
+	}
+
+	baseName := filepath.Base(c.Cmd)
+	name := strings.TrimSuffix(baseName, filepath.Ext(baseName))
+	prefix := strings.ToUpper(name) + "_"
+	return strings.ReplaceAll(prefix, "-", "_")
+}
+
+func (c *Config) getCommand() *exec.Cmd {
+	cmd := exec.Command(c.Cmd, c.Args...)
+	cmd.Env = []string{}
+
+	if envVarPrefix := c.getEnvVarPrefix(); envVarPrefix != "" {
+		if envVarPrefix == "*" {
+			logger.Debug(logSender, "", "sharing all the environment variables with plugin %q", c.Cmd)
+			cmd.Env = append(cmd.Env, os.Environ()...)
+			return cmd
+		}
+		logger.Debug(logSender, "", "adding env vars with prefix %q for plugin %q", envVarPrefix, c.Cmd)
+		for _, val := range os.Environ() {
+			if strings.HasPrefix(val, envVarPrefix) {
+				cmd.Env = append(cmd.Env, val)
+			}
+		}
+	}
+	logger.Debug(logSender, "", "additional env vars for plugin %q: %+v", c.Cmd, c.EnvVars)
+	for _, key := range c.EnvVars {
+		cmd.Env = append(cmd.Env, fmt.Sprintf("%s=%s", key, os.Getenv(key)))
+	}
+	return cmd
 }
 
 func (c *Config) newKMSPluginSecretProvider(base kms.BaseSecret, url, masterKey string) kms.SecretProvider {
@@ -122,13 +171,10 @@ type Manager struct {
 	auths            []*authPlugin
 	searcherLock     sync.RWMutex
 	searcher         *searcherPlugin
-	metadaterLock    sync.RWMutex
-	metadater        *metadataPlugin
 	ipFilterLock     sync.RWMutex
 	filter           *ipFilterPlugin
 	authScopes       int
 	hasSearcher      bool
-	hasMetadater     bool
 	hasNotifiers     bool
 	hasAuths         bool
 	hasIPFilter      bool
@@ -181,7 +227,7 @@ func initializePlugins() error {
 			kmsID++
 			kms.RegisterSecretProvider(config.KMSOptions.Scheme, config.KMSOptions.EncryptedStatus,
 				Handler.Configs[idx].newKMSPluginSecretProvider)
-			logger.Info(logSender, "", "registered secret provider for scheme: %v, encrypted status: %v",
+			logger.Info(logSender, "", "registered secret provider for scheme %q, encrypted status %q",
 				config.KMSOptions.Scheme, config.KMSOptions.EncryptedStatus)
 		case auth.PluginName:
 			plugin, err := newAuthPlugin(config)
@@ -200,12 +246,6 @@ func initializePlugins() error {
 				return err
 			}
 			Handler.searcher = plugin
-		case metadata.PluginName:
-			plugin, err := newMetadaterPlugin(config)
-			if err != nil {
-				return err
-			}
-			Handler.metadater = plugin
 		case ipfilter.PluginName:
 			plugin, err := newIPFilterPlugin(config)
 			if err != nil {
@@ -224,7 +264,6 @@ func (m *Manager) validateConfigs() error {
 	kmsSchemes := make(map[string]bool)
 	kmsEncryptions := make(map[string]bool)
 	m.hasSearcher = false
-	m.hasMetadater = false
 	m.hasNotifiers = false
 	m.hasAuths = false
 	m.hasIPFilter = false
@@ -245,11 +284,6 @@ func (m *Manager) validateConfigs() error {
 				return errors.New("only one eventsearcher plugin can be defined")
 			}
 			m.hasSearcher = true
-		case metadata.PluginName:
-			if m.hasMetadater {
-				return errors.New("only one metadata plugin can be defined")
-			}
-			m.hasMetadater = true
 		case notifier.PluginName:
 			m.hasNotifiers = true
 		case auth.PluginName:
@@ -291,15 +325,48 @@ func (m *Manager) NotifyProviderEvent(event *notifier.ProviderEvent, object Rend
 	}
 }
 
+// NotifyLogEvent sends the log event notifications using any defined notifier plugins
+func (m *Manager) NotifyLogEvent(event notifier.LogEventType, protocol, username, ip, role string, err error) {
+	if !m.hasNotifiers {
+		return
+	}
+	m.notifLock.RLock()
+	defer m.notifLock.RUnlock()
+
+	var e *notifier.LogEvent
+
+	for _, n := range m.notifiers {
+		if util.Contains(n.config.NotifierOptions.LogEvents, int(event)) {
+			if e == nil {
+				message := ""
+				if err != nil {
+					message = strings.Trim(err.Error(), "\x00")
+				}
+
+				e = &notifier.LogEvent{
+					Timestamp: time.Now().UnixNano(),
+					Event:     event,
+					Protocol:  protocol,
+					Username:  username,
+					IP:        ip,
+					Message:   message,
+					Role:      role,
+				}
+			}
+			n.notifyLogEvent(e)
+		}
+	}
+}
+
 // HasSearcher returns true if an event searcher plugin is defined
 func (m *Manager) HasSearcher() bool {
 	return m.hasSearcher
 }
 
 // SearchFsEvents returns the filesystem events matching the specified filters
-func (m *Manager) SearchFsEvents(searchFilters *eventsearcher.FsEventSearch) ([]byte, []string, []string, error) {
+func (m *Manager) SearchFsEvents(searchFilters *eventsearcher.FsEventSearch) ([]byte, error) {
 	if !m.hasSearcher {
-		return nil, nil, nil, ErrNoSearcher
+		return nil, ErrNoSearcher
 	}
 	m.searcherLock.RLock()
 	plugin := m.searcher
@@ -309,9 +376,9 @@ func (m *Manager) SearchFsEvents(searchFilters *eventsearcher.FsEventSearch) ([]
 }
 
 // SearchProviderEvents returns the provider events matching the specified filters
-func (m *Manager) SearchProviderEvents(searchFilters *eventsearcher.ProviderEventSearch) ([]byte, []string, []string, error) {
+func (m *Manager) SearchProviderEvents(searchFilters *eventsearcher.ProviderEventSearch) ([]byte, error) {
 	if !m.hasSearcher {
-		return nil, nil, nil, ErrNoSearcher
+		return nil, ErrNoSearcher
 	}
 	m.searcherLock.RLock()
 	plugin := m.searcher
@@ -320,69 +387,16 @@ func (m *Manager) SearchProviderEvents(searchFilters *eventsearcher.ProviderEven
 	return plugin.searchear.SearchProviderEvents(searchFilters)
 }
 
-// HasMetadater returns true if a metadata plugin is defined
-func (m *Manager) HasMetadater() bool {
-	return m.hasMetadater
-}
-
-// SetModificationTime sets the modification time for the specified object
-func (m *Manager) SetModificationTime(storageID, objectPath string, mTime int64) error {
-	if !m.hasMetadater {
-		return ErrNoMetadater
+// SearchLogEvents returns the log events matching the specified filters
+func (m *Manager) SearchLogEvents(searchFilters *eventsearcher.LogEventSearch) ([]byte, error) {
+	if !m.hasSearcher {
+		return nil, ErrNoSearcher
 	}
-	m.metadaterLock.RLock()
-	plugin := m.metadater
-	m.metadaterLock.RUnlock()
+	m.searcherLock.RLock()
+	plugin := m.searcher
+	m.searcherLock.RUnlock()
 
-	return plugin.metadater.SetModificationTime(storageID, objectPath, mTime)
-}
-
-// GetModificationTime returns the modification time for the specified path
-func (m *Manager) GetModificationTime(storageID, objectPath string, _ bool) (int64, error) {
-	if !m.hasMetadater {
-		return 0, ErrNoMetadater
-	}
-	m.metadaterLock.RLock()
-	plugin := m.metadater
-	m.metadaterLock.RUnlock()
-
-	return plugin.metadater.GetModificationTime(storageID, objectPath)
-}
-
-// GetModificationTimes returns the modification times for all the files within the specified folder
-func (m *Manager) GetModificationTimes(storageID, objectPath string) (map[string]int64, error) {
-	if !m.hasMetadater {
-		return nil, ErrNoMetadater
-	}
-	m.metadaterLock.RLock()
-	plugin := m.metadater
-	m.metadaterLock.RUnlock()
-
-	return plugin.metadater.GetModificationTimes(storageID, objectPath)
-}
-
-// RemoveMetadata deletes the metadata stored for the specified object
-func (m *Manager) RemoveMetadata(storageID, objectPath string) error {
-	if !m.hasMetadater {
-		return ErrNoMetadater
-	}
-	m.metadaterLock.RLock()
-	plugin := m.metadater
-	m.metadaterLock.RUnlock()
-
-	return plugin.metadater.RemoveMetadata(storageID, objectPath)
-}
-
-// GetMetadataFolders returns the folders that metadata is associated with
-func (m *Manager) GetMetadataFolders(storageID, from string, limit int) ([]string, error) {
-	if !m.hasMetadater {
-		return nil, ErrNoMetadater
-	}
-	m.metadaterLock.RLock()
-	plugin := m.metadater
-	m.metadaterLock.RUnlock()
-
-	return plugin.metadater.GetFolders(storageID, limit, from)
+	return plugin.searchear.SearchLogEvents(searchFilters)
 }
 
 // IsIPBanned returns true if the IP filter plugin does not allow the specified ip.
@@ -604,16 +618,6 @@ func (m *Manager) checkCrashedPlugins() {
 		m.searcherLock.RUnlock()
 	}
 
-	if m.hasMetadater {
-		m.metadaterLock.RLock()
-		if m.metadater.exited() {
-			defer func(cfg Config) {
-				Handler.restartMetadaterPlugin(cfg)
-			}(m.metadater.config)
-		}
-		m.metadaterLock.RUnlock()
-	}
-
 	if m.hasIPFilter {
 		m.ipFilterLock.RLock()
 		if m.filter.exited() {
@@ -691,22 +695,6 @@ func (m *Manager) restartSearcherPlugin(config Config) {
 	m.searcherLock.Unlock()
 }
 
-func (m *Manager) restartMetadaterPlugin(config Config) {
-	if m.closed.Load() {
-		return
-	}
-	logger.Info(logSender, "", "try to restart crashed metadater plugin %q", config.Cmd)
-	plugin, err := newMetadaterPlugin(config)
-	if err != nil {
-		logger.Error(logSender, "", "unable to restart metadater plugin %q, err: %v", config.Cmd, err)
-		return
-	}
-
-	m.metadaterLock.Lock()
-	m.metadater = plugin
-	m.metadaterLock.Unlock()
-}
-
 func (m *Manager) restartIPFilterPlugin(config Config) {
 	if m.closed.Load() {
 		return
@@ -764,13 +752,6 @@ func (m *Manager) Cleanup() {
 		logger.Debug(logSender, "", "cleanup searcher plugin %v", m.searcher.config.Cmd)
 		m.searcher.cleanup()
 		m.searcherLock.Unlock()
-	}
-
-	if m.hasMetadater {
-		m.metadaterLock.Lock()
-		logger.Debug(logSender, "", "cleanup metadater plugin %v", m.metadater.config.Cmd)
-		m.metadater.cleanup()
-		m.metadaterLock.Unlock()
 	}
 
 	if m.hasIPFilter {

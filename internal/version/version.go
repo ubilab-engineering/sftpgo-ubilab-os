@@ -1,4 +1,4 @@
-// Copyright (C) 2019-2023 Nicola Murino
+// Copyright (C) 2019 Nicola Murino
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published
@@ -17,12 +17,19 @@ package version
 
 import "strings"
 
-const version = "2.4.4-dev"
+const (
+	version = "2.6.6"
+	appName = "SFTPGo"
+)
 
 var (
 	commit = ""
 	date   = ""
 	info   Info
+)
+
+var (
+	config string
 )
 
 // Info defines version details
@@ -68,4 +75,34 @@ func AddFeature(feature string) {
 // Get returns the Info struct
 func Get() Info {
 	return info
+}
+
+// SetConfig sets the version configuration
+func SetConfig(val string) {
+	config = val
+}
+
+// GetServerVersion returns the server version according to the configuration
+// and the provided parameters.
+func GetServerVersion(separator string, addHash bool) string {
+	var sb strings.Builder
+	sb.WriteString(appName)
+	if config != "short" {
+		sb.WriteString(separator)
+		sb.WriteString(info.Version)
+	}
+	if addHash {
+		sb.WriteString(separator)
+		sb.WriteString(info.CommitHash)
+	}
+	return sb.String()
+}
+
+// GetVersionHash returns the server identification string with the commit hash.
+func GetVersionHash() string {
+	var sb strings.Builder
+	sb.WriteString(appName)
+	sb.WriteString("-")
+	sb.WriteString(info.CommitHash)
+	return sb.String()
 }

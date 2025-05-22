@@ -1,4 +1,4 @@
-// Copyright (C) 2019-2023 Nicola Murino
+// Copyright (C) 2019 Nicola Murino
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published
@@ -17,8 +17,6 @@ package httpd
 import (
 	"io"
 
-	"github.com/eikenb/pipeat"
-
 	"github.com/drakkan/sftpgo/v2/internal/common"
 	"github.com/drakkan/sftpgo/v2/internal/vfs"
 )
@@ -30,7 +28,7 @@ type httpdFile struct {
 	isFinished bool
 }
 
-func newHTTPDFile(baseTransfer *common.BaseTransfer, pipeWriter *vfs.PipeWriter, pipeReader *pipeat.PipeReaderAt) *httpdFile {
+func newHTTPDFile(baseTransfer *common.BaseTransfer, pipeWriter vfs.PipeWriter, pipeReader vfs.PipeReader) *httpdFile {
 	var writer io.WriteCloser
 	var reader io.ReadCloser
 	if baseTransfer.File != nil {
@@ -67,6 +65,7 @@ func (f *httpdFile) Read(p []byte) (n int, err error) {
 	}
 	if err != nil && err != io.EOF {
 		f.TransferError(err)
+		err = f.ConvertError(err)
 		return
 	}
 	f.HandleThrottle()
@@ -91,6 +90,7 @@ func (f *httpdFile) Write(p []byte) (n int, err error) {
 	}
 	if err != nil {
 		f.TransferError(err)
+		err = f.ConvertError(err)
 		return
 	}
 	f.HandleThrottle()
@@ -125,6 +125,9 @@ func (f *httpdFile) closeIO() error {
 		f.Unlock()
 	} else if f.reader != nil {
 		err = f.reader.Close()
+		if metadater, ok := f.reader.(vfs.Metadater); ok {
+			f.BaseTransfer.SetMetadata(metadater.Metadata())
+		}
 	}
 	return err
 }
