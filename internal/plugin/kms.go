@@ -82,7 +82,7 @@ func (p *kmsPlugin) initialize() error {
 		HandshakeConfig: kmsplugin.Handshake,
 		Plugins:         kmsplugin.PluginMap,
 		Cmd:             p.config.getCommand(),
-		SkipHostEnv:     true,
+		SkipHostEnv:     false, // trying to get env. vars. to the plugin without fixing the replication/distribution mechanism
 		AllowedProtocols: []plugin.Protocol{
 			plugin.ProtocolGRPC,
 		},
