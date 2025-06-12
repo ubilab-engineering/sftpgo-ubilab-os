@@ -1,4 +1,4 @@
-// Copyright (C) 2019-2023 Nicola Murino
+// Copyright (C) 2019 Nicola Murino
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published
@@ -18,8 +18,10 @@ package webdavd
 import (
 	"fmt"
 	"net"
+	"net/http"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/go-chi/chi/v5/middleware"
 
@@ -43,6 +45,12 @@ const (
 var (
 	certMgr       *common.CertManager
 	serviceStatus ServiceStatus
+	timeFormats   = []string{
+		http.TimeFormat,
+		"Mon, _2 Jan 2006 15:04:05 GMT",
+		time.RFC850,
+		time.ANSIC,
+	}
 )
 
 // ServiceStatus defines the service status
@@ -75,6 +83,13 @@ type CustomMimeMapping struct {
 type UsersCacheConfig struct {
 	ExpirationTime int `json:"expiration_time" mapstructure:"expiration_time"`
 	MaxSize        int `json:"max_size" mapstructure:"max_size"`
+}
+
+func (c *UsersCacheConfig) getExpirationTime() time.Time {
+	if c.ExpirationTime > 0 {
+		return time.Now().Add(time.Duration(c.ExpirationTime) * time.Minute)
+	}
+	return time.Time{}
 }
 
 // MimeCacheConfig defines the cache configuration for mime types
@@ -113,11 +128,13 @@ type Binding struct {
 	// Note that TLS 1.3 ciphersuites are not configurable.
 	// The supported ciphersuites names are defined here:
 	//
-	// https://github.com/golang/go/blob/master/src/crypto/tls/cipher_suites.go#L52
+	// https://github.com/golang/go/blob/master/src/crypto/tls/cipher_suites.go#L53
 	//
 	// any invalid name will be silently ignored.
 	// The order matters, the ciphers listed first will be the preferred ones.
 	TLSCipherSuites []string `json:"tls_cipher_suites" mapstructure:"tls_cipher_suites"`
+	// HTTP protocols to enable in preference order. Supported values: http/1.1, h2
+	Protocols []string `json:"tls_protocols" mapstructure:"tls_protocols"`
 	// Prefix for WebDAV resources, if empty WebDAV resources will be available at the
 	// root ("/") URI. If defined it must be an absolute URI.
 	Prefix string `json:"prefix" mapstructure:"prefix"`
@@ -139,7 +156,7 @@ type Binding struct {
 func (b *Binding) parseAllowedProxy() error {
 	if filepath.IsAbs(b.Address) && len(b.ProxyAllowed) > 0 {
 		// unix domain socket
-		b.allowHeadersFrom = []func(net.IP) bool{func(ip net.IP) bool { return true }}
+		b.allowHeadersFrom = []func(net.IP) bool{func(_ net.IP) bool { return true }}
 		return nil
 	}
 	allowedFuncs, err := util.ParseAllowedIPAndRanges(b.ProxyAllowed)
@@ -351,4 +368,14 @@ func getConfigPath(name, configDir string) string {
 		return filepath.Join(configDir, name)
 	}
 	return name
+}
+
+func parseTime(text string) (t time.Time, err error) {
+	for _, layout := range timeFormats {
+		t, err = time.Parse(layout, text)
+		if err == nil {
+			return
+		}
+	}
+	return
 }

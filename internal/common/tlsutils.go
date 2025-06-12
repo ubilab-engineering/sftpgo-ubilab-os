@@ -1,4 +1,4 @@
-// Copyright (C) 2019-2023 Nicola Murino
+// Copyright (C) 2019 Nicola Murino
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published
@@ -108,6 +108,15 @@ func (m *CertManager) loadCertificates() error {
 	return nil
 }
 
+// HasCertificate returns true if there is a certificate for the specified certID
+func (m *CertManager) HasCertificate(certID string) bool {
+	m.RLock()
+	defer m.RUnlock()
+
+	_, ok := m.certs[certID]
+	return ok
+}
+
 // GetCertificateFunc returns the loaded certificate
 func (m *CertManager) GetCertificateFunc(certID string) func(*tls.ClientHelloInfo) (*tls.Certificate, error) {
 	return func(_ *tls.ClientHelloInfo) (*tls.Certificate, error) {
@@ -136,7 +145,7 @@ func (m *CertManager) IsRevoked(crt *x509.Certificate, caCrt *x509.Certificate) 
 
 	for _, crl := range m.crls {
 		if crl.CheckSignatureFrom(caCrt) == nil {
-			for _, rc := range crl.RevokedCertificates {
+			for _, rc := range crl.RevokedCertificateEntries {
 				if rc.SerialNumber.Cmp(crt.SerialNumber) == 0 {
 					return true
 				}
@@ -299,6 +308,8 @@ func NewCertManager(keyPairs []TLSKeyPair, configDir, logSender string) (*CertMa
 	}
 	randSecs := rand.Intn(59)
 	manager.monitor()
-	_, err = eventScheduler.AddFunc(fmt.Sprintf("@every 8h0m%ds", randSecs), manager.monitor)
+	if eventScheduler != nil {
+		_, err = eventScheduler.AddFunc(fmt.Sprintf("@every 8h0m%ds", randSecs), manager.monitor)
+	}
 	return manager, err
 }

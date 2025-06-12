@@ -1,4 +1,4 @@
-// Copyright (C) 2019-2023 Nicola Murino
+// Copyright (C) 2019 Nicola Murino
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published
@@ -19,6 +19,7 @@ package vfs
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"mime"
@@ -26,19 +27,20 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
 	"cloud.google.com/go/storage"
 	"github.com/eikenb/pipeat"
 	"github.com/pkg/sftp"
+	"github.com/rs/xid"
 	"google.golang.org/api/googleapi"
 	"google.golang.org/api/iterator"
 	"google.golang.org/api/option"
 
 	"github.com/drakkan/sftpgo/v2/internal/logger"
 	"github.com/drakkan/sftpgo/v2/internal/metric"
-	"github.com/drakkan/sftpgo/v2/internal/plugin"
 	"github.com/drakkan/sftpgo/v2/internal/util"
 	"github.com/drakkan/sftpgo/v2/internal/version"
 )
@@ -48,7 +50,7 @@ const (
 )
 
 var (
-	gcsDefaultFieldsSelection = []string{"Name", "Size", "Deleted", "Updated", "ContentType"}
+	gcsDefaultFieldsSelection = []string{"Name", "Size", "Deleted", "Updated", "ContentType", "Metadata"}
 )
 
 // GCSFs is a Fs implementation for Google Cloud Storage.
@@ -70,11 +72,7 @@ func init() {
 // NewGCSFs returns an GCSFs object that allows to interact with Google Cloud Storage
 func NewGCSFs(connectionID, localTempDir, mountPath string, config GCSFsConfig) (Fs, error) {
 	if localTempDir == "" {
-		if tempPath != "" {
-			localTempDir = tempPath
-		} else {
-			localTempDir = filepath.Clean(os.TempDir())
-		}
+		localTempDir = getLocalTempDir()
 	}
 
 	var err error
@@ -89,7 +87,9 @@ func NewGCSFs(connectionID, localTempDir, mountPath string, config GCSFsConfig) 
 	if err = fs.config.validate(); err != nil {
 		return fs, err
 	}
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
 	if fs.config.AutomaticCredentials > 0 {
 		fs.svc, err = storage.NewClient(ctx)
 	} else {
@@ -115,10 +115,10 @@ func (fs *GCSFs) ConnectionID() string {
 // Stat returns a FileInfo describing the named file
 func (fs *GCSFs) Stat(name string) (os.FileInfo, error) {
 	if name == "" || name == "/" || name == "." {
-		return updateFileInfoModTime(fs.getStorageID(), name, NewFileInfo(name, true, 0, time.Unix(0, 0), false))
+		return NewFileInfo(name, true, 0, time.Unix(0, 0), false), nil
 	}
 	if fs.config.KeyPrefix == name+"/" {
-		return updateFileInfoModTime(fs.getStorageID(), name, NewFileInfo(name, true, 0, time.Unix(0, 0), false))
+		return NewFileInfo(name, true, 0, time.Unix(0, 0), false), nil
 	}
 	return fs.getObjectStat(name)
 }
@@ -129,17 +129,27 @@ func (fs *GCSFs) Lstat(name string) (os.FileInfo, error) {
 }
 
 // Open opens the named file for reading
-func (fs *GCSFs) Open(name string, offset int64) (File, *pipeat.PipeReaderAt, func(), error) {
+func (fs *GCSFs) Open(name string, offset int64) (File, PipeReader, func(), error) {
 	r, w, err := pipeat.PipeInDir(fs.localTempDir)
 	if err != nil {
 		return nil, nil, nil, err
+	}
+	p := NewPipeReader(r)
+	if readMetadata > 0 {
+		attrs, err := fs.headObject(name)
+		if err != nil {
+			r.Close()
+			w.Close()
+			return nil, nil, nil, err
+		}
+		p.setMetadata(attrs.Metadata)
 	}
 	bkt := fs.svc.Bucket(fs.config.Bucket)
 	obj := bkt.Object(name)
 	ctx, cancelFn := context.WithCancel(context.Background())
 	objectReader, err := obj.NewRangeReader(ctx, offset, -1)
 	if err == nil && offset > 0 && objectReader.Attrs.ContentEncoding == "gzip" {
-		err = fmt.Errorf("range request is not possible for gzip content encoding, requested offset %v", offset)
+		err = fmt.Errorf("range request is not possible for gzip content encoding, requested offset %d", offset)
 		objectReader.Close()
 	}
 	if err != nil {
@@ -157,22 +167,32 @@ func (fs *GCSFs) Open(name string, offset int64) (File, *pipeat.PipeReaderAt, fu
 		fsLog(fs, logger.LevelDebug, "download completed, path: %q size: %v, err: %+v", name, n, err)
 		metric.GCSTransferCompleted(n, 1, err)
 	}()
-	return nil, r, cancelFn, nil
+	return nil, p, cancelFn, nil
 }
 
 // Create creates or opens the named file for writing
-func (fs *GCSFs) Create(name string, flag int) (File, *PipeWriter, func(), error) {
+func (fs *GCSFs) Create(name string, flag, checks int) (File, PipeWriter, func(), error) {
+	if checks&CheckParentDir != 0 {
+		_, err := fs.Stat(path.Dir(name))
+		if err != nil {
+			return nil, nil, nil, err
+		}
+	}
 	r, w, err := pipeat.PipeInDir(fs.localTempDir)
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	p := NewPipeWriter(w)
+	var partialFileName string
+	var attrs *storage.ObjectAttrs
+	var statErr error
+
 	bkt := fs.svc.Bucket(fs.config.Bucket)
 	obj := bkt.Object(name)
+
 	if flag == -1 {
 		obj = obj.If(storage.Conditions{DoesNotExist: true})
 	} else {
-		attrs, statErr := fs.headObject(name)
+		attrs, statErr = fs.headObject(name)
 		if statErr == nil {
 			obj = obj.If(storage.Conditions{GenerationMatch: attrs.Generation})
 		} else if fs.IsNotExist(statErr) {
@@ -181,30 +201,35 @@ func (fs *GCSFs) Create(name string, flag int) (File, *PipeWriter, func(), error
 			fsLog(fs, logger.LevelWarn, "unable to set precondition for %q, stat err: %v", name, statErr)
 		}
 	}
-
 	ctx, cancelFn := context.WithCancel(context.Background())
-	objectWriter := obj.NewWriter(ctx)
+
+	var p PipeWriter
+	var objectWriter *storage.Writer
+	if checks&CheckResume != 0 {
+		if statErr != nil {
+			cancelFn()
+			r.Close()
+			w.Close()
+			return nil, nil, nil, fmt.Errorf("unable to resume %q stat error: %w", name, statErr)
+		}
+		p = newPipeWriterAtOffset(w, attrs.Size)
+		partialFileName = fs.getTempObject(name)
+		partialObj := bkt.Object(partialFileName)
+		partialObj = partialObj.If(storage.Conditions{DoesNotExist: true})
+		objectWriter = partialObj.NewWriter(ctx)
+	} else {
+		p = NewPipeWriter(w)
+		objectWriter = obj.NewWriter(ctx)
+	}
+
 	if fs.config.UploadPartSize > 0 {
 		objectWriter.ChunkSize = int(fs.config.UploadPartSize) * 1024 * 1024
 	}
 	if fs.config.UploadPartMaxTime > 0 {
 		objectWriter.ChunkRetryDeadline = time.Duration(fs.config.UploadPartMaxTime) * time.Second
 	}
-	var contentType string
-	if flag == -1 {
-		contentType = dirMimeType
-	} else {
-		contentType = mime.TypeByExtension(path.Ext(name))
-	}
-	if contentType != "" {
-		objectWriter.ObjectAttrs.ContentType = contentType
-	}
-	if fs.config.StorageClass != "" {
-		objectWriter.ObjectAttrs.StorageClass = fs.config.StorageClass
-	}
-	if fs.config.ACL != "" {
-		objectWriter.PredefinedACL = fs.config.ACL
-	}
+	fs.setWriterAttrs(objectWriter, flag, name)
+
 	go func() {
 		defer cancelFn()
 
@@ -213,12 +238,21 @@ func (fs *GCSFs) Create(name string, flag int) (File, *PipeWriter, func(), error
 		if err == nil {
 			err = closeErr
 		}
+		if err == nil && partialFileName != "" {
+			partialObject := bkt.Object(partialFileName)
+			partialObject = partialObject.If(storage.Conditions{GenerationMatch: objectWriter.Attrs().Generation})
+			err = fs.composeObjects(ctx, obj, partialObject)
+		}
 		r.CloseWithError(err) //nolint:errcheck
 		p.Done(err)
 		fsLog(fs, logger.LevelDebug, "upload completed, path: %q, acl: %q, readed bytes: %v, err: %+v",
 			name, fs.config.ACL, n, err)
 		metric.GCSTransferCompleted(n, 0, err)
 	}()
+
+	if uploadMode&8 != 0 {
+		return nil, p, nil, nil
+	}
 	return nil, p, cancelFn, nil
 }
 
@@ -227,11 +261,15 @@ func (fs *GCSFs) Rename(source, target string) (int, int64, error) {
 	if source == target {
 		return -1, -1, nil
 	}
+	_, err := fs.Stat(path.Dir(target))
+	if err != nil {
+		return -1, -1, err
+	}
 	fi, err := fs.getObjectStat(source)
 	if err != nil {
 		return -1, -1, err
 	}
-	return fs.renameInternal(source, target, fi)
+	return fs.renameInternal(source, target, fi, 0)
 }
 
 // Remove removes the named file or (empty) directory.
@@ -263,14 +301,12 @@ func (fs *GCSFs) Remove(name string, isDir bool) error {
 	err := obj.Delete(ctx)
 	if isDir && fs.IsNotExist(err) {
 		// we can have directories without a trailing "/" (created using v2.1.0 and before)
+		ctx, cancelFn := context.WithDeadline(context.Background(), time.Now().Add(fs.ctxTimeout))
+		defer cancelFn()
+
 		err = fs.svc.Bucket(fs.config.Bucket).Object(strings.TrimSuffix(name, "/")).Delete(ctx)
 	}
 	metric.GCSDeleteObjectCompleted(err)
-	if plugin.Handler.HasMetadater() && err == nil && !isDir {
-		if errMetadata := plugin.Handler.RemoveMetadata(fs.getStorageID(), ensureAbsPath(name)); errMetadata != nil {
-			fsLog(fs, logger.LevelWarn, "unable to remove metadata for path %q: %+v", name, errMetadata)
-		}
-	}
 	return err
 }
 
@@ -305,21 +341,31 @@ func (*GCSFs) Chmod(_ string, _ os.FileMode) error {
 
 // Chtimes changes the access and modification times of the named file.
 func (fs *GCSFs) Chtimes(name string, _, mtime time.Time, isUploading bool) error {
-	if !plugin.Handler.HasMetadater() {
-		return ErrVfsUnsupported
+	if isUploading {
+		return nil
 	}
-	if !isUploading {
-		info, err := fs.Stat(name)
-		if err != nil {
-			return err
-		}
-		if info.IsDir() {
-			return ErrVfsUnsupported
-		}
+	obj := fs.svc.Bucket(fs.config.Bucket).Object(name)
+	attrs, err := fs.headObject(name)
+	if err != nil {
+		return err
 	}
+	obj = obj.If(storage.Conditions{MetagenerationMatch: attrs.Metageneration})
 
-	return plugin.Handler.SetModificationTime(fs.getStorageID(), ensureAbsPath(name),
-		util.GetTimeAsMsSinceEpoch(mtime))
+	ctx, cancelFn := context.WithDeadline(context.Background(), time.Now().Add(fs.ctxTimeout))
+	defer cancelFn()
+
+	metadata := attrs.Metadata
+	if metadata == nil {
+		metadata = make(map[string]string)
+	}
+	metadata[lastModifiedField] = strconv.FormatInt(mtime.UnixMilli(), 10)
+
+	objectAttrsToUpdate := storage.ObjectAttrsToUpdate{
+		Metadata: metadata,
+	}
+	_, err = obj.Update(ctx, objectAttrsToUpdate)
+
+	return err
 }
 
 // Truncate changes the size of the named file.
@@ -331,86 +377,35 @@ func (*GCSFs) Truncate(_ string, _ int64) error {
 
 // ReadDir reads the directory named by dirname and returns
 // a list of directory entries.
-func (fs *GCSFs) ReadDir(dirname string) ([]os.FileInfo, error) {
-	var result []os.FileInfo
+func (fs *GCSFs) ReadDir(dirname string) (DirLister, error) {
 	// dirname must be already cleaned
 	prefix := fs.getPrefix(dirname)
-
 	query := &storage.Query{Prefix: prefix, Delimiter: "/"}
 	err := query.SetAttrSelection(gcsDefaultFieldsSelection)
 	if err != nil {
 		return nil, err
 	}
-
-	modTimes, err := getFolderModTimes(fs.getStorageID(), dirname)
-	if err != nil {
-		return result, err
-	}
-
-	prefixes := make(map[string]bool)
-	ctx, cancelFn := context.WithDeadline(context.Background(), time.Now().Add(fs.ctxLongTimeout))
-	defer cancelFn()
-
 	bkt := fs.svc.Bucket(fs.config.Bucket)
-	it := bkt.Objects(ctx, query)
-	pager := iterator.NewPager(it, defaultGCSPageSize, "")
 
-	for {
-		var objects []*storage.ObjectAttrs
-		pageToken, err := pager.NextPage(&objects)
-		if err != nil {
-			metric.GCSListObjectsCompleted(err)
-			return result, err
-		}
-
-		for _, attrs := range objects {
-			if attrs.Prefix != "" {
-				name, _ := fs.resolve(attrs.Prefix, prefix, attrs.ContentType)
-				if name == "" {
-					continue
-				}
-				if _, ok := prefixes[name]; ok {
-					continue
-				}
-				result = append(result, NewFileInfo(name, true, 0, time.Unix(0, 0), false))
-				prefixes[name] = true
-			} else {
-				name, isDir := fs.resolve(attrs.Name, prefix, attrs.ContentType)
-				if name == "" {
-					continue
-				}
-				if !attrs.Deleted.IsZero() {
-					continue
-				}
-				if isDir {
-					// check if the dir is already included, it will be sent as blob prefix if it contains at least one item
-					if _, ok := prefixes[name]; ok {
-						continue
-					}
-					prefixes[name] = true
-				}
-				modTime := attrs.Updated
-				if t, ok := modTimes[name]; ok {
-					modTime = util.GetTimeFromMsecSinceEpoch(t)
-				}
-				result = append(result, NewFileInfo(name, isDir, attrs.Size, modTime, false))
-			}
-		}
-
-		objects = nil
-		if pageToken == "" {
-			break
-		}
-	}
-
-	metric.GCSListObjectsCompleted(nil)
-	return result, nil
+	return &gcsDirLister{
+		bucket:   bkt,
+		query:    query,
+		timeout:  fs.ctxTimeout,
+		prefix:   prefix,
+		prefixes: make(map[string]bool),
+	}, nil
 }
 
 // IsUploadResumeSupported returns true if resuming uploads is supported.
 // Resuming uploads is not supported on GCS
 func (*GCSFs) IsUploadResumeSupported() bool {
 	return false
+}
+
+// IsConditionalUploadResumeSupported returns if resuming uploads is supported
+// for the specified size
+func (*GCSFs) IsConditionalUploadResumeSupported(_ int64) bool {
+	return true
 }
 
 // IsAtomicUploadSupported returns true if atomic upload is supported.
@@ -456,13 +451,13 @@ func (*GCSFs) IsNotSupported(err error) bool {
 	if err == nil {
 		return false
 	}
-	return err == ErrVfsUnsupported
+	return errors.Is(err, ErrVfsUnsupported)
 }
 
 // CheckRootPath creates the specified local root directory if it does not exists
 func (fs *GCSFs) CheckRootPath(username string, uid int, gid int) bool {
 	// we need a local directory for temporary files
-	osFs := NewOsFs(fs.ConnectionID(), fs.localTempDir, "")
+	osFs := NewOsFs(fs.ConnectionID(), fs.localTempDir, "", nil)
 	return osFs.CheckRootPath(username, uid, gid)
 }
 
@@ -470,67 +465,6 @@ func (fs *GCSFs) CheckRootPath(username string, uid int, gid int) bool {
 // and their size
 func (fs *GCSFs) ScanRootDirContents() (int, int64, error) {
 	return fs.GetDirSize(fs.config.KeyPrefix)
-}
-
-func (fs *GCSFs) getFileNamesInPrefix(fsPrefix string) (map[string]bool, error) {
-	fileNames := make(map[string]bool)
-	prefix := ""
-	if fsPrefix != "/" {
-		prefix = strings.TrimPrefix(fsPrefix, "/")
-	}
-
-	query := &storage.Query{
-		Prefix:    prefix,
-		Delimiter: "/",
-	}
-	err := query.SetAttrSelection(gcsDefaultFieldsSelection)
-	if err != nil {
-		return fileNames, err
-	}
-	ctx, cancelFn := context.WithDeadline(context.Background(), time.Now().Add(fs.ctxLongTimeout))
-	defer cancelFn()
-
-	bkt := fs.svc.Bucket(fs.config.Bucket)
-	it := bkt.Objects(ctx, query)
-	pager := iterator.NewPager(it, defaultGCSPageSize, "")
-
-	for {
-		var objects []*storage.ObjectAttrs
-		pageToken, err := pager.NextPage(&objects)
-		if err != nil {
-			metric.GCSListObjectsCompleted(err)
-			return fileNames, err
-		}
-
-		for _, attrs := range objects {
-			if !attrs.Deleted.IsZero() {
-				continue
-			}
-			if attrs.Prefix == "" {
-				name, isDir := fs.resolve(attrs.Name, prefix, attrs.ContentType)
-				if name == "" {
-					continue
-				}
-				if isDir {
-					continue
-				}
-				fileNames[name] = true
-			}
-		}
-
-		objects = nil
-		if pageToken == "" {
-			break
-		}
-	}
-
-	metric.GCSListObjectsCompleted(nil)
-	return fileNames, nil
-}
-
-// CheckMetadata checks the metadata consistency
-func (fs *GCSFs) CheckMetadata() error {
-	return fsMetadataCheck(fs, fs.getStorageID(), fs.config.KeyPrefix)
 }
 
 // GetDirSize returns the number of files and the size for a folder
@@ -545,21 +479,20 @@ func (fs *GCSFs) GetDirSize(dirname string) (int, int64, error) {
 	if err != nil {
 		return numFiles, size, err
 	}
-	ctx, cancelFn := context.WithDeadline(context.Background(), time.Now().Add(fs.ctxLongTimeout))
-	defer cancelFn()
 
-	bkt := fs.svc.Bucket(fs.config.Bucket)
-	it := bkt.Objects(ctx, query)
-	pager := iterator.NewPager(it, defaultGCSPageSize, "")
+	iteratePage := func(nextPageToken string) (string, error) {
+		ctx, cancelFn := context.WithDeadline(context.Background(), time.Now().Add(fs.ctxTimeout))
+		defer cancelFn()
 
-	for {
+		bkt := fs.svc.Bucket(fs.config.Bucket)
+		it := bkt.Objects(ctx, query)
+		pager := iterator.NewPager(it, defaultGCSPageSize, nextPageToken)
+
 		var objects []*storage.ObjectAttrs
 		pageToken, err := pager.NextPage(&objects)
 		if err != nil {
-			metric.GCSListObjectsCompleted(err)
-			return numFiles, size, err
+			return pageToken, err
 		}
-
 		for _, attrs := range objects {
 			if !attrs.Deleted.IsZero() {
 				continue
@@ -570,12 +503,18 @@ func (fs *GCSFs) GetDirSize(dirname string) (int, int64, error) {
 			}
 			numFiles++
 			size += attrs.Size
-			if numFiles%1000 == 0 {
-				fsLog(fs, logger.LevelDebug, "dirname %q scan in progress, files: %d, size: %d", dirname, numFiles, size)
-			}
 		}
+		return pageToken, nil
+	}
 
-		objects = nil
+	pageToken := ""
+	for {
+		pageToken, err = iteratePage(pageToken)
+		if err != nil {
+			metric.GCSListObjectsCompleted(err)
+			return numFiles, size, err
+		}
+		fsLog(fs, logger.LevelDebug, "scan in progress for %q, files: %d, size: %d", dirname, numFiles, size)
 		if pageToken == "" {
 			break
 		}
@@ -625,22 +564,20 @@ func (fs *GCSFs) Walk(root string, walkFn filepath.WalkFunc) error {
 		return err
 	}
 
-	ctx, cancelFn := context.WithDeadline(context.Background(), time.Now().Add(fs.ctxLongTimeout))
-	defer cancelFn()
+	iteratePage := func(nextPageToken string) (string, error) {
+		ctx, cancelFn := context.WithDeadline(context.Background(), time.Now().Add(fs.ctxTimeout))
+		defer cancelFn()
 
-	bkt := fs.svc.Bucket(fs.config.Bucket)
-	it := bkt.Objects(ctx, query)
-	pager := iterator.NewPager(it, defaultGCSPageSize, "")
+		bkt := fs.svc.Bucket(fs.config.Bucket)
+		it := bkt.Objects(ctx, query)
+		pager := iterator.NewPager(it, defaultGCSPageSize, nextPageToken)
 
-	for {
 		var objects []*storage.ObjectAttrs
 		pageToken, err := pager.NextPage(&objects)
 		if err != nil {
 			walkFn(root, nil, err) //nolint:errcheck
-			metric.GCSListObjectsCompleted(err)
-			return err
+			return pageToken, err
 		}
-
 		for _, attrs := range objects {
 			if !attrs.Deleted.IsZero() {
 				continue
@@ -649,13 +586,26 @@ func (fs *GCSFs) Walk(root string, walkFn filepath.WalkFunc) error {
 			if name == "" {
 				continue
 			}
-			err = walkFn(attrs.Name, NewFileInfo(name, isDir, attrs.Size, attrs.Updated, false), nil)
+			objectModTime := attrs.Updated
+			if val := getLastModified(attrs.Metadata); val > 0 {
+				objectModTime = util.GetTimeFromMsecSinceEpoch(val)
+			}
+			err = walkFn(attrs.Name, NewFileInfo(name, isDir, attrs.Size, objectModTime, false), nil)
 			if err != nil {
-				return err
+				return pageToken, err
 			}
 		}
 
-		objects = nil
+		return pageToken, nil
+	}
+
+	pageToken := ""
+	for {
+		pageToken, err = iteratePage(pageToken)
+		if err != nil {
+			metric.GCSListObjectsCompleted(err)
+			return err
+		}
 		if pageToken == "" {
 			break
 		}
@@ -688,8 +638,25 @@ func (fs *GCSFs) ResolvePath(virtualPath string) (string, error) {
 }
 
 // CopyFile implements the FsFileCopier interface
-func (fs *GCSFs) CopyFile(source, target string, _ int64) error {
-	return fs.copyFileInternal(source, target)
+func (fs *GCSFs) CopyFile(source, target string, srcSize int64) (int, int64, error) {
+	numFiles := 1
+	sizeDiff := srcSize
+	var conditions *storage.Conditions
+	attrs, err := fs.headObject(target)
+	if err == nil {
+		sizeDiff -= attrs.Size
+		numFiles = 0
+		conditions = &storage.Conditions{GenerationMatch: attrs.Generation}
+	} else {
+		if !fs.IsNotExist(err) {
+			return 0, 0, err
+		}
+		conditions = &storage.Conditions{DoesNotExist: true}
+	}
+	if err := fs.copyFileInternal(source, target, conditions); err != nil {
+		return 0, 0, err
+	}
+	return numFiles, sizeDiff, nil
 }
 
 func (fs *GCSFs) resolve(name, prefix, contentType string) (string, bool) {
@@ -704,14 +671,17 @@ func (fs *GCSFs) resolve(name, prefix, contentType string) (string, bool) {
 	return result, isDir
 }
 
-// getObjectStat returns the stat result and the real object name as first value
+// getObjectStat returns the stat result
 func (fs *GCSFs) getObjectStat(name string) (os.FileInfo, error) {
 	attrs, err := fs.headObject(name)
 	if err == nil {
 		objSize := attrs.Size
 		objectModTime := attrs.Updated
+		if val := getLastModified(attrs.Metadata); val > 0 {
+			objectModTime = util.GetTimeFromMsecSinceEpoch(val)
+		}
 		isDir := attrs.ContentType == dirMimeType || strings.HasSuffix(attrs.Name, "/")
-		return updateFileInfoModTime(fs.getStorageID(), name, NewFileInfo(name, isDir, objSize, objectModTime, false))
+		return NewFileInfo(name, isDir, objSize, objectModTime, false), nil
 	}
 	if !fs.IsNotExist(err) {
 		return nil, err
@@ -722,27 +692,80 @@ func (fs *GCSFs) getObjectStat(name string) (os.FileInfo, error) {
 		return nil, err
 	}
 	if hasContents {
-		return updateFileInfoModTime(fs.getStorageID(), name, NewFileInfo(name, true, 0, time.Unix(0, 0), false))
+		return NewFileInfo(name, true, 0, time.Unix(0, 0), false), nil
 	}
 	// finally check if this is an object with a trailing /
 	attrs, err = fs.headObject(name + "/")
 	if err != nil {
 		return nil, err
 	}
-	return updateFileInfoModTime(fs.getStorageID(), name, NewFileInfo(name, true, attrs.Size, attrs.Updated, false))
+	objectModTime := attrs.Updated
+	if val := getLastModified(attrs.Metadata); val > 0 {
+		objectModTime = util.GetTimeFromMsecSinceEpoch(val)
+	}
+	return NewFileInfo(name, true, attrs.Size, objectModTime, false), nil
 }
 
-func (fs *GCSFs) copyFileInternal(source, target string) error {
+func (fs *GCSFs) setWriterAttrs(objectWriter *storage.Writer, flag int, name string) {
+	var contentType string
+	if flag == -1 {
+		contentType = dirMimeType
+	} else {
+		contentType = mime.TypeByExtension(path.Ext(name))
+	}
+	if contentType != "" {
+		objectWriter.ObjectAttrs.ContentType = contentType
+	}
+	if fs.config.StorageClass != "" {
+		objectWriter.ObjectAttrs.StorageClass = fs.config.StorageClass
+	}
+	if fs.config.ACL != "" {
+		objectWriter.PredefinedACL = fs.config.ACL
+	}
+}
+
+func (fs *GCSFs) composeObjects(ctx context.Context, dst, partialObject *storage.ObjectHandle) error {
+	fsLog(fs, logger.LevelDebug, "start object compose for partial file %q, destination %q",
+		partialObject.ObjectName(), dst.ObjectName())
+	composer := dst.ComposerFrom(dst, partialObject)
+	if fs.config.StorageClass != "" {
+		composer.StorageClass = fs.config.StorageClass
+	}
+	if fs.config.ACL != "" {
+		composer.PredefinedACL = fs.config.ACL
+	}
+	contentType := mime.TypeByExtension(path.Ext(dst.ObjectName()))
+	if contentType != "" {
+		composer.ContentType = contentType
+	}
+	_, err := composer.Run(ctx)
+	fsLog(fs, logger.LevelDebug, "object compose for %q finished, err: %v", dst.ObjectName(), err)
+
+	delCtx, cancelFn := context.WithDeadline(context.Background(), time.Now().Add(fs.ctxTimeout))
+	defer cancelFn()
+
+	errDelete := partialObject.Delete(delCtx)
+	metric.GCSDeleteObjectCompleted(errDelete)
+	fsLog(fs, logger.LevelDebug, "deleted partial file %q after composing with %q, err: %v",
+		partialObject.ObjectName(), dst.ObjectName(), errDelete)
+	return err
+}
+
+func (fs *GCSFs) copyFileInternal(source, target string, conditions *storage.Conditions) error {
 	src := fs.svc.Bucket(fs.config.Bucket).Object(source)
 	dst := fs.svc.Bucket(fs.config.Bucket).Object(target)
-	attrs, statErr := fs.headObject(target)
-	if statErr == nil {
-		dst = dst.If(storage.Conditions{GenerationMatch: attrs.Generation})
-	} else if fs.IsNotExist(statErr) {
-		dst = dst.If(storage.Conditions{DoesNotExist: true})
+	if conditions != nil {
+		dst = dst.If(*conditions)
 	} else {
-		fsLog(fs, logger.LevelWarn, "unable to set precondition for rename, target %q, stat err: %v",
-			target, statErr)
+		attrs, err := fs.headObject(target)
+		if err == nil {
+			dst = dst.If(storage.Conditions{GenerationMatch: attrs.Generation})
+		} else if fs.IsNotExist(err) {
+			dst = dst.If(storage.Conditions{DoesNotExist: true})
+		} else {
+			fsLog(fs, logger.LevelWarn, "unable to set precondition for copy, target %q, stat err: %v",
+				target, err)
+		}
 	}
 
 	ctx, cancelFn := context.WithDeadline(context.Background(), time.Now().Add(fs.ctxLongTimeout))
@@ -764,7 +787,7 @@ func (fs *GCSFs) copyFileInternal(source, target string) error {
 	return err
 }
 
-func (fs *GCSFs) renameInternal(source, target string, fi os.FileInfo) (int, int64, error) {
+func (fs *GCSFs) renameInternal(source, target string, fi os.FileInfo, recursion int) (int, int64, error) {
 	var numFiles int
 	var filesSize int64
 
@@ -775,42 +798,26 @@ func (fs *GCSFs) renameInternal(source, target string, fi os.FileInfo) (int, int
 				return numFiles, filesSize, err
 			}
 			if hasContents {
-				return numFiles, filesSize, fmt.Errorf("cannot rename non empty directory: %q", source)
+				return numFiles, filesSize, fmt.Errorf("%w: cannot rename non empty directory: %q", ErrVfsUnsupported, source)
 			}
 		}
 		if err := fs.mkdirInternal(target); err != nil {
 			return numFiles, filesSize, err
 		}
 		if renameMode == 1 {
-			entries, err := fs.ReadDir(source)
+			files, size, err := doRecursiveRename(fs, source, target, fs.renameInternal, recursion)
+			numFiles += files
+			filesSize += size
 			if err != nil {
 				return numFiles, filesSize, err
 			}
-			for _, info := range entries {
-				sourceEntry := fs.Join(source, info.Name())
-				targetEntry := fs.Join(target, info.Name())
-				files, size, err := fs.renameInternal(sourceEntry, targetEntry, info)
-				if err != nil {
-					return numFiles, filesSize, err
-				}
-				numFiles += files
-				filesSize += size
-			}
 		}
 	} else {
-		if err := fs.copyFileInternal(source, target); err != nil {
+		if err := fs.copyFileInternal(source, target, nil); err != nil {
 			return numFiles, filesSize, err
 		}
 		numFiles++
 		filesSize += fi.Size()
-		if plugin.Handler.HasMetadater() {
-			err := plugin.Handler.SetModificationTime(fs.getStorageID(), ensureAbsPath(target),
-				util.GetTimeAsMsSinceEpoch(fi.ModTime()))
-			if err != nil {
-				fsLog(fs, logger.LevelWarn, "unable to preserve modification time after renaming %q -> %q: %+v",
-					source, target, err)
-			}
-		}
 	}
 	err := fs.Remove(source, fi.IsDir())
 	if fs.IsNotExist(err) {
@@ -823,7 +830,7 @@ func (fs *GCSFs) mkdirInternal(name string) error {
 	if !strings.HasSuffix(name, "/") {
 		name += "/"
 	}
-	_, w, _, err := fs.Create(name, -1)
+	_, w, _, err := fs.Create(name, -1, 0)
 	if err != nil {
 		return err
 	}
@@ -908,6 +915,106 @@ func (*GCSFs) GetAvailableDiskSize(_ string) (*sftp.StatVFS, error) {
 	return nil, ErrStorageSizeUnavailable
 }
 
-func (fs *GCSFs) getStorageID() string {
-	return fmt.Sprintf("gs://%v", fs.config.Bucket)
+func (*GCSFs) getTempObject(name string) string {
+	dir := filepath.Dir(name)
+	guid := xid.New().String()
+	return filepath.Join(dir, ".sftpgo-partial."+guid+"."+filepath.Base(name))
+}
+
+type gcsDirLister struct {
+	baseDirLister
+	bucket        *storage.BucketHandle
+	query         *storage.Query
+	timeout       time.Duration
+	nextPageToken string
+	noMorePages   bool
+	prefix        string
+	prefixes      map[string]bool
+	metricUpdated bool
+}
+
+func (l *gcsDirLister) resolve(name, contentType string) (string, bool) {
+	result := strings.TrimPrefix(name, l.prefix)
+	isDir := strings.HasSuffix(result, "/")
+	if isDir {
+		result = strings.TrimSuffix(result, "/")
+	}
+	if contentType == dirMimeType {
+		isDir = true
+	}
+	return result, isDir
+}
+
+func (l *gcsDirLister) Next(limit int) ([]os.FileInfo, error) {
+	if limit <= 0 {
+		return nil, errInvalidDirListerLimit
+	}
+	if len(l.cache) >= limit {
+		return l.returnFromCache(limit), nil
+	}
+
+	if l.noMorePages {
+		if !l.metricUpdated {
+			l.metricUpdated = true
+			metric.GCSListObjectsCompleted(nil)
+		}
+		return l.returnFromCache(limit), io.EOF
+	}
+
+	ctx, cancelFn := context.WithDeadline(context.Background(), time.Now().Add(l.timeout))
+	defer cancelFn()
+
+	it := l.bucket.Objects(ctx, l.query)
+	paginator := iterator.NewPager(it, defaultGCSPageSize, l.nextPageToken)
+	var objects []*storage.ObjectAttrs
+
+	pageToken, err := paginator.NextPage(&objects)
+	if err != nil {
+		metric.GCSListObjectsCompleted(err)
+		return l.cache, err
+	}
+
+	for _, attrs := range objects {
+		if attrs.Prefix != "" {
+			name, _ := l.resolve(attrs.Prefix, attrs.ContentType)
+			if name == "" {
+				continue
+			}
+			if _, ok := l.prefixes[name]; ok {
+				continue
+			}
+			l.cache = append(l.cache, NewFileInfo(name, true, 0, time.Unix(0, 0), false))
+			l.prefixes[name] = true
+		} else {
+			name, isDir := l.resolve(attrs.Name, attrs.ContentType)
+			if name == "" {
+				continue
+			}
+			if !attrs.Deleted.IsZero() {
+				continue
+			}
+			if isDir {
+				// check if the dir is already included, it will be sent as blob prefix if it contains at least one item
+				if _, ok := l.prefixes[name]; ok {
+					continue
+				}
+				l.prefixes[name] = true
+			}
+			modTime := attrs.Updated
+			if val := getLastModified(attrs.Metadata); val > 0 {
+				modTime = util.GetTimeFromMsecSinceEpoch(val)
+			}
+			l.cache = append(l.cache, NewFileInfo(name, isDir, attrs.Size, modTime, false))
+		}
+	}
+
+	l.nextPageToken = pageToken
+	l.noMorePages = (l.nextPageToken == "")
+
+	return l.returnFromCache(limit), nil
+}
+
+func (l *gcsDirLister) Close() error {
+	clear(l.prefixes)
+	return l.baseDirLister.Close()
 }

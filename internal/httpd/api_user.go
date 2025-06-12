@@ -1,4 +1,4 @@
-// Copyright (C) 2019-2023 Nicola Murino
+// Copyright (C) 2019 Nicola Murino
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published
@@ -27,7 +27,6 @@ import (
 
 	"github.com/drakkan/sftpgo/v2/internal/common"
 	"github.com/drakkan/sftpgo/v2/internal/dataprovider"
-	"github.com/drakkan/sftpgo/v2/internal/kms"
 	"github.com/drakkan/sftpgo/v2/internal/logger"
 	"github.com/drakkan/sftpgo/v2/internal/smtp"
 	"github.com/drakkan/sftpgo/v2/internal/util"
@@ -62,16 +61,18 @@ func getUserByUsername(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	username := getURLParam(r, "username")
-	renderUser(w, r, username, claims.Role, http.StatusOK)
+	renderUser(w, r, username, &claims, http.StatusOK)
 }
 
-func renderUser(w http.ResponseWriter, r *http.Request, username, role string, status int) {
-	user, err := dataprovider.UserExists(username, role)
+func renderUser(w http.ResponseWriter, r *http.Request, username string, claims *jwtTokenClaims, status int) {
+	user, err := dataprovider.UserExists(username, claims.Role)
 	if err != nil {
 		sendAPIResponse(w, r, err, "", getRespStatus(err))
 		return
 	}
-	user.PrepareForRendering()
+	if hideConfidentialData(claims, r) {
+		user.PrepareForRendering()
+	}
 	if status != http.StatusOK {
 		ctx := context.WithValue(r.Context(), render.StatusCtxKey, status)
 		render.JSON(w, r.WithContext(ctx), user)
@@ -116,7 +117,7 @@ func addUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Add("Location", fmt.Sprintf("%s/%s", userPath, url.PathEscape(user.Username)))
-	renderUser(w, r, user.Username, claims.Role, http.StatusCreated)
+	renderUser(w, r, user.Username, &claims, http.StatusCreated)
 }
 
 func disableUser2FA(w http.ResponseWriter, r *http.Request) {
@@ -130,6 +131,10 @@ func disableUser2FA(w http.ResponseWriter, r *http.Request) {
 	user, err := dataprovider.UserExists(username, claims.Role)
 	if err != nil {
 		sendAPIResponse(w, r, err, "", getRespStatus(err))
+		return
+	}
+	if !user.Filters.TOTPConfig.Enabled {
+		sendAPIResponse(w, r, nil, "two-factor authentication is not enabled", http.StatusBadRequest)
 		return
 	}
 	user.Filters.RecoveryCodes = nil
@@ -180,10 +185,7 @@ func updateUser(w http.ResponseWriter, r *http.Request) {
 	updatedUser.Filters.TOTPConfig = user.Filters.TOTPConfig
 	updatedUser.LastPasswordChange = user.LastPasswordChange
 	updatedUser.SetEmptySecretsIfNil()
-	updateEncryptedSecrets(&updatedUser.FsConfig, user.FsConfig.S3Config.AccessSecret, user.FsConfig.AzBlobConfig.AccountKey,
-		user.FsConfig.AzBlobConfig.SASURL, user.FsConfig.GCSConfig.Credentials, user.FsConfig.CryptConfig.Passphrase,
-		user.FsConfig.SFTPConfig.Password, user.FsConfig.SFTPConfig.PrivateKey, user.FsConfig.SFTPConfig.KeyPassphrase,
-		user.FsConfig.HTTPConfig.Password, user.FsConfig.HTTPConfig.APIKey)
+	updateEncryptedSecrets(&updatedUser.FsConfig, &user.FsConfig)
 	if claims.Role != "" {
 		updatedUser.Role = claims.Role
 	}
@@ -241,7 +243,7 @@ func resetUserPassword(w http.ResponseWriter, r *http.Request) {
 		sendAPIResponse(w, r, err, "", http.StatusBadRequest)
 		return
 	}
-	_, _, err = handleResetPassword(r, req.Code, req.Password, false)
+	_, _, err = handleResetPassword(r, req.Code, req.Password, req.Password, false)
 	if err != nil {
 		sendAPIResponse(w, r, err, "", getRespStatus(err))
 		return
@@ -269,58 +271,54 @@ func disconnectUser(username, admin, role string) {
 	}
 }
 
-func updateEncryptedSecrets(fsConfig *vfs.Filesystem, currentS3AccessSecret, currentAzAccountKey, currentAzSASUrl,
-	currentGCSCredentials, currentCryptoPassphrase, currentSFTPPassword, currentSFTPKey, currentSFTPKeyPassphrase,
-	currentHTTPPassword, currentHTTPAPIKey *kms.Secret) {
+func updateEncryptedSecrets(fsConfig *vfs.Filesystem, currentFsConfig *vfs.Filesystem) {
 	// we use the new access secret if plain or empty, otherwise the old value
 	switch fsConfig.Provider {
 	case sdk.S3FilesystemProvider:
 		if fsConfig.S3Config.AccessSecret.IsNotPlainAndNotEmpty() {
-			fsConfig.S3Config.AccessSecret = currentS3AccessSecret
+			fsConfig.S3Config.AccessSecret = currentFsConfig.S3Config.AccessSecret
 		}
 	case sdk.AzureBlobFilesystemProvider:
 		if fsConfig.AzBlobConfig.AccountKey.IsNotPlainAndNotEmpty() {
-			fsConfig.AzBlobConfig.AccountKey = currentAzAccountKey
+			fsConfig.AzBlobConfig.AccountKey = currentFsConfig.AzBlobConfig.AccountKey
 		}
 		if fsConfig.AzBlobConfig.SASURL.IsNotPlainAndNotEmpty() {
-			fsConfig.AzBlobConfig.SASURL = currentAzSASUrl
+			fsConfig.AzBlobConfig.SASURL = currentFsConfig.AzBlobConfig.SASURL
 		}
 	case sdk.GCSFilesystemProvider:
 		// for GCS credentials will be cleared if we enable automatic credentials
 		// so keep the old credentials here if no new credentials are provided
 		if !fsConfig.GCSConfig.Credentials.IsPlain() {
-			fsConfig.GCSConfig.Credentials = currentGCSCredentials
+			fsConfig.GCSConfig.Credentials = currentFsConfig.GCSConfig.Credentials
 		}
 	case sdk.CryptedFilesystemProvider:
 		if fsConfig.CryptConfig.Passphrase.IsNotPlainAndNotEmpty() {
-			fsConfig.CryptConfig.Passphrase = currentCryptoPassphrase
+			fsConfig.CryptConfig.Passphrase = currentFsConfig.CryptConfig.Passphrase
 		}
 	case sdk.SFTPFilesystemProvider:
-		updateSFTPFsEncryptedSecrets(fsConfig, currentSFTPPassword, currentSFTPKey, currentSFTPKeyPassphrase)
+		updateSFTPFsEncryptedSecrets(fsConfig, currentFsConfig)
 	case sdk.HTTPFilesystemProvider:
-		updateHTTPFsEncryptedSecrets(fsConfig, currentHTTPPassword, currentHTTPAPIKey)
+		updateHTTPFsEncryptedSecrets(fsConfig, currentFsConfig)
 	}
 }
 
-func updateSFTPFsEncryptedSecrets(fsConfig *vfs.Filesystem, currentSFTPPassword, currentSFTPKey,
-	currentSFTPKeyPassphrase *kms.Secret,
-) {
+func updateSFTPFsEncryptedSecrets(fsConfig *vfs.Filesystem, currentFsConfig *vfs.Filesystem) {
 	if fsConfig.SFTPConfig.Password.IsNotPlainAndNotEmpty() {
-		fsConfig.SFTPConfig.Password = currentSFTPPassword
+		fsConfig.SFTPConfig.Password = currentFsConfig.SFTPConfig.Password
 	}
 	if fsConfig.SFTPConfig.PrivateKey.IsNotPlainAndNotEmpty() {
-		fsConfig.SFTPConfig.PrivateKey = currentSFTPKey
+		fsConfig.SFTPConfig.PrivateKey = currentFsConfig.SFTPConfig.PrivateKey
 	}
 	if fsConfig.SFTPConfig.KeyPassphrase.IsNotPlainAndNotEmpty() {
-		fsConfig.SFTPConfig.KeyPassphrase = currentSFTPKeyPassphrase
+		fsConfig.SFTPConfig.KeyPassphrase = currentFsConfig.SFTPConfig.KeyPassphrase
 	}
 }
 
-func updateHTTPFsEncryptedSecrets(fsConfig *vfs.Filesystem, currentHTTPPassword, currentHTTPAPIKey *kms.Secret) {
+func updateHTTPFsEncryptedSecrets(fsConfig *vfs.Filesystem, currentFsConfig *vfs.Filesystem) {
 	if fsConfig.HTTPConfig.Password.IsNotPlainAndNotEmpty() {
-		fsConfig.HTTPConfig.Password = currentHTTPPassword
+		fsConfig.HTTPConfig.Password = currentFsConfig.HTTPConfig.Password
 	}
 	if fsConfig.HTTPConfig.APIKey.IsNotPlainAndNotEmpty() {
-		fsConfig.HTTPConfig.APIKey = currentHTTPAPIKey
+		fsConfig.HTTPConfig.APIKey = currentFsConfig.HTTPConfig.APIKey
 	}
 }

@@ -1,4 +1,4 @@
-// Copyright (C) 2019-2023 Nicola Murino
+// Copyright (C) 2019 Nicola Murino
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published
@@ -192,15 +192,15 @@ func (c *scpCommand) getUploadFileData(sizeToRead int64, transfer *transfer) err
 		for {
 			n, err := c.connection.channel.Read(buf)
 			if err != nil {
-				c.sendErrorMessage(transfer.Fs, err)
 				transfer.TransferError(err)
 				transfer.Close()
+				c.sendErrorMessage(transfer.Fs, err)
 				return err
 			}
 			_, err = transfer.WriteAt(buf[:n], sizeToRead-remaining)
 			if err != nil {
-				c.sendErrorMessage(transfer.Fs, err)
 				transfer.Close()
+				c.sendErrorMessage(transfer.Fs, err)
 				return err
 			}
 			remaining -= int64(n)
@@ -245,7 +245,7 @@ func (c *scpCommand) handleUploadFile(fs vfs.Fs, resolvedPath, filePath string, 
 
 	maxWriteSize, _ := c.connection.GetMaxWriteSize(diskQuota, false, fileSize, fs.IsUploadResumeSupported())
 
-	file, w, cancelFn, err := fs.Create(filePath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC)
+	file, w, cancelFn, err := fs.Create(filePath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, c.connection.GetCreateChecks(requestPath, isNewFile, false))
 	if err != nil {
 		c.connection.Log(logger.LevelError, "error creating file %q: %v", resolvedPath, err)
 		c.sendErrorMessage(fs, err)
@@ -384,47 +384,65 @@ func (c *scpCommand) handleRecursiveDownload(fs vfs.Fs, dirPath, virtualPath str
 		if err != nil {
 			return err
 		}
-		files, err := fs.ReadDir(dirPath)
+		// dirPath is a fs path, not a virtual path
+		lister, err := fs.ReadDir(dirPath)
 		if err != nil {
 			c.sendErrorMessage(fs, err)
 			return err
 		}
-		files = c.connection.User.FilterListDir(files, fs.GetRelativePath(dirPath))
+		defer lister.Close()
+
+		vdirs := c.connection.User.GetVirtualFoldersInfo(virtualPath)
+
 		var dirs []string
-		for _, file := range files {
-			filePath := fs.GetRelativePath(fs.Join(dirPath, file.Name()))
-			if file.Mode().IsRegular() || file.Mode()&os.ModeSymlink != 0 {
-				err = c.handleDownload(filePath)
-				if err != nil {
-					break
-				}
-			} else if file.IsDir() {
-				dirs = append(dirs, filePath)
+		for {
+			files, err := lister.Next(vfs.ListerBatchSize)
+			finished := errors.Is(err, io.EOF)
+			if err != nil && !finished {
+				c.sendErrorMessage(fs, err)
+				return err
 			}
-		}
-		if err != nil {
-			c.sendErrorMessage(fs, err)
-			return err
-		}
-		for _, dir := range dirs {
-			err = c.handleDownload(dir)
-			if err != nil {
+			files = c.connection.User.FilterListDir(files, fs.GetRelativePath(dirPath))
+			if len(vdirs) > 0 {
+				files = append(files, vdirs...)
+				vdirs = nil
+			}
+			for _, file := range files {
+				filePath := fs.GetRelativePath(fs.Join(dirPath, file.Name()))
+				if file.Mode().IsRegular() || file.Mode()&os.ModeSymlink != 0 {
+					err = c.handleDownload(filePath)
+					if err != nil {
+						c.sendErrorMessage(fs, err)
+						return err
+					}
+				} else if file.IsDir() {
+					dirs = append(dirs, filePath)
+				}
+			}
+			if finished {
 				break
 			}
 		}
-		if err != nil {
+		lister.Close()
+
+		return c.downloadDirs(fs, dirs)
+	}
+	err = errors.New("unable to send directory for non recursive copy")
+	c.sendErrorMessage(nil, err)
+	return err
+}
+
+func (c *scpCommand) downloadDirs(fs vfs.Fs, dirs []string) error {
+	for _, dir := range dirs {
+		if err := c.handleDownload(dir); err != nil {
 			c.sendErrorMessage(fs, err)
 			return err
 		}
-		err = c.sendProtocolMessage("E\n")
-		if err != nil {
-			return err
-		}
-		return c.readConfirmationMessage()
 	}
-	err = fmt.Errorf("unable to send directory for non recursive copy")
-	c.sendErrorMessage(nil, err)
-	return err
+	if err := c.sendProtocolMessage("E\n"); err != nil {
+		return err
+	}
+	return c.readConfirmationMessage()
 }
 
 func (c *scpCommand) sendDownloadFileData(fs vfs.Fs, filePath string, stat os.FileInfo, transfer *transfer) error {

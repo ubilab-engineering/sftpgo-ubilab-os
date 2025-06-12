@@ -1,4 +1,4 @@
-// Copyright (C) 2019-2023 Nicola Murino
+// Copyright (C) 2019 Nicola Murino
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published
@@ -80,7 +80,7 @@ func ServeSubSystemConnection(user *dataprovider.User, connectionID string, read
 		FilePut:  connection,
 		FileCmd:  connection,
 		FileList: connection,
-	}, sftp.WithRSAllocator())
+	})
 
 	defer server.Close()
 	return server.Serve()

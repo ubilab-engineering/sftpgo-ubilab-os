@@ -1,6 +1,8 @@
-FROM golang:1.20-bullseye as builder
+FROM golang:1.23-bookworm as builder
 
 ENV GOFLAGS="-mod=readonly"
+
+RUN apt-get update && apt-get -y upgrade && rm -rf /var/lib/apt/lists/*
 
 RUN mkdir -p /workspace
 WORKDIR /workspace
@@ -28,14 +30,12 @@ ARG DOWNLOAD_PLUGINS=false
 
 RUN if [ "${DOWNLOAD_PLUGINS}" = "true" ]; then apt-get update && apt-get install --no-install-recommends -y curl && ./docker/scripts/download-plugins.sh; fi
 
-RUN apt-get update && apt-get install --no-install-recommends -y openssh-server && rm -rf /var/lib/apt/lists/*
-
-FROM debian:bullseye-slim
+FROM debian:bookworm-slim
 
 # Set to "true" to install jq and the optional git and rsync dependencies
 ARG INSTALL_OPTIONAL_PACKAGES=false
 
-RUN apt-get update && apt-get install --no-install-recommends -y ca-certificates media-types && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get -y upgrade && apt-get install --no-install-recommends -y ca-certificates media-types && rm -rf /var/lib/apt/lists/*
 
 RUN if [ "${INSTALL_OPTIONAL_PACKAGES}" = "true" ]; then apt-get update && apt-get install --no-install-recommends -y jq git rsync && rm -rf /var/lib/apt/lists/*; fi
 
@@ -47,7 +47,6 @@ RUN groupadd --system -g 1000 sftpgo && \
     --comment "SFTPGo user" --uid 1000 sftpgo
 
 COPY --from=builder /workspace/sftpgo.json /etc/sftpgo/sftpgo.json
-COPY --from=builder /etc/ssh/moduli /etc/sftpgo/moduli
 COPY --from=builder /workspace/templates /usr/share/sftpgo/templates
 COPY --from=builder /workspace/static /usr/share/sftpgo/static
 COPY --from=builder /workspace/openapi /usr/share/sftpgo/openapi

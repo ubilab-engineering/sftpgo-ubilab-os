@@ -1,4 +1,4 @@
-// Copyright (C) 2019-2023 Nicola Murino
+// Copyright (C) 2019 Nicola Murino
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published
@@ -64,7 +64,8 @@ type OIDC struct {
 	// ClientID is the application's ID
 	ClientID string `json:"client_id" mapstructure:"client_id"`
 	// ClientSecret is the application's secret
-	ClientSecret string `json:"client_secret" mapstructure:"client_secret"`
+	ClientSecret     string `json:"client_secret" mapstructure:"client_secret"`
+	ClientSecretFile string `json:"client_secret_file" mapstructure:"client_secret_file"`
 	// ConfigURL is the identifier for the service.
 	// SFTPGo will try to retrieve the provider configuration on startup and then
 	// will refuse to start if it fails to connect to the specified URL
@@ -144,6 +145,13 @@ func (o *OIDC) initialize() error {
 	if !util.Contains(o.Scopes, oidc.ScopeOpenID) {
 		return fmt.Errorf("oidc: required scope %q is not set", oidc.ScopeOpenID)
 	}
+	if o.ClientSecretFile != "" {
+		secret, err := util.ReadConfigFromFile(o.ClientSecretFile, configurationDir)
+		if err != nil {
+			return err
+		}
+		o.ClientSecret = secret
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
@@ -163,10 +171,7 @@ func (o *OIDC) initialize() error {
 		}
 	}
 	o.provider = provider
-	o.verifier = provider.Verifier(&oidc.Config{
-		ClientID:                   o.ClientID,
-		InsecureSkipSignatureCheck: o.InsecureSkipSignatureCheck,
-	})
+	o.verifier = nil
 	o.oauth2Config = &oauth2.Config{
 		ClientID:     o.ClientID,
 		ClientSecret: o.ClientSecret,
@@ -178,6 +183,16 @@ func (o *OIDC) initialize() error {
 	return nil
 }
 
+func (o *OIDC) getVerifier(ctx context.Context) OIDCTokenVerifier {
+	if o.verifier != nil {
+		return o.verifier
+	}
+	return o.provider.VerifierContext(ctx, &oidc.Config{
+		ClientID:                   o.ClientID,
+		InsecureSkipSignatureCheck: o.InsecureSkipSignatureCheck,
+	})
+}
+
 type oidcPendingAuth struct {
 	State    string        `json:"state"`
 	Nonce    string        `json:"nonce"`
@@ -187,8 +202,8 @@ type oidcPendingAuth struct {
 
 func newOIDCPendingAuth(audience tokenAudience) oidcPendingAuth {
 	return oidcPendingAuth{
-		State:    xid.New().String(),
-		Nonce:    xid.New().String(),
+		State:    util.GenerateOpaqueString(),
+		Nonce:    util.GenerateOpaqueString(),
 		Audience: audience,
 		IssuedAt: util.GetTimeAsMsSinceEpoch(time.Now()),
 	}
@@ -291,7 +306,7 @@ func (t *oidcToken) isExpired() bool {
 	return t.ExpiresAt < util.GetTimeAsMsSinceEpoch(time.Now())
 }
 
-func (t *oidcToken) refresh(config OAuth2Config, verifier OIDCTokenVerifier, r *http.Request) error {
+func (t *oidcToken) refresh(ctx context.Context, config OAuth2Config, verifier OIDCTokenVerifier, r *http.Request) error {
 	if t.RefreshToken == "" {
 		logger.Debug(logSender, "", "refresh token not set, unable to refresh cookie %q", t.Cookie)
 		return errors.New("refresh token not set")
@@ -304,8 +319,6 @@ func (t *oidcToken) refresh(config OAuth2Config, verifier OIDCTokenVerifier, r *
 	if t.ExpiresAt > 0 {
 		oauth2Token.Expiry = util.GetTimeFromMsecSinceEpoch(t.ExpiresAt)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-	defer cancel()
 
 	newToken, err := config.TokenSource(ctx, &oauth2Token).Token()
 	if err != nil {
@@ -332,14 +345,15 @@ func (t *oidcToken) refresh(config OAuth2Config, verifier OIDCTokenVerifier, r *
 		logger.Debug(logSender, "", "unable to verify refreshed id token for cookie %q: %v", t.Cookie, err)
 		return err
 	}
-	if idToken.Nonce != t.Nonce {
-		logger.Debug(logSender, "", "unable to verify refreshed id token for cookie %q: nonce mismatch", t.Cookie)
+	if idToken.Nonce != "" && idToken.Nonce != t.Nonce {
+		logger.Warn(logSender, "", "unable to verify refreshed id token for cookie %q: nonce mismatch, expected: %q, actual: %q",
+			t.Cookie, t.Nonce, idToken.Nonce)
 		return errors.New("the refreshed token nonce mismatch")
 	}
 	claims := make(map[string]any)
 	err = idToken.Claims(&claims)
 	if err != nil {
-		logger.Debug(logSender, "", "unable to get refreshed id token claims for cookie %q: %v", t.Cookie, err)
+		logger.Warn(logSender, "", "unable to get refreshed id token claims for cookie %q: %v", t.Cookie, err)
 		return err
 	}
 	sid, ok := claims["sid"].(string)
@@ -392,7 +406,7 @@ func (t *oidcToken) getUser(r *http.Request) error {
 		Name:      t.Username,
 		IP:        ipAddr,
 		Protocol:  common.ProtocolOIDC,
-		Timestamp: time.Now().UnixNano(),
+		Timestamp: time.Now(),
 		Status:    1,
 	}
 	if t.isAdmin() {
@@ -415,6 +429,7 @@ func (t *oidcToken) getUser(r *http.Request) error {
 		t.TokenRole = admin.Role
 		t.HideUserPageSections = admin.Filters.Preferences.HideUserPageSections
 		dataprovider.UpdateAdminLastLogin(admin)
+		common.DelayLogin(nil)
 		return nil
 	}
 	params.Event = common.IDPLoginUser
@@ -480,8 +495,11 @@ func (s *httpdServer) validateOIDCToken(w http.ResponseWriter, r *http.Request, 
 	}
 	if token.isExpired() {
 		logger.Debug(logSender, "", "oidc token associated with cookie %q is expired", token.Cookie)
-		if err = token.refresh(s.binding.OIDC.oauth2Config, s.binding.OIDC.verifier, r); err != nil {
-			setFlashMessage(w, r, "Your OpenID token is expired, please log-in again")
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+
+		if err = token.refresh(ctx, s.binding.OIDC.oauth2Config, s.binding.OIDC.getVerifier(ctx), r); err != nil {
+			setFlashMessage(w, r, newFlashMessage("Your OpenID token is expired, please log-in again", util.I18nOIDCTokenExpired))
 			doRedirect()
 			return oidcToken{}, errInvalidToken
 		}
@@ -491,7 +509,10 @@ func (s *httpdServer) validateOIDCToken(w http.ResponseWriter, r *http.Request, 
 	if isAdmin {
 		if !token.isAdmin() {
 			logger.Debug(logSender, "", "oidc token associated with cookie %q is not valid for admin users", token.Cookie)
-			setFlashMessage(w, r, "Your OpenID token is not valid for the SFTPGo Web Admin UI. Please logout from your OpenID server and log-in as an SFTPGo admin")
+			setFlashMessage(w, r, newFlashMessage(
+				"Your OpenID token is not valid for the SFTPGo Web Admin UI. Please logout from your OpenID server and log-in as an SFTPGo admin",
+				util.I18nOIDCTokenInvalidAdmin,
+			))
 			doRedirect()
 			return oidcToken{}, errInvalidToken
 		}
@@ -499,7 +520,10 @@ func (s *httpdServer) validateOIDCToken(w http.ResponseWriter, r *http.Request, 
 	}
 	if token.isAdmin() {
 		logger.Debug(logSender, "", "oidc token associated with cookie %q is valid for admin users", token.Cookie)
-		setFlashMessage(w, r, "Your OpenID token is not valid for the SFTPGo Web Client UI. Please logout from your OpenID server and log-in as an SFTPGo user")
+		setFlashMessage(w, r, newFlashMessage(
+			"Your OpenID token is not valid for the SFTPGo Web Client UI. Please logout from your OpenID server and log-in as an SFTPGo user",
+			util.I18nOIDCTokenInvalidUser,
+		))
 		doRedirect()
 		return oidcToken{}, errInvalidToken
 	}
@@ -525,7 +549,7 @@ func (s *httpdServer) oidcTokenAuthenticator(audience tokenAudience) func(next h
 			}
 			_, tokenString, err := jwtTokenClaims.createToken(s.tokenAuth, audience, util.GetIPFromRemoteAddress(r.RemoteAddr))
 			if err != nil {
-				setFlashMessage(w, r, "Unable to create cookie")
+				setFlashMessage(w, r, newFlashMessage("Unable to create cookie", util.I18nError500Message))
 				if audience == tokenAudienceWebAdmin {
 					http.Redirect(w, r, webAdminLoginPath, http.StatusFound)
 				} else {
@@ -571,8 +595,9 @@ func (s *httpdServer) handleOIDCRedirect(w http.ResponseWriter, r *http.Request)
 	authReq, err := oidcMgr.getPendingAuth(state)
 	if err != nil {
 		logger.Debug(logSender, "", "oidc authentication state did not match")
-		s.renderClientMessagePage(w, r, "Invalid authentication request", "Authentication state did not match",
-			http.StatusBadRequest, nil, "")
+		oidcMgr.removePendingAuth(state)
+		s.renderClientMessagePage(w, r, util.I18nInvalidAuthReqTitle, http.StatusBadRequest,
+			util.NewI18nError(err, util.I18nInvalidAuth), "")
 		return
 	}
 	oidcMgr.removePendingAuth(state)
@@ -594,29 +619,29 @@ func (s *httpdServer) handleOIDCRedirect(w http.ResponseWriter, r *http.Request)
 	oauth2Token, err := s.binding.OIDC.oauth2Config.Exchange(ctx, r.URL.Query().Get("code"))
 	if err != nil {
 		logger.Debug(logSender, "", "failed to exchange oidc token: %v", err)
-		setFlashMessage(w, r, "Failed to exchange OpenID token")
+		setFlashMessage(w, r, newFlashMessage("Failed to exchange OpenID token", util.I18nOIDCErrTokenExchange))
 		doRedirect()
 		return
 	}
 	rawIDToken, ok := oauth2Token.Extra("id_token").(string)
 	if !ok {
 		logger.Debug(logSender, "", "no id_token field in OAuth2 OpenID token")
-		setFlashMessage(w, r, "No id_token field in OAuth2 OpenID token")
+		setFlashMessage(w, r, newFlashMessage("No id_token field in OAuth2 OpenID token", util.I18nOIDCTokenInvalid))
 		doRedirect()
 		return
 	}
 	s.debugTokenClaims(nil, rawIDToken)
-	idToken, err := s.binding.OIDC.verifier.Verify(ctx, rawIDToken)
+	idToken, err := s.binding.OIDC.getVerifier(ctx).Verify(ctx, rawIDToken)
 	if err != nil {
 		logger.Debug(logSender, "", "failed to verify oidc token: %v", err)
-		setFlashMessage(w, r, "Failed to verify OpenID token")
+		setFlashMessage(w, r, newFlashMessage("Failed to verify OpenID token", util.I18nOIDCTokenInvalid))
 		doRedirect()
 		doLogout(rawIDToken)
 		return
 	}
 	if idToken.Nonce != authReq.Nonce {
 		logger.Debug(logSender, "", "oidc authentication nonce did not match")
-		setFlashMessage(w, r, "OpenID authentication nonce did not match")
+		setFlashMessage(w, r, newFlashMessage("OpenID authentication nonce did not match", util.I18nOIDCTokenInvalid))
 		doRedirect()
 		doLogout(rawIDToken)
 		return
@@ -626,7 +651,7 @@ func (s *httpdServer) handleOIDCRedirect(w http.ResponseWriter, r *http.Request)
 	err = idToken.Claims(&claims)
 	if err != nil {
 		logger.Debug(logSender, "", "unable to get oidc token claims: %v", err)
-		setFlashMessage(w, r, "Unable to get OpenID token claims")
+		setFlashMessage(w, r, newFlashMessage("Unable to get OpenID token claims", util.I18nOIDCTokenInvalid))
 		doRedirect()
 		doLogout(rawIDToken)
 		return
@@ -638,7 +663,7 @@ func (s *httpdServer) handleOIDCRedirect(w http.ResponseWriter, r *http.Request)
 		RefreshToken: oauth2Token.RefreshToken,
 		IDToken:      rawIDToken,
 		Nonce:        idToken.Nonce,
-		Cookie:       xid.New().String(),
+		Cookie:       util.GenerateOpaqueString(),
 	}
 	if !oauth2Token.Expiry.IsZero() {
 		token.ExpiresAt = util.GetTimeAsMsSinceEpoch(oauth2Token.Expiry)
@@ -647,7 +672,7 @@ func (s *httpdServer) handleOIDCRedirect(w http.ResponseWriter, r *http.Request)
 		s.binding.OIDC.CustomFields, s.binding.OIDC.getForcedRole(authReq.Audience))
 	if err != nil {
 		logger.Debug(logSender, "", "unable to parse oidc token claims: %v", err)
-		setFlashMessage(w, r, fmt.Sprintf("Unable to parse OpenID token claims: %v", err))
+		setFlashMessage(w, r, newFlashMessage(fmt.Sprintf("Unable to parse OpenID token claims: %v", err), util.I18nOIDCTokenInvalid))
 		doRedirect()
 		doLogout(rawIDToken)
 		return
@@ -656,7 +681,9 @@ func (s *httpdServer) handleOIDCRedirect(w http.ResponseWriter, r *http.Request)
 	case tokenAudienceWebAdmin:
 		if !token.isAdmin() {
 			logger.Debug(logSender, "", "wrong oidc token role, the mapped user is not an SFTPGo admin")
-			setFlashMessage(w, r, "Wrong OpenID role, the logged in user is not an SFTPGo admin")
+			setFlashMessage(w, r, newFlashMessage(
+				"Wrong OpenID role, the logged in user is not an SFTPGo admin",
+				util.I18nOIDCTokenInvalidRoleAdmin))
 			doRedirect()
 			doLogout(rawIDToken)
 			return
@@ -664,7 +691,10 @@ func (s *httpdServer) handleOIDCRedirect(w http.ResponseWriter, r *http.Request)
 	case tokenAudienceWebClient:
 		if token.isAdmin() {
 			logger.Debug(logSender, "", "wrong oidc token role, the mapped user is an SFTPGo admin")
-			setFlashMessage(w, r, "Wrong OpenID role, the logged in user is an SFTPGo admin")
+			setFlashMessage(w, r, newFlashMessage(
+				"Wrong OpenID role, the logged in user is an SFTPGo admin",
+				util.I18nOIDCTokenInvalidRoleUser,
+			))
 			doRedirect()
 			doLogout(rawIDToken)
 			return
@@ -673,7 +703,7 @@ func (s *httpdServer) handleOIDCRedirect(w http.ResponseWriter, r *http.Request)
 	err = token.getUser(r)
 	if err != nil {
 		logger.Debug(logSender, "", "unable to get the sftpgo user associated with oidc token: %v", err)
-		setFlashMessage(w, r, "Unable to get the user associated with the OpenID token")
+		setFlashMessage(w, r, newFlashMessage("Unable to get the user associated with the OpenID token", util.I18nOIDCErrGetUser))
 		doRedirect()
 		doLogout(rawIDToken)
 		return

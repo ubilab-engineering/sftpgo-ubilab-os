@@ -1,4 +1,4 @@
-// Copyright (C) 2019-2023 Nicola Murino
+// Copyright (C) 2019 Nicola Murino
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published
@@ -20,7 +20,6 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"sort"
 	"strconv"
 	"strings"
 
@@ -45,19 +44,13 @@ const (
 	PermAdminViewConnections  = "view_conns"
 	PermAdminCloseConnections = "close_conns"
 	PermAdminViewServerStatus = "view_status"
-	PermAdminManageAdmins     = "manage_admins"
 	PermAdminManageGroups     = "manage_groups"
-	PermAdminManageAPIKeys    = "manage_apikeys"
+	PermAdminManageFolders    = "manage_folders"
 	PermAdminQuotaScans       = "quota_scans"
-	PermAdminManageSystem     = "manage_system"
 	PermAdminManageDefender   = "manage_defender"
 	PermAdminViewDefender     = "view_defender"
-	PermAdminRetentionChecks  = "retention_checks"
-	PermAdminMetadataChecks   = "metadata_checks"
 	PermAdminViewEvents       = "view_events"
-	PermAdminManageEventRules = "manage_event_rules"
-	PermAdminManageRoles      = "manage_roles"
-	PermAdminManageIPLists    = "manage_ip_lists"
+	PermAdminDisableMFA       = "disable_mfa"
 )
 
 const (
@@ -71,13 +64,10 @@ const (
 
 var (
 	validAdminPerms = []string{PermAdminAny, PermAdminAddUsers, PermAdminChangeUsers, PermAdminDeleteUsers,
-		PermAdminViewUsers, PermAdminManageGroups, PermAdminViewConnections, PermAdminCloseConnections,
-		PermAdminViewServerStatus, PermAdminManageAdmins, PermAdminManageRoles, PermAdminManageEventRules,
-		PermAdminManageAPIKeys, PermAdminQuotaScans, PermAdminManageSystem, PermAdminManageDefender,
-		PermAdminViewDefender, PermAdminManageIPLists, PermAdminRetentionChecks, PermAdminMetadataChecks,
-		PermAdminViewEvents}
-	forbiddenPermsForRoleAdmins = []string{PermAdminAny, PermAdminManageAdmins, PermAdminManageSystem,
-		PermAdminManageEventRules, PermAdminManageIPLists, PermAdminManageRoles}
+		PermAdminViewUsers, PermAdminManageFolders, PermAdminManageGroups, PermAdminViewConnections,
+		PermAdminCloseConnections, PermAdminViewServerStatus, PermAdminQuotaScans,
+		PermAdminManageDefender, PermAdminViewDefender, PermAdminViewEvents, PermAdminDisableMFA}
+	forbiddenPermsForRoleAdmins = []string{PermAdminAny}
 )
 
 // AdminTOTPConfig defines the time-based one time password configuration
@@ -199,6 +189,10 @@ type AdminFilters struct {
 	AllowList []string `json:"allow_list,omitempty"`
 	// API key auth allows to impersonate this administrator with an API key
 	AllowAPIKeyAuth bool `json:"allow_api_key_auth,omitempty"`
+	// A password change is required at the next login
+	RequirePasswordChange bool `json:"require_password_change,omitempty"`
+	// Require two factor authentication
+	RequireTwoFactor bool `json:"require_two_factor"`
 	// Time-based one time passwords configuration
 	TOTPConfig AdminTOTPConfig `json:"totp_config,omitempty"`
 	// Recovery codes to use if the user loses access to their second factor auth device.
@@ -261,12 +255,7 @@ type Admin struct {
 	// Last login as unix timestamp in milliseconds
 	LastLogin int64 `json:"last_login"`
 	// Role name. If set the admin can only administer users with the same role.
-	// Role admins cannot have the following permissions:
-	// - manage_admins
-	// - manage_apikeys
-	// - manage_system
-	// - manage_event_rules
-	// - manage_roles
+	// Role admins cannot be super administrators
 	Role string `json:"role,omitempty"`
 }
 
@@ -285,7 +274,7 @@ func (a *Admin) hashPassword() error {
 	if a.Password != "" && !util.IsStringPrefixInSlice(a.Password, internalHashPwdPrefixes) {
 		if config.PasswordValidation.Admins.MinEntropy > 0 {
 			if err := passwordvalidator.Validate(a.Password, config.PasswordValidation.Admins.MinEntropy); err != nil {
-				return util.NewValidationError(err.Error())
+				return util.NewI18nError(util.NewValidationError(err.Error()), util.I18nErrorPasswordComplexity)
 			}
 		}
 		if config.PasswordHashing.Algo == HashingAlgoBcrypt {
@@ -293,7 +282,7 @@ func (a *Admin) hashPassword() error {
 			if err != nil {
 				return err
 			}
-			a.Password = string(pwd)
+			a.Password = util.BytesToString(pwd)
 		} else {
 			pwd, err := argon2id.CreateHash(a.Password, argon2Params)
 			if err != nil {
@@ -328,7 +317,10 @@ func (a *Admin) validateRecoveryCodes() error {
 func (a *Admin) validatePermissions() error {
 	a.Permissions = util.RemoveDuplicates(a.Permissions, false)
 	if len(a.Permissions) == 0 {
-		return util.NewValidationError("please grant some permissions to this admin")
+		return util.NewI18nError(
+			util.NewValidationError("please grant some permissions to this admin"),
+			util.I18nErrorPermissionsRequired,
+		)
 	}
 	if util.Contains(a.Permissions, PermAdminAny) {
 		a.Permissions = []string{PermAdminAny}
@@ -339,8 +331,10 @@ func (a *Admin) validatePermissions() error {
 		}
 		if a.Role != "" {
 			if util.Contains(forbiddenPermsForRoleAdmins, perm) {
-				return util.NewValidationError(fmt.Sprintf("a role admin cannot have the following permissions: %q",
-					strings.Join(forbiddenPermsForRoleAdmins, ",")))
+				return util.NewI18nError(
+					util.NewValidationError("a role admin cannot be a super admin"),
+					util.I18nErrorRoleAdminPerms,
+				)
 			}
 		}
 	}
@@ -358,7 +352,10 @@ func (a *Admin) validateGroups() error {
 		}
 		if g.Options.AddToUsersAs == GroupAddToUsersAsPrimary {
 			if hasPrimary {
-				return util.NewValidationError("only one primary group is allowed")
+				return util.NewI18nError(
+					util.NewValidationError("only one primary group is allowed"),
+					util.I18nErrorPrimaryGroup,
+				)
 			}
 			hasPrimary = true
 		}
@@ -369,25 +366,28 @@ func (a *Admin) validateGroups() error {
 func (a *Admin) validate() error {
 	a.SetEmptySecretsIfNil()
 	if a.Username == "" {
-		return util.NewValidationError("username is mandatory")
+		return util.NewI18nError(util.NewValidationError("username is mandatory"), util.I18nErrorUsernameRequired)
 	}
 	if err := checkReservedUsernames(a.Username); err != nil {
-		return err
+		return util.NewI18nError(err, util.I18nErrorReservedUsername)
 	}
 	if a.Password == "" {
-		return util.NewValidationError("please set a password")
+		return util.NewI18nError(util.NewValidationError("please set a password"), util.I18nErrorPasswordRequired)
 	}
 	if a.hasRedactedSecret() {
 		return util.NewValidationError("cannot save an admin with a redacted secret")
 	}
 	if err := a.Filters.TOTPConfig.validate(a.Username); err != nil {
-		return err
+		return util.NewI18nError(err, util.I18nError2FAInvalid)
 	}
 	if err := a.validateRecoveryCodes(); err != nil {
-		return err
+		return util.NewI18nError(err, util.I18nErrorRecoveryCodesInvalid)
 	}
 	if config.NamingRules&1 == 0 && !usernameRegex.MatchString(a.Username) {
-		return util.NewValidationError(fmt.Sprintf("username %q is not valid, the following characters are allowed: a-zA-Z0-9-_.~", a.Username))
+		return util.NewI18nError(
+			util.NewValidationError(fmt.Sprintf("username %q is not valid, the following characters are allowed: a-zA-Z0-9-_.~", a.Username)),
+			util.I18nErrorInvalidUser,
+		)
 	}
 	if err := a.hashPassword(); err != nil {
 		return err
@@ -396,43 +396,49 @@ func (a *Admin) validate() error {
 		return err
 	}
 	if a.Email != "" && !util.IsEmailValid(a.Email) {
-		return util.NewValidationError(fmt.Sprintf("email %q is not valid", a.Email))
+		return util.NewI18nError(
+			util.NewValidationError(fmt.Sprintf("email %q is not valid", a.Email)),
+			util.I18nErrorInvalidEmail,
+		)
 	}
 	a.Filters.AllowList = util.RemoveDuplicates(a.Filters.AllowList, false)
 	for _, IPMask := range a.Filters.AllowList {
 		_, _, err := net.ParseCIDR(IPMask)
 		if err != nil {
-			return util.NewValidationError(fmt.Sprintf("could not parse allow list entry %q : %v", IPMask, err))
+			return util.NewI18nError(
+				util.NewValidationError(fmt.Sprintf("could not parse allow list entry %q : %v", IPMask, err)),
+				util.I18nErrorInvalidIPMask,
+			)
 		}
 	}
 
 	return a.validateGroups()
 }
 
-// GetGroupsAsString returns the user's groups as a string
-func (a *Admin) GetGroupsAsString() string {
-	if len(a.Groups) == 0 {
-		return ""
-	}
-	var groups []string
-	for _, g := range a.Groups {
-		groups = append(groups, g.Name)
-	}
-	sort.Strings(groups)
-	return strings.Join(groups, ",")
-}
-
 // CheckPassword verifies the admin password
 func (a *Admin) CheckPassword(password string) (bool, error) {
+	if config.PasswordCaching {
+		found, match := cachedAdminPasswords.Check(a.Username, password, a.Password)
+		if found {
+			if !match {
+				return false, ErrInvalidCredentials
+			}
+			return match, nil
+		}
+	}
 	if strings.HasPrefix(a.Password, bcryptPwdPrefix) {
 		if err := bcrypt.CompareHashAndPassword([]byte(a.Password), []byte(password)); err != nil {
 			return false, ErrInvalidCredentials
 		}
+		cachedAdminPasswords.Add(a.Username, password, a.Password)
 		return true, nil
 	}
 	match, err := argon2id.ComparePasswordAndHash(password, a.Password)
 	if !match || err != nil {
 		return false, ErrInvalidCredentials
+	}
+	if match {
+		cachedAdminPasswords.Add(a.Username, password, a.Password)
 	}
 	return match, err
 }
@@ -540,19 +546,6 @@ func (a *Admin) HasPermission(perm string) bool {
 	return util.Contains(a.Permissions, perm)
 }
 
-// GetPermissionsAsString returns permission as string
-func (a *Admin) GetPermissionsAsString() string {
-	return strings.Join(a.Permissions, ", ")
-}
-
-// GetLastLoginAsString returns the last login as string
-func (a *Admin) GetLastLoginAsString() string {
-	if a.LastLogin > 0 {
-		return util.GetTimeFromMsecSinceEpoch(a.LastLogin).UTC().Format(iso8601UTCFormat)
-	}
-	return ""
-}
-
 // GetAllowedIPAsString returns the allowed IP as comma separated string
 func (a *Admin) GetAllowedIPAsString() string {
 	return strings.Join(a.Filters.AllowList, ",")
@@ -581,6 +574,8 @@ func (a *Admin) getACopy() Admin {
 	filters := AdminFilters{}
 	filters.AllowList = make([]string, len(a.Filters.AllowList))
 	filters.AllowAPIKeyAuth = a.Filters.AllowAPIKeyAuth
+	filters.RequirePasswordChange = a.Filters.RequirePasswordChange
+	filters.RequireTwoFactor = a.Filters.RequireTwoFactor
 	filters.TOTPConfig.Enabled = a.Filters.TOTPConfig.Enabled
 	filters.TOTPConfig.ConfigName = a.Filters.TOTPConfig.ConfigName
 	filters.TOTPConfig.Secret = a.Filters.TOTPConfig.Secret.Clone()

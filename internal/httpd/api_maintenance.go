@@ -1,4 +1,4 @@
-// Copyright (C) 2019-2023 Nicola Murino
+// Copyright (C) 2019 Nicola Murino
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published
@@ -51,6 +51,7 @@ func validateBackupFile(outputFile string) (string, error) {
 func dumpData(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxRequestSize)
 	var outputFile, outputData, indent string
+	var scopes []string
 	if _, ok := r.URL.Query()["output-file"]; ok {
 		outputFile = strings.TrimSpace(r.URL.Query().Get("output-file"))
 	}
@@ -59,6 +60,9 @@ func dumpData(w http.ResponseWriter, r *http.Request) {
 	}
 	if _, ok := r.URL.Query()["indent"]; ok {
 		indent = strings.TrimSpace(r.URL.Query().Get("indent"))
+	}
+	if _, ok := r.URL.Query()["scopes"]; ok {
+		scopes = getCommaSeparatedQueryParam(r, "scopes")
 	}
 
 	if outputData != "1" {
@@ -78,7 +82,7 @@ func dumpData(w http.ResponseWriter, r *http.Request) {
 		logger.Debug(logSender, "", "dumping data to: %q", outputFile)
 	}
 
-	backup, err := dataprovider.DumpData()
+	backup, err := dataprovider.DumpData(scopes)
 	if err != nil {
 		logger.Error(logSender, "", "dumping data error: %v, output file: %q", err, outputFile)
 		sendAPIResponse(w, r, err, "", getRespStatus(err))
@@ -156,7 +160,7 @@ func loadData(w http.ResponseWriter, r *http.Request) {
 	}
 	fi, err := os.Stat(inputFile)
 	if err != nil {
-		sendAPIResponse(w, r, err, "", getRespStatus(err))
+		sendAPIResponse(w, r, fmt.Errorf("invalid input_file %q", inputFile), "", http.StatusBadRequest)
 		return
 	}
 	if fi.Size() > MaxRestoreSize {
@@ -167,7 +171,7 @@ func loadData(w http.ResponseWriter, r *http.Request) {
 
 	content, err := os.ReadFile(inputFile)
 	if err != nil {
-		sendAPIResponse(w, r, err, "", getRespStatus(err))
+		sendAPIResponse(w, r, fmt.Errorf("invalid input_file %q", inputFile), "", http.StatusBadRequest)
 		return
 	}
 	if err := restoreBackup(content, inputFile, scanQuota, mode, claims.Username, util.GetIPFromRemoteAddress(r.RemoteAddr), claims.Role); err != nil {
@@ -180,7 +184,10 @@ func loadData(w http.ResponseWriter, r *http.Request) {
 func restoreBackup(content []byte, inputFile string, scanQuota, mode int, executor, ipAddress, role string) error {
 	dump, err := dataprovider.ParseDumpData(content)
 	if err != nil {
-		return util.NewValidationError(fmt.Sprintf("unable to parse backup content: %v", err))
+		return util.NewI18nError(
+			util.NewValidationError(fmt.Sprintf("invalid input_file %q", inputFile)),
+			util.I18nErrorBackupFile,
+		)
 	}
 
 	if err = RestoreConfigs(dump.Configs, mode, executor, ipAddress, role); err != nil {

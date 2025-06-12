@@ -1,4 +1,4 @@
-// Copyright (C) 2019-2023 Nicola Murino
+// Copyright (C) 2019 Nicola Murino
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published
@@ -24,7 +24,6 @@ import (
 	"io/fs"
 	"net"
 	"os"
-	"path"
 	"path/filepath"
 	"runtime/debug"
 	"strings"
@@ -32,83 +31,53 @@ import (
 	"time"
 
 	"github.com/pkg/sftp"
+	"github.com/sftpgo/sdk/plugin/notifier"
 	"golang.org/x/crypto/ssh"
 
 	"github.com/drakkan/sftpgo/v2/internal/common"
 	"github.com/drakkan/sftpgo/v2/internal/dataprovider"
 	"github.com/drakkan/sftpgo/v2/internal/logger"
 	"github.com/drakkan/sftpgo/v2/internal/metric"
+	"github.com/drakkan/sftpgo/v2/internal/plugin"
 	"github.com/drakkan/sftpgo/v2/internal/util"
+	"github.com/drakkan/sftpgo/v2/internal/version"
 	"github.com/drakkan/sftpgo/v2/internal/vfs"
 )
 
 const (
-	defaultPrivateRSAKeyName     = "id_rsa"
-	defaultPrivateECDSAKeyName   = "id_ecdsa"
-	defaultPrivateEd25519KeyName = "id_ed25519"
-	sourceAddressCriticalOption  = "source-address"
-	kexDHGroupExchangeSHA1       = "diffie-hellman-group-exchange-sha1"
-	kexDHGroupExchangeSHA256     = "diffie-hellman-group-exchange-sha256"
+	defaultPrivateRSAKeyName          = "id_rsa"
+	defaultPrivateECDSAKeyName        = "id_ecdsa"
+	defaultPrivateEd25519KeyName      = "id_ed25519"
+	sourceAddressCriticalOption       = "source-address"
+	keyExchangeCurve25519SHA256LibSSH = "curve25519-sha256@libssh.org"
 )
 
 var (
+	supportedAlgos        = ssh.SupportedAlgorithms()
+	insecureAlgos         = ssh.InsecureAlgorithms()
 	sftpExtensions        = []string{"statvfs@openssh.com"}
-	supportedHostKeyAlgos = []string{
-		ssh.CertAlgoRSASHA512v01, ssh.CertAlgoRSASHA256v01,
-		ssh.CertAlgoRSAv01, ssh.CertAlgoDSAv01, ssh.CertAlgoECDSA256v01,
-		ssh.CertAlgoECDSA384v01, ssh.CertAlgoECDSA521v01, ssh.CertAlgoED25519v01,
-		ssh.KeyAlgoECDSA256, ssh.KeyAlgoECDSA384, ssh.KeyAlgoECDSA521,
-		ssh.KeyAlgoRSASHA512, ssh.KeyAlgoRSASHA256,
-		ssh.KeyAlgoRSA, ssh.KeyAlgoDSA,
-		ssh.KeyAlgoED25519,
-	}
+	supportedHostKeyAlgos = append(supportedAlgos.HostKeys, insecureAlgos.HostKeys...)
 	preferredHostKeyAlgos = []string{
-		ssh.CertAlgoRSASHA512v01, ssh.CertAlgoRSASHA256v01,
-		ssh.CertAlgoECDSA256v01,
-		ssh.CertAlgoECDSA384v01, ssh.CertAlgoECDSA521v01, ssh.CertAlgoED25519v01,
+		ssh.KeyAlgoRSASHA256, ssh.KeyAlgoRSASHA512,
 		ssh.KeyAlgoECDSA256, ssh.KeyAlgoECDSA384, ssh.KeyAlgoECDSA521,
-		ssh.KeyAlgoRSASHA512, ssh.KeyAlgoRSASHA256,
 		ssh.KeyAlgoED25519,
 	}
-	supportedKexAlgos = []string{
-		"curve25519-sha256", "curve25519-sha256@libssh.org",
-		"ecdh-sha2-nistp256", "ecdh-sha2-nistp384", "ecdh-sha2-nistp521",
-		"diffie-hellman-group14-sha256", "diffie-hellman-group16-sha512",
-		"diffie-hellman-group18-sha512", "diffie-hellman-group14-sha1",
-		"diffie-hellman-group1-sha1",
-	}
-	preferredKexAlgos = []string{
-		"curve25519-sha256", "curve25519-sha256@libssh.org",
-		"ecdh-sha2-nistp256", "ecdh-sha2-nistp384", "ecdh-sha2-nistp521",
-		"diffie-hellman-group14-sha256",
-	}
-	supportedCiphers = []string{
-		"aes128-gcm@openssh.com", "aes256-gcm@openssh.com",
-		"chacha20-poly1305@openssh.com",
-		"aes128-ctr", "aes192-ctr", "aes256-ctr",
-		"aes128-cbc", "aes192-cbc", "aes256-cbc",
-		"3des-cbc",
-		"arcfour", "arcfour128", "arcfour256",
-	}
-	preferredCiphers = []string{
-		"aes128-gcm@openssh.com", "aes256-gcm@openssh.com",
-		"chacha20-poly1305@openssh.com",
-		"aes128-ctr", "aes192-ctr", "aes256-ctr",
-	}
-	supportedMACs = []string{
-		"hmac-sha2-256-etm@openssh.com", "hmac-sha2-256",
-		"hmac-sha2-512-etm@openssh.com", "hmac-sha2-512",
-		"hmac-sha1", "hmac-sha1-96",
-	}
-	preferredMACs = []string{
-		"hmac-sha2-256-etm@openssh.com", "hmac-sha2-256",
+	supportedPublicKeyAlgos = append(supportedAlgos.PublicKeyAuths, insecureAlgos.PublicKeyAuths...)
+	preferredPublicKeyAlgos = supportedAlgos.PublicKeyAuths
+	supportedKexAlgos       = append(supportedAlgos.KeyExchanges, insecureAlgos.KeyExchanges...)
+	preferredKexAlgos       = supportedAlgos.KeyExchanges
+	supportedCiphers        = append(supportedAlgos.Ciphers, insecureAlgos.Ciphers...)
+	preferredCiphers        = supportedAlgos.Ciphers
+	supportedMACs           = append(supportedAlgos.MACs, insecureAlgos.MACs...)
+	preferredMACs           = []string{
+		ssh.HMACSHA256ETM, ssh.HMACSHA256,
 	}
 
 	revokedCertManager = revokedCertificates{
 		certs: map[string]bool{},
 	}
 
-	sftpAuthError = newAuthenticationError(nil, "")
+	sftpAuthError = newAuthenticationError(nil, "", "")
 )
 
 // Binding defines the configuration for a network listener
@@ -138,8 +107,6 @@ func (b *Binding) HasProxy() bool {
 
 // Configuration for the SFTP server
 type Configuration struct {
-	// Identification string used by the server
-	Banner string `json:"banner" mapstructure:"banner"`
 	// Addresses and ports to bind to
 	Bindings []Binding `json:"bindings" mapstructure:"bindings"`
 	// Maximum number of authentication attempts permitted per connection.
@@ -158,20 +125,20 @@ type Configuration struct {
 	// HostKeyAlgorithms lists the public key algorithms that the server will accept for host
 	// key authentication.
 	HostKeyAlgorithms []string `json:"host_key_algorithms" mapstructure:"host_key_algorithms"`
-	// Diffie-Hellman moduli files.
-	// Each moduli file can be defined as a path relative to the configuration directory or an absolute one.
-	// If set and valid, "diffie-hellman-group-exchange-sha256" and "diffie-hellman-group-exchange-sha1" KEX algorithms
-	// will be available, `diffie-hellman-group-exchange-sha256` will be enabled by default if you
-	// don't explicitly set KEXs
-	Moduli []string `json:"moduli" mapstructure:"moduli"`
 	// KexAlgorithms specifies the available KEX (Key Exchange) algorithms in
 	// preference order.
 	KexAlgorithms []string `json:"kex_algorithms" mapstructure:"kex_algorithms"`
+	// MinDHGroupExchangeKeySize defines the minimum key size to allow for the
+	// key exchanges when using diffie-ellman-group-exchange-sha1 or sha256 key
+	// exchange algorithms.
+	MinDHGroupExchangeKeySize int `json:"min_dh_group_exchange_key_size" mapstructure:"min_dh_group_exchange_key_size"`
 	// Ciphers specifies the ciphers allowed
 	Ciphers []string `json:"ciphers" mapstructure:"ciphers"`
 	// MACs Specifies the available MAC (message authentication code) algorithms
 	// in preference order
 	MACs []string `json:"macs" mapstructure:"macs"`
+	// PublicKeyAlgorithms lists the supported public key algorithms for client authentication.
+	PublicKeyAlgorithms []string `json:"public_key_algorithms" mapstructure:"public_key_algorithms"`
 	// TrustedUserCAKeys specifies a list of public keys paths of certificate authorities
 	// that are trusted to sign user certificates for authentication.
 	// The paths can be absolute or relative to the configuration directory
@@ -214,19 +181,14 @@ type Configuration struct {
 	KeyboardInteractiveHook string `json:"keyboard_interactive_auth_hook" mapstructure:"keyboard_interactive_auth_hook"`
 	// PasswordAuthentication specifies whether password authentication is allowed.
 	PasswordAuthentication bool `json:"password_authentication" mapstructure:"password_authentication"`
-	// Virtual root folder prefix to include in all file operations (ex: /files).
-	// The virtual paths used for per-directory permissions, file patterns etc. must not include the folder prefix.
-	// The prefix is only applied to SFTP requests, SCP and other SSH commands will be automatically disabled if
-	// you configure a prefix.
-	// This setting can help some migrations from OpenSSH. It is not recommended for general usage.
-	FolderPrefix     string `json:"folder_prefix" mapstructure:"folder_prefix"`
-	certChecker      *ssh.CertChecker
-	parsedUserCAKeys []ssh.PublicKey
+	certChecker            *ssh.CertChecker
+	parsedUserCAKeys       []ssh.PublicKey
 }
 
 type authenticationError struct {
 	err         error
 	loginMethod string
+	username    string
 }
 
 func (e *authenticationError) Error() string {
@@ -248,8 +210,12 @@ func (e *authenticationError) getLoginMethod() string {
 	return e.loginMethod
 }
 
-func newAuthenticationError(err error, loginMethod string) *authenticationError {
-	return &authenticationError{err: err, loginMethod: loginMethod}
+func (e *authenticationError) getUsername() string {
+	return e.username
+}
+
+func newAuthenticationError(err error, loginMethod, username string) *authenticationError {
+	return &authenticationError{err: err, loginMethod: loginMethod, username: username}
 }
 
 // ShouldBind returns true if there is at least a valid binding
@@ -269,36 +235,23 @@ func (c *Configuration) getServerConfig() *ssh.ServerConfig {
 		MaxAuthTries: c.MaxAuthTries,
 		PublicKeyCallback: func(conn ssh.ConnMetadata, pubKey ssh.PublicKey) (*ssh.Permissions, error) {
 			sp, err := c.validatePublicKeyCredentials(conn, pubKey)
-			if err == ssh.ErrPartialSuccess {
+			var partialSuccess *ssh.PartialSuccessError
+			if errors.As(err, &partialSuccess) {
 				return sp, err
 			}
 			if err != nil {
 				return nil, newAuthenticationError(fmt.Errorf("could not validate public key credentials: %w", err),
-					dataprovider.SSHLoginMethodPublicKey)
+					dataprovider.SSHLoginMethodPublicKey, conn.User())
 			}
 
 			return sp, nil
 		},
-		NextAuthMethodsCallback: func(conn ssh.ConnMetadata) []string {
-			var nextMethods []string
-			user, err := dataprovider.GetUserWithGroupSettings(conn.User(), "")
-			if err == nil {
-				nextMethods = user.GetNextAuthMethods(conn.PartialSuccessMethods(), c.PasswordAuthentication)
-			}
-			return nextMethods
-		},
-		ServerVersion: fmt.Sprintf("SSH-2.0-%s", c.Banner),
+		ServerVersion: fmt.Sprintf("SSH-2.0-%s", version.GetServerVersion("_", false)),
 	}
 
 	if c.PasswordAuthentication {
-		serverConfig.PasswordCallback = func(conn ssh.ConnMetadata, pass []byte) (*ssh.Permissions, error) {
-			sp, err := c.validatePasswordCredentials(conn, pass)
-			if err != nil {
-				return nil, newAuthenticationError(fmt.Errorf("could not validate password credentials: %w", err),
-					dataprovider.SSHLoginMethodPassword)
-			}
-
-			return sp, nil
+		serverConfig.PasswordCallback = func(conn ssh.ConnMetadata, password []byte) (*ssh.Permissions, error) {
+			return c.validatePasswordCredentials(conn, password, dataprovider.LoginMethodPassword)
 		}
 		serviceStatus.Authentications = append(serviceStatus.Authentications, dataprovider.LoginMethodPassword)
 	}
@@ -333,7 +286,12 @@ func (c *Configuration) loadFromProvider() error {
 		}
 		c.HostKeyAlgorithms = append(c.HostKeyAlgorithms, configs.SFTPD.HostKeyAlgos...)
 	}
-	c.Moduli = append(c.Moduli, configs.SFTPD.Moduli...)
+	if len(configs.SFTPD.PublicKeyAlgos) > 0 {
+		if len(c.PublicKeyAlgorithms) == 0 {
+			c.PublicKeyAlgorithms = preferredPublicKeyAlgos
+		}
+		c.PublicKeyAlgorithms = append(c.PublicKeyAlgorithms, configs.SFTPD.PublicKeyAlgos...)
+	}
 	if len(configs.SFTPD.KexAlgorithms) > 0 {
 		if len(c.KexAlgorithms) == 0 {
 			c.KexAlgorithms = preferredKexAlgos
@@ -367,26 +325,25 @@ func (c *Configuration) Initialize(configDir string) error {
 		return common.ErrNoBinding
 	}
 
+	ssh.SetDHKexServerMinBits(uint32(c.MinDHGroupExchangeKeySize))
+	logger.Debug(logSender, "", "minimum key size allowed for diffie-ellman-group-exchange: %d",
+		ssh.GetDHKexServerMinBits())
+	sftp.SetSFTPExtensions(sftpExtensions...) //nolint:errcheck // we configure valid SFTP Extensions so we cannot get an error
+	sftp.MaxFilelist = 250
+
+	if err := c.configureSecurityOptions(serverConfig); err != nil {
+		return err
+	}
 	if err := c.checkAndLoadHostKeys(configDir, serverConfig); err != nil {
 		serviceStatus.HostKeys = nil
 		return err
 	}
-
 	if err := c.initializeCertChecker(configDir); err != nil {
-		return err
-	}
-
-	c.loadModuli(configDir)
-
-	sftp.SetSFTPExtensions(sftpExtensions...) //nolint:errcheck // we configure valid SFTP Extensions so we cannot get an error
-
-	if err := c.configureSecurityOptions(serverConfig); err != nil {
 		return err
 	}
 	c.configureKeyboardInteractiveAuth(serverConfig)
 	c.configureLoginBanner(serverConfig, configDir)
 	c.checkSSHCommands()
-	c.checkFolderPrefix()
 
 	exitChannel := make(chan error, 1)
 	serviceStatus.Bindings = nil
@@ -442,8 +399,8 @@ func (c *Configuration) serve(listener net.Listener, serverConfig *ssh.ServerCon
 				} else {
 					tempDelay *= 2
 				}
-				if max := 1 * time.Second; tempDelay > max {
-					tempDelay = max
+				if maxDelay := 1 * time.Second; tempDelay > maxDelay {
+					tempDelay = maxDelay
 				}
 				logger.Warn(logSender, "", "accept error: %v; retrying in %v", err, tempDelay)
 				time.Sleep(tempDelay)
@@ -458,7 +415,7 @@ func (c *Configuration) serve(listener net.Listener, serverConfig *ssh.ServerCon
 	}
 }
 
-func (c *Configuration) configureSecurityOptions(serverConfig *ssh.ServerConfig) error {
+func (c *Configuration) configureKeyAlgos(serverConfig *ssh.ServerConfig) error {
 	if len(c.HostKeyAlgorithms) == 0 {
 		c.HostKeyAlgorithms = preferredHostKeyAlgos
 	} else {
@@ -469,26 +426,63 @@ func (c *Configuration) configureSecurityOptions(serverConfig *ssh.ServerConfig)
 			return fmt.Errorf("unsupported host key algorithm %q", hostKeyAlgo)
 		}
 	}
-	serverConfig.HostKeyAlgorithms = c.HostKeyAlgorithms
-	serviceStatus.HostKeyAlgos = c.HostKeyAlgorithms
+
+	if len(c.PublicKeyAlgorithms) > 0 {
+		c.PublicKeyAlgorithms = util.RemoveDuplicates(c.PublicKeyAlgorithms, true)
+		for _, algo := range c.PublicKeyAlgorithms {
+			if !util.Contains(supportedPublicKeyAlgos, algo) {
+				return fmt.Errorf("unsupported public key authentication algorithm %q", algo)
+			}
+		}
+	} else {
+		c.PublicKeyAlgorithms = preferredPublicKeyAlgos
+	}
+	serverConfig.PublicKeyAuthAlgorithms = c.PublicKeyAlgorithms
+	serviceStatus.PublicKeyAlgorithms = c.PublicKeyAlgorithms
+
+	return nil
+}
+
+func (c *Configuration) checkKeyExchangeAlgorithms() {
+	var kexs []string
+	for _, k := range c.KexAlgorithms {
+		if k == "diffie-hellman-group18-sha512" {
+			logger.Warn(logSender, "", "KEX %q is not supported and will be ignored", k)
+			continue
+		}
+		kexs = append(kexs, k)
+		if strings.TrimSpace(k) == keyExchangeCurve25519SHA256LibSSH {
+			kexs = append(kexs, ssh.KeyExchangeCurve25519SHA256)
+		}
+		if strings.TrimSpace(k) == ssh.KeyExchangeCurve25519SHA256 {
+			kexs = append(kexs, keyExchangeCurve25519SHA256LibSSH)
+		}
+	}
+	c.KexAlgorithms = util.RemoveDuplicates(kexs, true)
+}
+
+func (c *Configuration) configureSecurityOptions(serverConfig *ssh.ServerConfig) error {
+	if err := c.configureKeyAlgos(serverConfig); err != nil {
+		return err
+	}
 
 	if len(c.KexAlgorithms) > 0 {
-		hasDHGroupKEX := util.Contains(supportedKexAlgos, kexDHGroupExchangeSHA256)
-		if !hasDHGroupKEX {
-			c.KexAlgorithms = util.Remove(c.KexAlgorithms, kexDHGroupExchangeSHA1)
-			c.KexAlgorithms = util.Remove(c.KexAlgorithms, kexDHGroupExchangeSHA256)
-		}
-		c.KexAlgorithms = util.RemoveDuplicates(c.KexAlgorithms, true)
+		c.checkKeyExchangeAlgorithms()
 		for _, kex := range c.KexAlgorithms {
+			if kex == keyExchangeCurve25519SHA256LibSSH {
+				continue
+			}
 			if !util.Contains(supportedKexAlgos, kex) {
 				return fmt.Errorf("unsupported key-exchange algorithm %q", kex)
 			}
 		}
-		serverConfig.KeyExchanges = c.KexAlgorithms
-		serviceStatus.KexAlgorithms = c.KexAlgorithms
 	} else {
-		serviceStatus.KexAlgorithms = preferredKexAlgos
+		c.KexAlgorithms = preferredKexAlgos
+		c.checkKeyExchangeAlgorithms()
 	}
+	serverConfig.KeyExchanges = c.KexAlgorithms
+	serviceStatus.KexAlgorithms = c.KexAlgorithms
+
 	if len(c.Ciphers) > 0 {
 		c.Ciphers = util.RemoveDuplicates(c.Ciphers, true)
 		for _, cipher := range c.Ciphers {
@@ -496,11 +490,12 @@ func (c *Configuration) configureSecurityOptions(serverConfig *ssh.ServerConfig)
 				return fmt.Errorf("unsupported cipher %q", cipher)
 			}
 		}
-		serverConfig.Ciphers = c.Ciphers
-		serviceStatus.Ciphers = c.Ciphers
 	} else {
-		serviceStatus.Ciphers = preferredCiphers
+		c.Ciphers = preferredCiphers
 	}
+	serverConfig.Ciphers = c.Ciphers
+	serviceStatus.Ciphers = c.Ciphers
+
 	if len(c.MACs) > 0 {
 		c.MACs = util.RemoveDuplicates(c.MACs, true)
 		for _, mac := range c.MACs {
@@ -508,24 +503,25 @@ func (c *Configuration) configureSecurityOptions(serverConfig *ssh.ServerConfig)
 				return fmt.Errorf("unsupported MAC algorithm %q", mac)
 			}
 		}
-		serverConfig.MACs = c.MACs
-		serviceStatus.MACs = c.MACs
 	} else {
-		serviceStatus.MACs = preferredMACs
+		c.MACs = preferredMACs
 	}
+	serverConfig.MACs = c.MACs
+	serviceStatus.MACs = c.MACs
+
 	return nil
 }
 
 func (c *Configuration) configureLoginBanner(serverConfig *ssh.ServerConfig, configDir string) {
-	if len(c.LoginBannerFile) > 0 {
+	if c.LoginBannerFile != "" {
 		bannerFilePath := c.LoginBannerFile
 		if !filepath.IsAbs(bannerFilePath) {
 			bannerFilePath = filepath.Join(configDir, bannerFilePath)
 		}
 		bannerContent, err := os.ReadFile(bannerFilePath)
 		if err == nil {
-			banner := string(bannerContent)
-			serverConfig.BannerCallback = func(conn ssh.ConnMetadata) string {
+			banner := util.BytesToString(bannerContent)
+			serverConfig.BannerCallback = func(_ ssh.ConnMetadata) string {
 				return banner
 			}
 		} else {
@@ -542,6 +538,7 @@ func (c *Configuration) configureKeyboardInteractiveAuth(serverConfig *ssh.Serve
 	if c.KeyboardInteractiveHook != "" {
 		if !strings.HasPrefix(c.KeyboardInteractiveHook, "http") {
 			if !filepath.IsAbs(c.KeyboardInteractiveHook) {
+				c.KeyboardInteractiveAuthentication = false
 				logger.WarnToConsole("invalid keyboard interactive authentication program: %q must be an absolute path",
 					c.KeyboardInteractiveHook)
 				logger.Warn(logSender, "", "invalid keyboard interactive authentication program: %q must be an absolute path",
@@ -550,6 +547,7 @@ func (c *Configuration) configureKeyboardInteractiveAuth(serverConfig *ssh.Serve
 			}
 			_, err := os.Stat(c.KeyboardInteractiveHook)
 			if err != nil {
+				c.KeyboardInteractiveAuthentication = false
 				logger.WarnToConsole("invalid keyboard interactive authentication program:: %v", err)
 				logger.Warn(logSender, "", "invalid keyboard interactive authentication program:: %v", err)
 				return
@@ -557,35 +555,10 @@ func (c *Configuration) configureKeyboardInteractiveAuth(serverConfig *ssh.Serve
 		}
 	}
 	serverConfig.KeyboardInteractiveCallback = func(conn ssh.ConnMetadata, client ssh.KeyboardInteractiveChallenge) (*ssh.Permissions, error) {
-		sp, err := c.validateKeyboardInteractiveCredentials(conn, client)
-		if err != nil {
-			return nil, newAuthenticationError(fmt.Errorf("could not validate keyboard interactive credentials: %w", err),
-				dataprovider.SSHLoginMethodKeyboardInteractive)
-		}
-
-		return sp, nil
+		return c.validateKeyboardInteractiveCredentials(conn, client, dataprovider.SSHLoginMethodKeyboardInteractive, false)
 	}
 
 	serviceStatus.Authentications = append(serviceStatus.Authentications, dataprovider.SSHLoginMethodKeyboardInteractive)
-}
-
-func canAcceptConnection(ip string) bool {
-	if common.IsBanned(ip, common.ProtocolSSH) {
-		logger.Log(logger.LevelDebug, common.ProtocolSSH, "", "connection refused, ip %q is banned", ip)
-		return false
-	}
-	if err := common.Connections.IsNewConnectionAllowed(ip, common.ProtocolSSH); err != nil {
-		logger.Log(logger.LevelDebug, common.ProtocolSSH, "", "connection not allowed from ip %q: %v", ip, err)
-		return false
-	}
-	_, err := common.LimitRate(common.ProtocolSSH, ip)
-	if err != nil {
-		return false
-	}
-	if err := common.Config.ExecutePostConnectHook(ip, common.ProtocolSSH); err != nil {
-		return false
-	}
-	return true
 }
 
 // AcceptInboundConnection handles an inbound connection to the server instance and determines if the request should be served or not.
@@ -616,13 +589,14 @@ func (c *Configuration) AcceptInboundConnection(conn net.Conn, config *ssh.Serve
 	}
 	// handshake completed so remove the deadline, we'll use IdleTimeout configuration from now on
 	conn.SetDeadline(time.Time{}) //nolint:errcheck
+	go ssh.DiscardRequests(reqs)
 
 	defer conn.Close()
 
 	var user dataprovider.User
 
 	// Unmarshal cannot fails here and even if it fails we'll have a user with no permissions
-	json.Unmarshal([]byte(sconn.Permissions.Extensions["sftpgo_user"]), &user) //nolint:errcheck
+	json.Unmarshal(util.StringToBytes(sconn.Permissions.Extensions["sftpgo_user"]), &user) //nolint:errcheck
 
 	loginType := sconn.Permissions.Extensions["sftpgo_login_method"]
 	connectionID := hex.EncodeToString(sconn.SessionID())
@@ -630,20 +604,20 @@ func (c *Configuration) AcceptInboundConnection(conn net.Conn, config *ssh.Serve
 	defer user.CloseFs() //nolint:errcheck
 	if err = user.CheckFsRoot(connectionID); err != nil {
 		logger.Warn(logSender, connectionID, "unable to check fs root for user %q: %v", user.Username, err)
+		go discardAllChannels(chans, "invalid root fs", connectionID)
 		return
 	}
 
 	logger.Log(logger.LevelInfo, common.ProtocolSSH, connectionID,
-		"User %q logged in with %q, from ip %q, client version %q", user.Username, loginType,
-		ipAddr, string(sconn.ClientVersion()))
+		"User %q logged in with %q, from ip %q, client version %q, negotiated algorithms: %+v",
+		user.Username, loginType, ipAddr, util.BytesToString(sconn.ClientVersion()),
+		sconn.Conn.(ssh.AlgorithmsConnMetadata).Algorithms())
 	dataprovider.UpdateLastLogin(&user)
 
 	sshConnection := common.NewSSHConnection(connectionID, conn)
 	common.Connections.AddSSHConnection(sshConnection)
 
 	defer common.Connections.RemoveSSHConnection(connectionID)
-
-	go ssh.DiscardRequests(reqs)
 
 	channelCounter := int64(0)
 	for newChannel := range chans {
@@ -673,16 +647,15 @@ func (c *Configuration) AcceptInboundConnection(conn net.Conn, config *ssh.Serve
 
 				switch req.Type {
 				case "subsystem":
-					if string(req.Payload[4:]) == "sftp" {
+					if util.BytesToString(req.Payload[4:]) == "sftp" {
 						ok = true
 						connection := &Connection{
 							BaseConnection: common.NewBaseConnection(connID, common.ProtocolSFTP, conn.LocalAddr().String(),
 								conn.RemoteAddr().String(), user),
-							ClientVersion: string(sconn.ClientVersion()),
+							ClientVersion: util.BytesToString(sconn.ClientVersion()),
 							RemoteAddr:    conn.RemoteAddr(),
 							LocalAddr:     conn.LocalAddr(),
 							channel:       channel,
-							folderPrefix:  c.FolderPrefix,
 						}
 						go c.handleSftpConnection(channel, connection)
 					}
@@ -691,11 +664,10 @@ func (c *Configuration) AcceptInboundConnection(conn net.Conn, config *ssh.Serve
 					connection := Connection{
 						BaseConnection: common.NewBaseConnection(connID, "sshd_exec", conn.LocalAddr().String(),
 							conn.RemoteAddr().String(), user),
-						ClientVersion: string(sconn.ClientVersion()),
+						ClientVersion: util.BytesToString(sconn.ClientVersion()),
 						RemoteAddr:    conn.RemoteAddr(),
 						LocalAddr:     conn.LocalAddr(),
 						channel:       channel,
-						folderPrefix:  c.FolderPrefix,
 					}
 					ok = processSSHCommand(req.Payload, &connection, c.EnabledSSHCommands)
 				}
@@ -721,7 +693,7 @@ func (c *Configuration) handleSftpConnection(channel ssh.Channel, connection *Co
 	defer common.Connections.Remove(connection.GetID())
 
 	// Create the server instance for the channel using the handler we created above.
-	server := sftp.NewRequestServer(channel, c.createHandlers(connection), sftp.WithRSAllocator(),
+	server := sftp.NewRequestServer(channel, c.createHandlers(connection),
 		sftp.WithStartDirectory(connection.User.Filters.StartDirectory))
 
 	defer server.Close()
@@ -735,17 +707,6 @@ func (c *Configuration) handleSftpConnection(channel ssh.Channel, connection *Co
 }
 
 func (c *Configuration) createHandlers(connection *Connection) sftp.Handlers {
-	if c.FolderPrefix != "" {
-		prefixMiddleware := newPrefixMiddleware(c.FolderPrefix, connection)
-
-		return sftp.Handlers{
-			FileGet:  prefixMiddleware,
-			FilePut:  prefixMiddleware,
-			FileCmd:  prefixMiddleware,
-			FileList: prefixMiddleware,
-		}
-	}
-
 	return sftp.Handlers{
 		FileGet:  connection,
 		FilePut:  connection,
@@ -754,27 +715,63 @@ func (c *Configuration) createHandlers(connection *Connection) sftp.Handlers {
 	}
 }
 
+func canAcceptConnection(ip string) bool {
+	if common.IsBanned(ip, common.ProtocolSSH) {
+		logger.Log(logger.LevelDebug, common.ProtocolSSH, "", "connection refused, ip %q is banned", ip)
+		return false
+	}
+	if err := common.Connections.IsNewConnectionAllowed(ip, common.ProtocolSSH); err != nil {
+		logger.Log(logger.LevelDebug, common.ProtocolSSH, "", "connection not allowed from ip %q: %v", ip, err)
+		return false
+	}
+	_, err := common.LimitRate(common.ProtocolSSH, ip)
+	if err != nil {
+		return false
+	}
+	if err := common.Config.ExecutePostConnectHook(ip, common.ProtocolSSH); err != nil {
+		return false
+	}
+	return true
+}
+
+func discardAllChannels(in <-chan ssh.NewChannel, message, connectionID string) {
+	for req := range in {
+		err := req.Reject(ssh.ConnectionFailed, message)
+		logger.Debug(logSender, connectionID, "discarded channel request, message %q err: %v", message, err)
+	}
+}
+
 func checkAuthError(ip string, err error) {
-	if authErrors, ok := err.(*ssh.ServerAuthError); ok {
+	var authErrors *ssh.ServerAuthError
+	if errors.As(err, &authErrors) {
 		// check public key auth errors here
 		for _, err := range authErrors.Errors {
 			var sftpAuthErr *authenticationError
 			if errors.As(err, &sftpAuthErr) {
 				if sftpAuthErr.getLoginMethod() == dataprovider.SSHLoginMethodPublicKey {
 					event := common.HostEventLoginFailed
+					logEv := notifier.LogEventTypeLoginFailed
 					if errors.Is(err, util.ErrNotFound) {
 						event = common.HostEventUserNotFound
+						logEv = notifier.LogEventTypeLoginNoUser
 					}
 					common.AddDefenderEvent(ip, common.ProtocolSSH, event)
+					plugin.Handler.NotifyLogEvent(logEv, common.ProtocolSSH, sftpAuthErr.getUsername(), ip, "", err)
 					return
 				}
 			}
 		}
 	} else {
-		logger.ConnectionFailedLog("", ip, dataprovider.LoginMethodNoAuthTryed, common.ProtocolSSH, err.Error())
-		metric.AddNoAuthTryed()
+		logger.ConnectionFailedLog("", ip, dataprovider.LoginMethodNoAuthTried, common.ProtocolSSH, err.Error())
+		metric.AddNoAuthTried()
 		common.AddDefenderEvent(ip, common.ProtocolSSH, common.HostEventNoLoginTried)
-		dataprovider.ExecutePostLoginHook(&dataprovider.User{}, dataprovider.LoginMethodNoAuthTryed, ip, common.ProtocolSSH, err)
+		dataprovider.ExecutePostLoginHook(&dataprovider.User{}, dataprovider.LoginMethodNoAuthTried, ip, common.ProtocolSSH, err)
+		logEv := notifier.LogEventTypeNoLoginTried
+		var negotiationError *ssh.AlgorithmNegotiationError
+		if errors.As(err, &negotiationError) {
+			logEv = notifier.LogEventTypeNotNegotiated
+		}
+		plugin.Handler.NotifyLogEvent(logEv, common.ProtocolSSH, "", ip, "", err)
 	}
 }
 
@@ -800,7 +797,7 @@ func loginUser(user *dataprovider.User, loginMethod, publicKey string, conn ssh.
 			return nil, fmt.Errorf("too many open sessions: %v", activeSessions)
 		}
 	}
-	if !user.IsLoginMethodAllowed(loginMethod, common.ProtocolSSH, conn.PartialSuccessMethods()) {
+	if !user.IsLoginMethodAllowed(loginMethod, common.ProtocolSSH) {
 		logger.Info(logSender, connectionID, "cannot login user %q, login method %q is not allowed",
 			user.Username, loginMethod)
 		return nil, fmt.Errorf("login method %q is not allowed for user %q", loginMethod, user.Username)
@@ -810,7 +807,7 @@ func loginUser(user *dataprovider.User, loginMethod, publicKey string, conn ssh.
 			user.Username)
 		return nil, fmt.Errorf("second factor authentication is not set for user %q", user.Username)
 	}
-	remoteAddr := conn.RemoteAddr().String()
+	remoteAddr := util.GetIPFromRemoteAddress(conn.RemoteAddr().String())
 	if !user.IsLoginFromAddrAllowed(remoteAddr) {
 		logger.Info(logSender, connectionID, "cannot login user %q, remote address is not allowed: %v",
 			user.Username, remoteAddr)
@@ -827,7 +824,7 @@ func loginUser(user *dataprovider.User, loginMethod, publicKey string, conn ssh.
 	}
 	p := &ssh.Permissions{}
 	p.Extensions = make(map[string]string)
-	p.Extensions["sftpgo_user"] = string(json)
+	p.Extensions["sftpgo_user"] = util.BytesToString(json)
 	p.Extensions["sftpgo_login_method"] = loginMethod
 	return p, nil
 }
@@ -849,19 +846,6 @@ func (c *Configuration) checkSSHCommands() {
 	}
 	c.EnabledSSHCommands = sshCommands
 	logger.Debug(logSender, "", "enabled SSH commands %v", c.EnabledSSHCommands)
-}
-
-func (c *Configuration) checkFolderPrefix() {
-	if c.FolderPrefix != "" {
-		c.FolderPrefix = path.Join("/", c.FolderPrefix)
-		if c.FolderPrefix == "/" {
-			c.FolderPrefix = ""
-		}
-	}
-	if c.FolderPrefix != "" {
-		c.EnabledSSHCommands = nil
-		logger.Debug(logSender, "", "folder prefix %q configured, SSH commands are disabled", c.FolderPrefix)
-	}
 }
 
 func (c *Configuration) generateDefaultHostKeys(configDir string) error {
@@ -940,36 +924,14 @@ func (c *Configuration) checkHostKeyAutoGeneration(configDir string) error {
 	return nil
 }
 
-func (c *Configuration) loadModuli(configDir string) {
-	supportedKexAlgos = util.Remove(supportedKexAlgos, kexDHGroupExchangeSHA1)
-	supportedKexAlgos = util.Remove(supportedKexAlgos, kexDHGroupExchangeSHA256)
-	preferredKexAlgos = util.Remove(preferredKexAlgos, kexDHGroupExchangeSHA256)
-	c.Moduli = util.RemoveDuplicates(c.Moduli, false)
-	for _, m := range c.Moduli {
-		m = strings.TrimSpace(m)
-		if !util.IsFileInputValid(m) {
-			logger.Warn(logSender, "", "unable to load invalid moduli file %q", m)
-			logger.WarnToConsole("unable to load invalid host moduli file %q", m)
-			continue
-		}
-		if !filepath.IsAbs(m) {
-			m = filepath.Join(configDir, m)
-		}
-		logger.Info(logSender, "", "loading moduli file %q", m)
-		if err := ssh.ParseModuli(m); err != nil {
-			logger.Warn(logSender, "", "ignoring moduli file %q, error: %v", m, err)
-			continue
-		}
-		if !util.Contains(supportedKexAlgos, kexDHGroupExchangeSHA1) {
-			supportedKexAlgos = append(supportedKexAlgos, kexDHGroupExchangeSHA1)
-		}
-		if !util.Contains(supportedKexAlgos, kexDHGroupExchangeSHA256) {
-			supportedKexAlgos = append(supportedKexAlgos, kexDHGroupExchangeSHA256)
-		}
-		if !util.Contains(preferredKexAlgos, kexDHGroupExchangeSHA256) {
-			preferredKexAlgos = append(preferredKexAlgos, kexDHGroupExchangeSHA256)
+func (c *Configuration) getHostKeyAlgorithms(keyFormat string) []string {
+	var algos []string
+	for _, algo := range algorithmsForKeyFormat(keyFormat) {
+		if util.Contains(c.HostKeyAlgorithms, algo) {
+			algos = append(algos, algo)
 		}
 	}
+	return algos
 }
 
 // If no host keys are defined we try to use or generate the default ones.
@@ -1006,19 +968,37 @@ func (c *Configuration) checkAndLoadHostKeys(configDir string, serverConfig *ssh
 		k := HostKey{
 			Path:        hostKey,
 			Fingerprint: ssh.FingerprintSHA256(private.PublicKey()),
+			Algorithms:  c.getHostKeyAlgorithms(private.PublicKey().Type()),
+		}
+		mas, err := ssh.NewSignerWithAlgorithms(private.(ssh.AlgorithmSigner), k.Algorithms)
+		if err != nil {
+			return fmt.Errorf("could not create signer for key %q with algorithms %+v: %w", k.Path, k.Algorithms, err)
 		}
 		serviceStatus.HostKeys = append(serviceStatus.HostKeys, k)
-		logger.Info(logSender, "", "Host key %q loaded, type %q, fingerprint %q", hostKey,
-			private.PublicKey().Type(), k.Fingerprint)
+		logger.Info(logSender, "", "Host key %q loaded, type %q, fingerprint %q, algorithms %+v", hostKey,
+			private.PublicKey().Type(), k.Fingerprint, k.Algorithms)
 
 		// Add private key to the server configuration.
-		serverConfig.AddHostKey(private)
+		serverConfig.AddHostKey(mas)
 		for _, cert := range hostCertificates {
-			signer, err := ssh.NewCertSigner(cert, private)
+			signer, err := ssh.NewCertSigner(cert.Certificate, mas)
 			if err == nil {
+				var algos []string
+				for _, algo := range algorithmsForKeyFormat(signer.PublicKey().Type()) {
+					if underlyingAlgo, ok := certKeyAlgoNames[algo]; ok {
+						if util.Contains(mas.Algorithms(), underlyingAlgo) {
+							algos = append(algos, algo)
+						}
+					}
+				}
+				serviceStatus.HostKeys = append(serviceStatus.HostKeys, HostKey{
+					Path:        cert.Path,
+					Fingerprint: ssh.FingerprintSHA256(signer.PublicKey()),
+					Algorithms:  algos,
+				})
 				serverConfig.AddHostKey(signer)
-				logger.Info(logSender, "", "Host certificate loaded for host key %q, fingerprint %q",
-					hostKey, ssh.FingerprintSHA256(signer.PublicKey()))
+				logger.Info(logSender, "", "Host certificate loaded for host key %q, fingerprint %q, algorithms %+v",
+					hostKey, ssh.FingerprintSHA256(signer.PublicKey()), algos)
 			}
 		}
 	}
@@ -1031,8 +1011,8 @@ func (c *Configuration) checkAndLoadHostKeys(configDir string, serverConfig *ssh
 	return nil
 }
 
-func (c *Configuration) loadHostCertificates(configDir string) ([]*ssh.Certificate, error) {
-	var certs []*ssh.Certificate
+func (c *Configuration) loadHostCertificates(configDir string) ([]hostCertificate, error) {
+	var certs []hostCertificate
 	for _, certPath := range c.HostCertificates {
 		certPath = strings.TrimSpace(certPath)
 		if !util.IsFileInputValid(certPath) {
@@ -1058,7 +1038,10 @@ func (c *Configuration) loadHostCertificates(configDir string) ([]*ssh.Certifica
 		if cert.CertType != ssh.HostCert {
 			return nil, fmt.Errorf("the file %q is not an host certificate", certPath)
 		}
-		certs = append(certs, cert)
+		certs = append(certs, hostCertificate{
+			Path:        certPath,
+			Certificate: cert,
+		})
 	}
 	return certs, nil
 }
@@ -1113,6 +1096,21 @@ func (c *Configuration) initializeCertChecker(configDir string) error {
 	return revokedCertManager.load()
 }
 
+func (c *Configuration) getPartialSuccessError(nextAuthMethods []string) error {
+	err := &ssh.PartialSuccessError{}
+	if c.PasswordAuthentication && util.Contains(nextAuthMethods, dataprovider.LoginMethodPassword) {
+		err.Next.PasswordCallback = func(conn ssh.ConnMetadata, password []byte) (*ssh.Permissions, error) {
+			return c.validatePasswordCredentials(conn, password, dataprovider.SSHLoginMethodKeyAndPassword)
+		}
+	}
+	if c.KeyboardInteractiveAuthentication && util.Contains(nextAuthMethods, dataprovider.SSHLoginMethodKeyboardInteractive) {
+		err.Next.KeyboardInteractiveCallback = func(conn ssh.ConnMetadata, client ssh.KeyboardInteractiveChallenge) (*ssh.Permissions, error) {
+			return c.validateKeyboardInteractiveCredentials(conn, client, dataprovider.SSHLoginMethodKeyAndKeyboardInt, true)
+		}
+	}
+	return err
+}
+
 func (c *Configuration) validatePublicKeyCredentials(conn ssh.ConnMetadata, pubKey ssh.PublicKey) (*ssh.Permissions, error) {
 	var err error
 	var user dataprovider.User
@@ -1163,9 +1161,9 @@ func (c *Configuration) validatePublicKeyCredentials(conn ssh.ConnMetadata, pubK
 			keyID = fmt.Sprintf("%s: ID: %s, serial: %v, CA %s %s", certFingerprint,
 				cert.KeyId, cert.Serial, cert.Type(), ssh.FingerprintSHA256(cert.SignatureKey))
 		}
-		if user.IsPartialAuth(method) {
+		if user.IsPartialAuth() {
 			logger.Debug(logSender, connectionID, "user %q authenticated with partial success", conn.User())
-			return certPerm, ssh.ErrPartialSuccess
+			return certPerm, c.getPartialSuccessError(user.GetNextAuthMethods())
 		}
 		sshPerm, err = loginUser(&user, method, keyID, conn)
 		if err == nil && certPerm != nil {
@@ -1184,56 +1182,65 @@ func (c *Configuration) validatePublicKeyCredentials(conn ssh.ConnMetadata, pubK
 	return sshPerm, err
 }
 
-func (c *Configuration) validatePasswordCredentials(conn ssh.ConnMetadata, pass []byte) (*ssh.Permissions, error) {
+func (c *Configuration) validatePasswordCredentials(conn ssh.ConnMetadata, pass []byte, method string) (*ssh.Permissions, error) {
 	var err error
 	var user dataprovider.User
 	var sshPerm *ssh.Permissions
 
-	method := dataprovider.LoginMethodPassword
-	if len(conn.PartialSuccessMethods()) == 1 {
-		method = dataprovider.SSHLoginMethodKeyAndPassword
-	}
 	ipAddr := util.GetIPFromRemoteAddress(conn.RemoteAddr().String())
-	if user, err = dataprovider.CheckUserAndPass(conn.User(), string(pass), ipAddr, common.ProtocolSSH); err == nil {
+	if user, err = dataprovider.CheckUserAndPass(conn.User(), util.BytesToString(pass), ipAddr, common.ProtocolSSH); err == nil {
 		sshPerm, err = loginUser(&user, method, "", conn)
 	}
 	user.Username = conn.User()
 	updateLoginMetrics(&user, ipAddr, method, err)
-	return sshPerm, err
+	if err != nil {
+		return nil, newAuthenticationError(fmt.Errorf("could not validate password credentials: %w", err), method, conn.User())
+	}
+	return sshPerm, nil
 }
 
-func (c *Configuration) validateKeyboardInteractiveCredentials(conn ssh.ConnMetadata, client ssh.KeyboardInteractiveChallenge) (*ssh.Permissions, error) {
+func (c *Configuration) validateKeyboardInteractiveCredentials(conn ssh.ConnMetadata, client ssh.KeyboardInteractiveChallenge,
+	method string, isPartialAuth bool,
+) (*ssh.Permissions, error) {
 	var err error
 	var user dataprovider.User
 	var sshPerm *ssh.Permissions
 
-	method := dataprovider.SSHLoginMethodKeyboardInteractive
-	if len(conn.PartialSuccessMethods()) == 1 {
-		method = dataprovider.SSHLoginMethodKeyAndKeyboardInt
-	}
 	ipAddr := util.GetIPFromRemoteAddress(conn.RemoteAddr().String())
 	if user, err = dataprovider.CheckKeyboardInteractiveAuth(conn.User(), c.KeyboardInteractiveHook, client,
-		ipAddr, common.ProtocolSSH); err == nil {
+		ipAddr, common.ProtocolSSH, isPartialAuth); err == nil {
 		sshPerm, err = loginUser(&user, method, "", conn)
 	}
 	user.Username = conn.User()
 	updateLoginMetrics(&user, ipAddr, method, err)
-	return sshPerm, err
+	if err != nil {
+		return nil, newAuthenticationError(fmt.Errorf("could not validate keyboard interactive credentials: %w", err), method, conn.User())
+	}
+	return sshPerm, nil
 }
 
 func updateLoginMetrics(user *dataprovider.User, ip, method string, err error) {
 	metric.AddLoginAttempt(method)
-	if err != nil {
+	if err == nil {
+		plugin.Handler.NotifyLogEvent(notifier.LogEventTypeLoginOK, common.ProtocolSSH, user.Username, ip, "", err)
+		common.DelayLogin(nil)
+	} else {
 		logger.ConnectionFailedLog(user.Username, ip, method, common.ProtocolSSH, err.Error())
 		if method != dataprovider.SSHLoginMethodPublicKey {
 			// some clients try all available public keys for a user, we
 			// record failed login key auth only once for session if the
 			// authentication fails in checkAuthError
 			event := common.HostEventLoginFailed
+			logEv := notifier.LogEventTypeLoginFailed
 			if errors.Is(err, util.ErrNotFound) {
 				event = common.HostEventUserNotFound
+				logEv = notifier.LogEventTypeLoginNoUser
 			}
 			common.AddDefenderEvent(ip, common.ProtocolSSH, event)
+			plugin.Handler.NotifyLogEvent(logEv, common.ProtocolSSH, user.Username, ip, "", err)
+			if method != dataprovider.SSHLoginMethodPublicKey {
+				common.DelayLogin(err)
+			}
 		}
 	}
 	metric.AddLoginResult(method, err)
@@ -1291,4 +1298,15 @@ func (r *revokedCertificates) isRevoked(fp string) bool {
 // Reload reloads the list of revoked user certificates
 func Reload() error {
 	return revokedCertManager.load()
+}
+
+func algorithmsForKeyFormat(keyFormat string) []string {
+	switch keyFormat {
+	case ssh.KeyAlgoRSA:
+		return []string{ssh.KeyAlgoRSASHA256, ssh.KeyAlgoRSASHA512, ssh.KeyAlgoRSA}
+	case ssh.CertAlgoRSAv01:
+		return []string{ssh.CertAlgoRSASHA256v01, ssh.CertAlgoRSASHA512v01, ssh.CertAlgoRSAv01}
+	default:
+		return []string{keyFormat}
+	}
 }

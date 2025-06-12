@@ -1,4 +1,4 @@
-// Copyright (C) 2019-2023 Nicola Murino
+// Copyright (C) 2019 Nicola Murino
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published
@@ -19,12 +19,12 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"html/template"
 	"io"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -44,6 +44,8 @@ import (
 	"github.com/lestrrat-go/jwx/v2/jwt"
 	"github.com/rs/xid"
 	"github.com/sftpgo/sdk"
+	sdkkms "github.com/sftpgo/sdk/kms"
+	"github.com/sftpgo/sdk/plugin/notifier"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -82,207 +84,208 @@ CzgWkxiz7XE4lgUwX44FCXZM3+JeUbI=
 -----END EC PRIVATE KEY-----`
 	caCRT = `-----BEGIN CERTIFICATE-----
 MIIE5jCCAs6gAwIBAgIBATANBgkqhkiG9w0BAQsFADATMREwDwYDVQQDEwhDZXJ0
-QXV0aDAeFw0yMzAxMDMxMDIwNDdaFw0zMzAxMDMxMDMwNDZaMBMxETAPBgNVBAMT
-CENlcnRBdXRoMIICIjANBgkqhkiG9w0BAQEFAAOCAg8AMIICCgKCAgEAxq6Wl1Ih
-hgvGdM8M2IVI7dwnv3yShJygZsnREQSEW0xeWJL5DtNeHCME5WByFUAlZKpePtW8
-TNwln9DYDtgNSMiWwvO/wR0mXsyU8Ma4ZBMlX0oOkWo1Ff/M/u8YY9X78Vvwdt62
-Yt7QmU5oUUW2HdAgh4AlhKJSjm3t0uDP5s54uvueL5bjChHwEb1ZGOtST9Zt86cj
-YA/xtVHnDXCJbhohpzQI6dK96NegONZVDaxEohVCyYYOgI1I14Bxu0ZCMm5GjwoO
-QohnUfEJ+BRgZqFpbsnYCE+PoVayVVFoLA+GMeqbQ2SHej1Pr1K0dbjUz6SAk8/+
-DL7h8d+YAtflATsMtdsVJ4WzEfvZbSbiYKYmlVC6zk6ooXWadvQ5+aezVes9WMpH
-YnAoScuKoeerRuKlsSU7u+XCmy/i7Hii5FwMrSvIL2GLtVE+tJFCTABA55OWZikt
-ULMQfg3P2Hk3GFIE35M10mSjKQkGhz06WC5UQ7f2Xl9GzO6PqRSorzugewgMK6L4
-SnN7XBFnUHHqx1bWNkUG8NPYB6Zs7UDHygemTWxqqxun43s501DNTSunCKIhwFbt
-1ol5gOvYAFG+BXxnggBT815Mgz1Zht3S9CuprAgz0grNEwAYjRTm1PSaX3t8I1kv
-oUUuMF6BzWLHJ66uZKOCsPs3ouGq+G3GfWUCAwEAAaNFMEMwDgYDVR0PAQH/BAQD
-AgEGMBIGA1UdEwEB/wQIMAYBAf8CAQAwHQYDVR0OBBYEFCj8lmcR7loB9zAP/feo
-t1eIHWmIMA0GCSqGSIb3DQEBCwUAA4ICAQCu46fF0Tr2tZz1wkYt2Ty3OU77jcG9
-zYU/7uxPqPC8OYIzQJrumXKLOkTYJXJ7k+7RQdsn/nbxdH1PbslNDD3Eid/sZsF/
-dFdGR1ZYwXVQbpYwEd19CvJTALn9CyAZpMS8J2RJrmdScAeSSb0+nAGTYP7GvPm+
-8ktOnrz3w8FtzTw+seuCW/DI/5UpfC9Jf+i/3XgxDozXWNW6YNOIw/CicyaqbBTk
-5WFcJ0WJN+8qQurw8n+sOvQcNsuDTO7K3Tqu0wGTDUQKou7kiMX0UISRvd8roNOl
-zvvokNQe4VgCGQA+Y2SxvSxVG1BaymYeNw/0Yxm7QiKSUI400V1iKIcpnIvIedJR
-j2bGIlslVSV/P6zkRuF1srRVxTxSf1imEfs8J8mMhHB6DkOsP4Y93z5s6JZ0sPiM
-eOb0CVKul/e1R0Kq23AdPf5eUv63RhfmokN1OsdarRKMFyHphWMxqGJXsSvRP+dl
-3DaKeTDx/91OSWiMc+glHHKKJveMYQLeJ7GXmcxhuoBm6o4Coowgw8NFKMCtAsp0
-ktvsQuhB3uFUterw/2ONsOChx7Ybu36Zk47TKBpktfxDQ578TVoZ7xWSAFqCPHvx
-A5VSwAg7tdBvORfqQjhiJRnhwr50RaNQABTLS0l5Vsn2mitApPs7iKiIts2ieWsU
-EsdgvPZR2e5IkA==
+QXV0aDAeFw0yNDAxMTAxODEyMDRaFw0zNDAxMTAxODIxNTRaMBMxETAPBgNVBAMT
+CENlcnRBdXRoMIICIjANBgkqhkiG9w0BAQEFAAOCAg8AMIICCgKCAgEA7WHW216m
+fi4uF8cx6HWf8wvAxaEWgCHTOi2MwFIzOrOtuT7xb64rkpdzx1aWetSiCrEyc3D1
+v03k0Akvlz1gtnDtO64+MA8bqlTnCydZJY4cCTvDOBUYZgtMqHZzpE6xRrqQ84zh
+yzjKQ5bR0st+XGfIkuhjSuf2n/ZPS37fge9j6AKzn/2uEVt33qmO85WtN3RzbSqL
+CdOJ6cQ216j3la1C5+NWvzIKC7t6NE1bBGI4+tRj7B5P5MeamkkogwbExUjdHp3U
+4yasvoGcCHUQDoa4Dej1faywz6JlwB6rTV4ys4aZDe67V/Q8iB2May1k7zBz1Ztb
+KF5Em3xewP1LqPEowF1uc4KtPGcP4bxdaIpSpmObcn8AIfH6smLQrn0C3cs7CYfo
+NlFuTbwzENUhjz0X6EsoM4w4c87lO+dRNR7YpHLqR/BJTbbyXUB0imne1u00fuzb
+S7OtweiA9w7DRCkr2gU4lmHe7l0T+SA9pxIeVLb78x7ivdyXSF5LVQJ1JvhhWu6i
+M6GQdLHat/0fpRFUbEe34RQSDJ2eOBifMJqvsvpBP8d2jcRZVUVrSXGc2mAGuGOY
+/tmnCJGW8Fd+sgpCVAqM0pxCM+apqrvJYUqqQZ2ZxugCXULtRWJ9p4C9zUl40HEy
+OQ+AaiiwFll/doXELglcJdNg8AZPGhugfxMCAwEAAaNFMEMwDgYDVR0PAQH/BAQD
+AgEGMBIGA1UdEwEB/wQIMAYBAf8CAQAwHQYDVR0OBBYEFNoJhIvDZQrEf/VQbWuu
+XgNnt2m5MA0GCSqGSIb3DQEBCwUAA4ICAQCYhT5SRqk19hGrQ09hVSZOzynXAa5F
+sYkEWJzFyLg9azhnTPE1bFM18FScnkd+dal6mt+bQiJvdh24NaVkDghVB7GkmXki
+pAiZwEDHMqtbhiPxY8LtSeCBAz5JqXVU2Q0TpAgNSH4W7FbGWNThhxcJVOoIrXKE
+jbzhwl1Etcaf0DBKWliUbdlxQQs65DLy+rNBYtOeK0pzhzn1vpehUlJ4eTFzP9KX
+y2Mksuq9AspPbqnqpWW645MdTxMb5T57MCrY3GDKw63z5z3kz88LWJF3nOxZmgQy
+WFUhbLmZm7x6N5eiu6Wk8/B4yJ/n5UArD4cEP1i7nqu+mbbM/SZlq1wnGpg/sbRV
+oUF+a7pRcSbfxEttle4pLFhS+ErKatjGcNEab2OlU3bX5UoBs+TYodnCWGKOuBKV
+L/CYc65QyeYZ+JiwYn9wC8YkzOnnVIQjiCEkLgSL30h9dxpnTZDLrdAA8ItelDn5
+DvjuQq58CGDsaVqpSobiSC1DMXYWot4Ets1wwovUNEq1l0MERB+2olE+JU/8E23E
+eL1/aA7Kw/JibkWz1IyzClpFDKXf6kR2onJyxerdwUL+is7tqYFLysiHxZDL1bli
+SXbW8hMa5gvo0IilFP9Rznn8PplIfCsvBDVv6xsRr5nTAFtwKaMBVgznE2ghs69w
+kK8u1YiiVenmoQ==
 -----END CERTIFICATE-----`
 	caKey = `-----BEGIN RSA PRIVATE KEY-----
-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
+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
 -----END RSA PRIVATE KEY-----`
 	caCRL = `-----BEGIN X509 CRL-----
-MIICpjCBjwIBATANBgkqhkiG9w0BAQsFADATMREwDwYDVQQDEwhDZXJ0QXV0aBcN
-MjMwMTAzMTAzMzI4WhcNMjUwMTAyMTAzMzI4WjAjMCECEHUfHtKUGlg/86yMN/aM
-xxsXDTIzMDEwMzEwMzMyOFqgIzAhMB8GA1UdIwQYMBaAFCj8lmcR7loB9zAP/feo
-t1eIHWmIMA0GCSqGSIb3DQEBCwUAA4ICAQAJf6MBMUc3xWKB6fy0VoPbXQjVTsL4
-Yjm5lKaCtvcRiJ6onaITfJL6V3OCy/MAe94sHynvK3DyyYvxJ0ms7y+kmEtFzHwz
-T+hBPHaEV/Ccamt+3zRZwndwEMomkQz5tBipwimOlsYXWqItjhXHcLLr84jWgqpD
-JHcfDmLswCeJVqe8xyYSYCnWMjQ3sn0h+arjm53SdHTULlsjgKeX/ao2IJwt1Ddr
-APYKZ/XBWq9vBq3l4l2Ufj16fUBY5NeHTjQcLLrkwmBwpSb0YS8+jBwmOwo1HwEF
-MEwADBTHI2jT4ygzzKefVETfcSk4CuIQ1ve0qQL7KY5Fg5AXwbRycev6R0vEHR82
-oOPAqg+dYgKtdkxK5QZrNLenloq6x0/3oEThwOg3J17+eCYjixBC+3PoUzLa+yfZ
-xSQ/kkcRJExEhadw5I9TI7sEUk1RjDCl6AtHg53LQifokiLLfMRptOiN3a4NlLJ2
-HNXfWUltRUnr6MCxk+G7U5Zaj1QtCN3Aldw+3xcJr7FOBU23VqRT22XbfW+B1gsr
-4eNlw5Kk/PDF/WZeGbrwy7fvpSoFsDYI8lpVlzKVwLampIZVhnWsfaf7jk/pc4T0
-6iZ+rnB6CP4P+LM34jKYiAtz+iufjEB6Ko0jN0ZWCznDGDVgMwnVynGJNKU+4bl8
-vC4nIbS2OhclcA==
+MIICpzCBkAIBATANBgkqhkiG9w0BAQsFADATMREwDwYDVQQDEwhDZXJ0QXV0aBcN
+MjQwMTEwMTgyMjU4WhcNMjYwMTA5MTgyMjU4WjAkMCICEQDOaeHbjY4pEj8WBmqg
+ZuRRFw0yNDAxMTAxODIyNThaoCMwITAfBgNVHSMEGDAWgBTaCYSLw2UKxH/1UG1r
+rl4DZ7dpuTANBgkqhkiG9w0BAQsFAAOCAgEAZzZ4aBqCcAJigR9e/mqKpJa4B6FV
++jZmnWXolGeUuVkjdiG9w614x7mB2S768iioJyALejjCZjqsp6ydxtn0epQw4199
+XSfPIxA9lxc7w79GLe0v3ztojvxDPh5V1+lwPzGf9i8AsGqb2BrcBqgxDeatndnE
+jF+18bY1saXOBpukNLjtRScUXzy5YcSuO6mwz4548v+1ebpF7W4Yh+yh0zldJKcF
+DouuirZWujJwTwxxfJ+2+yP7GAuefXUOhYs/1y9ylvUgvKFqSyokv6OaVgTooKYD
+MSADzmNcbRvwyAC5oL2yJTVVoTFeP6fXl/BdFH3sO/hlKXGy4Wh1AjcVE6T0CSJ4
+iYFX3gLFh6dbP9IQWMlIM5DKtAKSjmgOywEaWii3e4M0NFSf/Cy17p2E5/jXSLlE
+ypDileK0aALkx2twGWwogh6sY1dQ6R3GpKSRPD2muQxVOG6wXvuJce0E9WLx1Ud4
+hVUdUEMlKUvm77/15U5awarH2cCJQxzS/GMeIintQiG7hUlgRzRdmWVe3vOOvt94
+cp8+ZUH/QSDOo41ATTHpFeC/XqF5E2G/ahXqra+O5my52V/FP0bSJnkorJ8apy67
+sn6DFbkqX9khTXGtacczh2PcqVjcQjBniYl2sPO3qIrrrY3tic96tMnM/u3JRdcn
+w7bXJGfJcIMrrKs=
 -----END X509 CRL-----`
 	client1Crt = `-----BEGIN CERTIFICATE-----
-MIIEIDCCAgigAwIBAgIQWwKNgBzKWM8ewyS4K78uOTANBgkqhkiG9w0BAQsFADAT
-MREwDwYDVQQDEwhDZXJ0QXV0aDAeFw0yMzAxMDMxMDIzMTFaFw0zMzAxMDMxMDMw
-NDVaMBIxEDAOBgNVBAMTB2NsaWVudDEwggEiMA0GCSqGSIb3DQEBAQUAA4IBDwAw
-ggEKAoIBAQC+jwuaG0FSpPtE5mZPBgdacAhXXa51/TIT18HTm+QnOYUcGRel3AuZ
-OBWv3fOallW8iQX3i+M78cKeTMWOS5RGXCdDe866pYXEyUkZFRRSA/6573Dz5dJ/
-DZOCsgW+91JlSkM1+FYE9cpt4qLkdAjSRXIoebcA64K60wqZr1Js+pQrH3leT9wu
-33dM3KHkDHOeMj6X/V1me22htndD/DUlWmPc58jMFbcvxFG3oUBB9U65LJBwJNzr
-XWVcli2QirZ0fLkC7Lo2FIYuN1qeU/8A/T4TTInZb/eW3Faqv4RuhjWPXFLqkdIP
-4AzDxCNuhlWqyv9nfgegXAHOHpXZMDKxAgMBAAGjcTBvMA4GA1UdDwEB/wQEAwID
-uDAdBgNVHSUEFjAUBggrBgEFBQcDAQYIKwYBBQUHAwIwHQYDVR0OBBYEFKloKnzI
-w7YYnjm1sKU+LgvT5dU0MB8GA1UdIwQYMBaAFCj8lmcR7loB9zAP/feot1eIHWmI
-MA0GCSqGSIb3DQEBCwUAA4ICAQAeja0rK7I14ibgis9vSPXAGmmKpagIjvZiYCE6
-Ti/Rq6qbyQ6tKL08NxR2XPNjoXfxwGOGgboWR86S7WT93pz3HkftAjTfzUnxnXOx
-S7dWfq+g0uY/3ql6IFDQBpGKHu/KN8/1Pvn39FiYSdCaM66bwyFukcvBXace+aC1
-M6jzVsscxoCCjXhcZl++Tjpf6TzGMd8OFyArBQmOUCoFrTcMzLPKSAROAHp0k+Ju
-HHNgLdgXPQCfAgRbWnqq2o2moApe7+gzMS+1X0eKhIXYS7csK8rFvGzjH/ANDo9A
-8+AFcJh8YiIlEVI8nCb3ERdpAbu6G5xkfUDkqcWjCAhuokrbeFmU82RQOc3TQZc9
-NMHfTkCOPhaIdPI/kC+fZkdz+5ftDCl/radSljeMX+/y0DVQUOtrQzyT1PBN0vCx
-L+FCzj0fHJwdoDiFLxDLLN1pYWsxMnIichpg625CZM9r5i183yPErXxxQPydcDrX
-Y6Ps7rGiU7eGILhAfQnS1XUDvH0gNfLUvO5uWm6yO4yUEDWkA/wOTnrc8Z5Waza+
-kH+FmxnYpT1rMloTSoyiHIPvTq1nVJ8LILUODZAxW+ZHmccGgOpIN/DWuWunVRHG
-tuaTSgU1xjWl2q/SeoS2DpiEKTIAZZQ5CTD819oc8SnLTzK0ISRpBXKg13AF2uJD
-G9q7sA==
+MIIEITCCAgmgAwIBAgIRAJr32nHRlhyPiS7IfZ/ZWYowDQYJKoZIhvcNAQELBQAw
+EzERMA8GA1UEAxMIQ2VydEF1dGgwHhcNMjQwMTEwMTgxMjM3WhcNMzQwMTEwMTgy
+MTUzWjASMRAwDgYDVQQDEwdjbGllbnQxMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8A
+MIIBCgKCAQEAtuQFiqvdjd8WLxP0FgPDyDEJ1/uJ+Aoj6QllNV7svWxwW+kiJ3X6
+HUVNWhhCsNfly4pGW4erF4fZzmesElGx1PoWgQCWZKsa/N08bznelWgdmkyi85xE
+OkTj6e/cTWHFSOBURNJaXkGHZ0ROSh7qu0Ld+eqNo3k9W+NqZaqYvs2K7MLWeYl7
+Qie8Ctuq5Qaz/jm0XwR2PFBROVQSaCPCukancPQ21ftqHPhAbjxoxvvN5QP4ZdRf
+XlH/LDLhlFnJzPZdHnVy9xisSPPRfFApJiwyfjRYdtslpJOcNgP6oPlpX/dybbhO
+c9FEUgj/Q90Je8EfioBYFYsqVD6/dFv9SwIDAQABo3EwbzAOBgNVHQ8BAf8EBAMC
+A7gwHQYDVR0lBBYwFAYIKwYBBQUHAwEGCCsGAQUFBwMCMB0GA1UdDgQWBBRUh5Xo
+Gzjh6iReaPSOgGatqOw9bDAfBgNVHSMEGDAWgBTaCYSLw2UKxH/1UG1rrl4DZ7dp
+uTANBgkqhkiG9w0BAQsFAAOCAgEAyAK7cOTWqjyLgFM0kyyx1fNPvm2GwKep3MuU
+OrSnLuWjoxzb7WcbKNVMlnvnmSUAWuErxsY0PUJNfcuqWiGmEp4d/SWfWPigG6DC
+sDej35BlSfX8FCufYrfC74VNk4yBS2LVYmIqcpqUrfay0I2oZA8+ToLEpdUvEv2I
+l59eOhJO2jsC3JbOyZZmK2Kv7d94fR+1tg2Rq1Wbnmc9AZKq7KDReAlIJh4u2KHb
+BbtF79idusMwZyP777tqSQ4THBMa+VAEc2UrzdZqTIAwqlKQOvO2fRz2P+ARR+Tz
+MYJMdCdmPZ9qAc8U1OcFBG6qDDltO8wf/Nu/PsSI5LGCIhIuPPIuKfm0rRfTqCG7
+QPQPWjRoXtGGhwjdIuWbX9fIB+c+NpAEKHgLtV+Rxj8s5IVxqG9a5TtU9VkfVXJz
+J20naoz/G+vDsVINpd3kH0ziNvdrKfGRM5UgtnUOPCXB22fVmkIsMH2knI10CKK+
+offI56NTkLRu00xvg98/wdukhkwIAxg6PQI/BHY5mdvoacEHHHdOhMq+GSAh7DDX
+G8+HdbABM1ExkPnZLat15q706ztiuUpQv1C2DI8YviUVkMqCslj4cD4F8EFPo4kr
+kvme0Cuc9Qlf7N5rjdV3cjwavhFx44dyXj9aesft2Q1okPiIqbGNpcjHcIRlj4Au
+MU3Bo0A=
 -----END CERTIFICATE-----`
 	client1Key = `-----BEGIN RSA PRIVATE KEY-----
-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
+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
 -----END RSA PRIVATE KEY-----`
 	// client 2 crt is revoked
 	client2Crt = `-----BEGIN CERTIFICATE-----
-MIIEIDCCAgigAwIBAgIQdR8e0pQaWD/zrIw39ozHGzANBgkqhkiG9w0BAQsFADAT
-MREwDwYDVQQDEwhDZXJ0QXV0aDAeFw0yMzAxMDMxMDIzMTRaFw0zMzAxMDMxMDMw
-NDVaMBIxEDAOBgNVBAMTB2NsaWVudDIwggEiMA0GCSqGSIb3DQEBAQUAA4IBDwAw
-ggEKAoIBAQC/UZqUxeP15lhXBmPmpS5SdI470R75fxmN14FhYwTS3FsDoT+evqRg
-II4Qo/wqbaGrk/BsbzB7ToVWqpkyZ58hYPdtLjKtBBHYsSCNCoKZEVJTz5JdW3sj
-CKRsG3zPVhFjJcYW9pKsr/CGIIDWAfkuuwR+R/NHkUFSjEP5N9qMAc9wBvskxV84
-YAJJykPD9rG8PjXHOKsfNUhH+/QfbqMkCeETJ1sp66o3ilql2aZ0m6K6x4gB7tM7
-NZnM4eztLZbAnQVQhNBYCR6i7DGI2dujujPbpCqmSqSb42n+3a2o844k6EnU76HJ
-RZwhd3ypy9CvTdkya5JbK+aKKo8fGFHbAgMBAAGjcTBvMA4GA1UdDwEB/wQEAwID
-uDAdBgNVHSUEFjAUBggrBgEFBQcDAQYIKwYBBQUHAwIwHQYDVR0OBBYEFLItEDE1
-gVYfe7JSax5YAjEW8tmzMB8GA1UdIwQYMBaAFCj8lmcR7loB9zAP/feot1eIHWmI
-MA0GCSqGSIb3DQEBCwUAA4ICAQCZRStHCbwmhmH4tu7V5ammmQhn1TKcspV86cXz
-JQ4ZM11RvGpRLTmYuRkl5XloMuvB8yYAE1ihhkYOhgU6zSAj33kUQSx6cHXWau7T
-NjTchptKX+b17GR/yuFwIR3TugArBsnwyuUdts478gTY+MSgTOWWyOgWl3FujiEJ
-GJ7EgKde4jURXv2qjp6ZtSVqMlAa3y8C3S8nLdyt9Rf8CcSjEy/t8t0JhoMYCvxg
-o1k7QhMCfMYjjEIuEyDVOdCs2ExepG1zUVBP5h5239sXvLKrOZvgCZkslyTNd/m9
-vv4yR5gLgCdt0Ol1uip0p910PJoSqX6nZNfeCx3+Kgyc7crl8PrsnUAVoPgLxpVm
-FWF+KlUbh2KiYTuSi5cH0Ti9NtWT3Qi8d4WhmjFlu0zD3EJEUie0oYfHERiO9bVo
-5EAzERSVhgQdxVOLgIc2Hbe1JYFf7idyqASRw6KdVkW6YIC/V/5efrJ1LZ5QNrdv
-bmfJ5CznE6o1AH9JsQ8xMi+kmyn/It1uMWIwP/tYyjQ98dlOj2k9CHP2RzrvCCY9
-yZNjs2QC5cleNdSpNMb2J2EUYTNAnaH3H8YdbT0scMHDvre1G7p4AjeuRJ9mW7VK
-Dcqbw+VdSAPyAFdiCd9x8AU3sr28vYbPbPp+LsHQXIlYdnVR0hh2UKF5lR8iuqVx
-y05cAQ==
+MIIEITCCAgmgAwIBAgIRAM5p4duNjikSPxYGaqBm5FEwDQYJKoZIhvcNAQELBQAw
+EzERMA8GA1UEAxMIQ2VydEF1dGgwHhcNMjQwMTEwMTgxMjUyWhcNMzQwMTEwMTgy
+MTUzWjASMRAwDgYDVQQDEwdjbGllbnQyMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8A
+MIIBCgKCAQEApNYpNZVmXZtAObpRRIuP2o/7z04H2E161vKZvJ3LSLlUTImVjm/b
+Qe6DTNCUVLnzQuanmUlu2rUnN3lDSfYoBcJWbvC3y1OCPRkCjDV6KiYMA9TPkZua
+eq6y3+bFFfEmyumsVEe0bSuzNHXCOIBT7PqYMdovECcwBh/RZCA5mqO5omEKh4LQ
+cr6+sVVkvD3nsyx0Alz/kTLFqc0mVflmpJq+0BpdetHRg4n5vy/I/08jZ81PQAmT
+A0kyl0Jh132JBGFdA8eyugPPP8n5edU4f3HXV/nR7XLwBrpSt8KgEg8cwfAu4Ic0
+6tGzB0CH8lSGtU0tH2/cOlDuguDD7VvokQIDAQABo3EwbzAOBgNVHQ8BAf8EBAMC
+A7gwHQYDVR0lBBYwFAYIKwYBBQUHAwEGCCsGAQUFBwMCMB0GA1UdDgQWBBR5mf0f
+Zjf8ZCGXqU2+45th7VkkLDAfBgNVHSMEGDAWgBTaCYSLw2UKxH/1UG1rrl4DZ7dp
+uTANBgkqhkiG9w0BAQsFAAOCAgEARhFxNAouwbpEfN1M90+ao5rwyxEewerSoCCz
+PQzeUZ66MA/FkS/tFUGgGGG+wERN+WLbe1cN6q/XFr0FSMLuUxLXDNV02oUL/FnY
+xcyNLaZUZ0pP7sA+Hmx2AdTA6baIwQbyIY9RLAaz6hzo1YbI8yeis645F1bxgL2D
+EP5kXa3Obv0tqWByMZtrmJPv3p0W5GJKXVDn51GR/E5KI7pliZX2e0LmMX9mxfPB
+4sXFUggMHXxWMMSAmXPVsxC2KX6gMnajO7JUraTwuGm+6V371FzEX+UKXHI+xSvO
+78TseTIYsBGLjeiA8UjkKlD3T9qsQm2mb2PlKyqjvIm4i2ilM0E2w4JZmd45b925
+7q/QLV3NZ/zZMi6AMyULu28DWKfAx3RLKwnHWSFcR4lVkxQrbDhEUMhAhLAX+2+e
+qc7qZm3dTabi7ZJiiOvYK/yNgFHa/XtZp5uKPB5tigPIa+34hbZF7s2/ty5X3O1N
+f5Ardz7KNsxJjZIt6HvB28E/PPOvBqCKJc1Y08J9JbZi8p6QS1uarGoR7l7rT1Hv
+/ZXkNTw2bw1VpcWdzDBLLVHYNnJmS14189LVk11PcJJpSmubwCqg+ZZULdgtVr3S
+ANas2dgMPVwXhnAalgkcc+lb2QqaEz06axfbRGBsgnyqR5/koKCg1Hr0+vThHSsR
+E0+r2+4=
 -----END CERTIFICATE-----`
 	client2Key = `-----BEGIN RSA PRIVATE KEY-----
-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
+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
 -----END RSA PRIVATE KEY-----`
 	defaultAdminUsername = "admin"
+	defeaultUsername     = "test_user"
 )
 
 var (
@@ -327,9 +330,8 @@ func TestBrandingValidation(t *testing.T) {
 	b := Binding{
 		Branding: Branding{
 			WebAdmin: UIBranding{
-				LogoPath:       "path1",
-				LoginImagePath: "login1.png",
-				DefaultCSS:     "my.css",
+				LogoPath:   "path1",
+				DefaultCSS: []string{"my.css"},
 			},
 			WebClient: UIBranding{
 				FaviconPath:    "favicon1.ico",
@@ -341,15 +343,16 @@ func TestBrandingValidation(t *testing.T) {
 	b.checkBranding()
 	assert.Equal(t, "/favicon.ico", b.Branding.WebAdmin.FaviconPath)
 	assert.Equal(t, "/path1", b.Branding.WebAdmin.LogoPath)
-	assert.Equal(t, "/login1.png", b.Branding.WebAdmin.LoginImagePath)
-	assert.Equal(t, "/my.css", b.Branding.WebAdmin.DefaultCSS)
+	assert.Equal(t, []string{"/my.css"}, b.Branding.WebAdmin.DefaultCSS)
 	assert.Len(t, b.Branding.WebAdmin.ExtraCSS, 0)
 	assert.Equal(t, "/favicon1.ico", b.Branding.WebClient.FaviconPath)
-	assert.Equal(t, "/path2", b.Branding.WebClient.DisclaimerPath)
-	assert.Equal(t, "/img/login_image.png", b.Branding.WebClient.LoginImagePath)
+	assert.Equal(t, path.Join(webStaticFilesPath, "/path2"), b.Branding.WebClient.DisclaimerPath)
 	if assert.Len(t, b.Branding.WebClient.ExtraCSS, 1) {
 		assert.Equal(t, "/1.css", b.Branding.WebClient.ExtraCSS[0])
 	}
+	b.Branding.WebAdmin.DisclaimerPath = "https://example.com"
+	b.checkBranding()
+	assert.Equal(t, "https://example.com", b.Branding.WebAdmin.DisclaimerPath)
 }
 
 func TestRedactedConf(t *testing.T) {
@@ -516,6 +519,11 @@ func TestInvalidToken(t *testing.T) {
 	assert.Contains(t, rr.Body.String(), "Invalid token claims")
 
 	rr = httptest.NewRecorder()
+	getWebTask(rr, req)
+	assert.Equal(t, http.StatusBadRequest, rr.Code)
+	assert.Contains(t, rr.Body.String(), "Invalid token claims")
+
+	rr = httptest.NewRecorder()
 	getAdminProfile(rr, req)
 	assert.Equal(t, http.StatusBadRequest, rr.Code)
 	assert.Contains(t, rr.Body.String(), "Invalid token claims")
@@ -567,28 +575,38 @@ func TestInvalidToken(t *testing.T) {
 
 	rr = httptest.NewRecorder()
 	server.handleWebRestore(rr, req)
-	assert.Equal(t, http.StatusBadRequest, rr.Code)
-	assert.Contains(t, rr.Body.String(), "invalid token claims")
+	assert.Equal(t, http.StatusForbidden, rr.Code)
+	assert.Contains(t, rr.Body.String(), util.I18nErrorInvalidToken)
 
 	rr = httptest.NewRecorder()
 	server.handleWebAddUserPost(rr, req)
-	assert.Equal(t, http.StatusBadRequest, rr.Code)
-	assert.Contains(t, rr.Body.String(), "invalid token claims")
+	assert.Equal(t, http.StatusForbidden, rr.Code)
+	assert.Contains(t, rr.Body.String(), util.I18nErrorInvalidToken)
 
 	rr = httptest.NewRecorder()
 	server.handleWebUpdateUserPost(rr, req)
-	assert.Equal(t, http.StatusBadRequest, rr.Code)
-	assert.Contains(t, rr.Body.String(), "invalid token claims")
+	assert.Equal(t, http.StatusForbidden, rr.Code)
+	assert.Contains(t, rr.Body.String(), util.I18nErrorInvalidToken)
 
 	rr = httptest.NewRecorder()
 	server.handleWebTemplateFolderPost(rr, req)
-	assert.Equal(t, http.StatusBadRequest, rr.Code)
-	assert.Contains(t, rr.Body.String(), "invalid token claims")
+	assert.Equal(t, http.StatusForbidden, rr.Code)
+	assert.Contains(t, rr.Body.String(), util.I18nErrorInvalidToken)
 
 	rr = httptest.NewRecorder()
 	server.handleWebTemplateUserPost(rr, req)
-	assert.Equal(t, http.StatusBadRequest, rr.Code)
-	assert.Contains(t, rr.Body.String(), "invalid token claims")
+	assert.Equal(t, http.StatusForbidden, rr.Code)
+	assert.Contains(t, rr.Body.String(), util.I18nErrorInvalidToken)
+
+	rr = httptest.NewRecorder()
+	getAllAdmins(rr, req)
+	assert.Equal(t, http.StatusForbidden, rr.Code)
+	assert.Contains(t, rr.Body.String(), util.I18nErrorInvalidToken)
+
+	rr = httptest.NewRecorder()
+	getAllUsers(rr, req)
+	assert.Equal(t, http.StatusForbidden, rr.Code)
+	assert.Contains(t, rr.Body.String(), util.I18nErrorInvalidToken)
 
 	rr = httptest.NewRecorder()
 	addFolder(rr, req)
@@ -601,29 +619,34 @@ func TestInvalidToken(t *testing.T) {
 	assert.Contains(t, rr.Body.String(), "Invalid token claims")
 
 	rr = httptest.NewRecorder()
+	getFolderByName(rr, req)
+	assert.Equal(t, http.StatusBadRequest, rr.Code)
+	assert.Contains(t, rr.Body.String(), "Invalid token claims")
+
+	rr = httptest.NewRecorder()
 	deleteFolder(rr, req)
 	assert.Equal(t, http.StatusBadRequest, rr.Code)
 	assert.Contains(t, rr.Body.String(), "Invalid token claims")
 
 	rr = httptest.NewRecorder()
 	server.handleWebAddFolderPost(rr, req)
-	assert.Equal(t, http.StatusBadRequest, rr.Code)
-	assert.Contains(t, rr.Body.String(), "invalid token claims")
+	assert.Equal(t, http.StatusForbidden, rr.Code)
+	assert.Contains(t, rr.Body.String(), util.I18nErrorInvalidToken)
 
 	rr = httptest.NewRecorder()
 	server.handleWebUpdateFolderPost(rr, req)
-	assert.Equal(t, http.StatusBadRequest, rr.Code)
-	assert.Contains(t, rr.Body.String(), "invalid token claims")
+	assert.Equal(t, http.StatusForbidden, rr.Code)
+	assert.Contains(t, rr.Body.String(), util.I18nErrorInvalidToken)
 
 	rr = httptest.NewRecorder()
 	server.handleWebGetConnections(rr, req)
-	assert.Equal(t, http.StatusBadRequest, rr.Code)
-	assert.Contains(t, rr.Body.String(), "invalid token claims")
+	assert.Equal(t, http.StatusForbidden, rr.Code)
+	assert.Contains(t, rr.Body.String(), util.I18nErrorInvalidToken)
 
 	rr = httptest.NewRecorder()
 	server.handleWebConfigsPost(rr, req)
-	assert.Equal(t, http.StatusBadRequest, rr.Code)
-	assert.Contains(t, rr.Body.String(), "invalid token claims")
+	assert.Equal(t, http.StatusForbidden, rr.Code)
+	assert.Contains(t, rr.Body.String(), util.I18nErrorInvalidToken)
 
 	rr = httptest.NewRecorder()
 	addAdmin(rr, req)
@@ -661,6 +684,11 @@ func TestInvalidToken(t *testing.T) {
 	assert.Contains(t, rr.Body.String(), "Invalid token claims")
 
 	rr = httptest.NewRecorder()
+	getGroupByName(rr, req)
+	assert.Equal(t, http.StatusBadRequest, rr.Code)
+	assert.Contains(t, rr.Body.String(), "Invalid token claims")
+
+	rr = httptest.NewRecorder()
 	deleteGroup(rr, req)
 	assert.Equal(t, http.StatusBadRequest, rr.Code)
 	assert.Contains(t, rr.Body.String(), "Invalid token claims")
@@ -671,12 +699,22 @@ func TestInvalidToken(t *testing.T) {
 	assert.Contains(t, rr.Body.String(), "Invalid token claims")
 
 	rr = httptest.NewRecorder()
+	getEventActionByName(rr, req)
+	assert.Equal(t, http.StatusBadRequest, rr.Code)
+	assert.Contains(t, rr.Body.String(), "Invalid token claims")
+
+	rr = httptest.NewRecorder()
 	updateEventAction(rr, req)
 	assert.Equal(t, http.StatusBadRequest, rr.Code)
 	assert.Contains(t, rr.Body.String(), "Invalid token claims")
 
 	rr = httptest.NewRecorder()
 	deleteEventAction(rr, req)
+	assert.Equal(t, http.StatusBadRequest, rr.Code)
+	assert.Contains(t, rr.Body.String(), "Invalid token claims")
+
+	rr = httptest.NewRecorder()
+	getEventRuleByName(rr, req)
 	assert.Equal(t, http.StatusBadRequest, rr.Code)
 	assert.Contains(t, rr.Body.String(), "Invalid token claims")
 
@@ -692,16 +730,6 @@ func TestInvalidToken(t *testing.T) {
 
 	rr = httptest.NewRecorder()
 	deleteEventRule(rr, req)
-	assert.Equal(t, http.StatusBadRequest, rr.Code)
-	assert.Contains(t, rr.Body.String(), "Invalid token claims")
-
-	rr = httptest.NewRecorder()
-	getMetadataChecks(rr, req)
-	assert.Equal(t, http.StatusBadRequest, rr.Code)
-	assert.Contains(t, rr.Body.String(), "Invalid token claims")
-
-	rr = httptest.NewRecorder()
-	startMetadataCheck(rr, req)
 	assert.Equal(t, http.StatusBadRequest, rr.Code)
 	assert.Contains(t, rr.Body.String(), "Invalid token claims")
 
@@ -766,6 +794,11 @@ func TestInvalidToken(t *testing.T) {
 	assert.Contains(t, rr.Body.String(), "Invalid token claims")
 
 	rr = httptest.NewRecorder()
+	searchLogEvents(rr, req)
+	assert.Equal(t, http.StatusBadRequest, rr.Code)
+	assert.Contains(t, rr.Body.String(), "Invalid token claims")
+
+	rr = httptest.NewRecorder()
 	addIPListEntry(rr, req)
 	assert.Equal(t, http.StatusBadRequest, rr.Code)
 	assert.Contains(t, rr.Body.String(), "Invalid token claims")
@@ -782,63 +815,63 @@ func TestInvalidToken(t *testing.T) {
 
 	rr = httptest.NewRecorder()
 	server.handleGetWebUsers(rr, req)
-	assert.Equal(t, http.StatusBadRequest, rr.Code)
-	assert.Contains(t, rr.Body.String(), "invalid token claims")
+	assert.Equal(t, http.StatusForbidden, rr.Code)
+	assert.Contains(t, rr.Body.String(), util.I18nErrorInvalidToken)
 
 	rr = httptest.NewRecorder()
 	server.handleWebUpdateUserGet(rr, req)
-	assert.Equal(t, http.StatusBadRequest, rr.Code)
-	assert.Contains(t, rr.Body.String(), "invalid token claims")
+	assert.Equal(t, http.StatusForbidden, rr.Code)
+	assert.Contains(t, rr.Body.String(), util.I18nErrorInvalidToken)
 
 	rr = httptest.NewRecorder()
 	server.handleWebUpdateRolePost(rr, req)
-	assert.Equal(t, http.StatusBadRequest, rr.Code)
-	assert.Contains(t, rr.Body.String(), "invalid token claims")
+	assert.Equal(t, http.StatusForbidden, rr.Code)
+	assert.Contains(t, rr.Body.String(), util.I18nErrorInvalidToken)
 
 	rr = httptest.NewRecorder()
 	server.handleWebAddRolePost(rr, req)
-	assert.Equal(t, http.StatusBadRequest, rr.Code)
-	assert.Contains(t, rr.Body.String(), "invalid token claims")
+	assert.Equal(t, http.StatusForbidden, rr.Code)
+	assert.Contains(t, rr.Body.String(), util.I18nErrorInvalidToken)
 
 	rr = httptest.NewRecorder()
 	server.handleWebAddAdminPost(rr, req)
-	assert.Equal(t, http.StatusBadRequest, rr.Code)
-	assert.Contains(t, rr.Body.String(), "invalid token claims")
+	assert.Equal(t, http.StatusForbidden, rr.Code)
+	assert.Contains(t, rr.Body.String(), util.I18nErrorInvalidToken)
 
 	rr = httptest.NewRecorder()
 	server.handleWebAddGroupPost(rr, req)
-	assert.Equal(t, http.StatusBadRequest, rr.Code)
-	assert.Contains(t, rr.Body.String(), "invalid token claims")
+	assert.Equal(t, http.StatusForbidden, rr.Code)
+	assert.Contains(t, rr.Body.String(), util.I18nErrorInvalidToken)
 
 	rr = httptest.NewRecorder()
 	server.handleWebUpdateGroupPost(rr, req)
-	assert.Equal(t, http.StatusBadRequest, rr.Code)
-	assert.Contains(t, rr.Body.String(), "invalid token claims")
+	assert.Equal(t, http.StatusForbidden, rr.Code)
+	assert.Contains(t, rr.Body.String(), util.I18nErrorInvalidToken)
 
 	rr = httptest.NewRecorder()
 	server.handleWebAddEventActionPost(rr, req)
-	assert.Equal(t, http.StatusBadRequest, rr.Code)
-	assert.Contains(t, rr.Body.String(), "invalid token claims")
+	assert.Equal(t, http.StatusForbidden, rr.Code)
+	assert.Contains(t, rr.Body.String(), util.I18nErrorInvalidToken)
 
 	rr = httptest.NewRecorder()
 	server.handleWebUpdateEventActionPost(rr, req)
-	assert.Equal(t, http.StatusBadRequest, rr.Code)
-	assert.Contains(t, rr.Body.String(), "invalid token claims")
+	assert.Equal(t, http.StatusForbidden, rr.Code)
+	assert.Contains(t, rr.Body.String(), util.I18nErrorInvalidToken)
 
 	rr = httptest.NewRecorder()
 	server.handleWebAddEventRulePost(rr, req)
-	assert.Equal(t, http.StatusBadRequest, rr.Code)
-	assert.Contains(t, rr.Body.String(), "invalid token claims")
+	assert.Equal(t, http.StatusForbidden, rr.Code)
+	assert.Contains(t, rr.Body.String(), util.I18nErrorInvalidToken)
 
 	rr = httptest.NewRecorder()
 	server.handleWebUpdateEventRulePost(rr, req)
-	assert.Equal(t, http.StatusBadRequest, rr.Code)
-	assert.Contains(t, rr.Body.String(), "invalid token claims")
+	assert.Equal(t, http.StatusForbidden, rr.Code)
+	assert.Contains(t, rr.Body.String(), util.I18nErrorInvalidToken)
 
 	rr = httptest.NewRecorder()
 	server.handleWebUpdateIPListEntryPost(rr, req)
-	assert.Equal(t, http.StatusBadRequest, rr.Code)
-	assert.Contains(t, rr.Body.String(), "invalid token claims")
+	assert.Equal(t, http.StatusForbidden, rr.Code)
+	assert.Contains(t, rr.Body.String(), util.I18nErrorInvalidToken)
 
 	rr = httptest.NewRecorder()
 	server.handleWebClientTwoFactorRecoveryPost(rr, req)
@@ -858,8 +891,8 @@ func TestInvalidToken(t *testing.T) {
 
 	rr = httptest.NewRecorder()
 	server.handleWebUpdateIPListEntryPost(rr, req)
-	assert.Equal(t, http.StatusBadRequest, rr.Code)
-	assert.Contains(t, rr.Body.String(), "invalid token claims")
+	assert.Equal(t, http.StatusForbidden, rr.Code)
+	assert.Contains(t, rr.Body.String(), util.I18nErrorInvalidToken)
 
 	form := make(url.Values)
 	req, _ = http.NewRequest(http.MethodPost, webIPListPath+"/1", bytes.NewBuffer([]byte(form.Encode())))
@@ -869,8 +902,8 @@ func TestInvalidToken(t *testing.T) {
 	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
 	rr = httptest.NewRecorder()
 	server.handleWebAddIPListEntryPost(rr, req)
-	assert.Equal(t, http.StatusBadRequest, rr.Code, rr.Body.String())
-	assert.Contains(t, rr.Body.String(), "invalid token claims")
+	assert.Equal(t, http.StatusForbidden, rr.Code, rr.Body.String())
+	assert.Contains(t, rr.Body.String(), util.I18nErrorInvalidToken)
 }
 
 func TestUpdateWebAdminInvalidClaims(t *testing.T) {
@@ -902,7 +935,7 @@ func TestUpdateWebAdminInvalidClaims(t *testing.T) {
 	req.Header.Set("Cookie", fmt.Sprintf("jwt=%v", token["access_token"]))
 	server.handleWebUpdateAdminPost(rr, req)
 	assert.Equal(t, http.StatusOK, rr.Code)
-	assert.Contains(t, rr.Body.String(), "Invalid token claims")
+	assert.Contains(t, rr.Body.String(), util.I18nErrorInvalidToken)
 }
 
 func TestRetentionInvalidTokenClaims(t *testing.T) {
@@ -943,6 +976,132 @@ func TestRetentionInvalidTokenClaims(t *testing.T) {
 
 	err = dataprovider.DeleteUser(username, "", "", "")
 	assert.NoError(t, err)
+}
+
+func TestUpdateSMTPSecrets(t *testing.T) {
+	currentConfigs := &dataprovider.SMTPConfigs{
+		OAuth2: dataprovider.SMTPOAuth2{
+			ClientSecret: kms.NewPlainSecret("client secret"),
+			RefreshToken: kms.NewPlainSecret("refresh token"),
+		},
+	}
+	redactedClientSecret := kms.NewPlainSecret("secret")
+	redactedRefreshToken := kms.NewPlainSecret("token")
+	redactedClientSecret.SetStatus(sdkkms.SecretStatusRedacted)
+	redactedRefreshToken.SetStatus(sdkkms.SecretStatusRedacted)
+	newConfigs := &dataprovider.SMTPConfigs{
+		Password: kms.NewPlainSecret("pwd"),
+		OAuth2: dataprovider.SMTPOAuth2{
+			ClientSecret: redactedClientSecret,
+			RefreshToken: redactedRefreshToken,
+		},
+	}
+	updateSMTPSecrets(newConfigs, currentConfigs)
+	assert.Nil(t, currentConfigs.Password)
+	assert.NotNil(t, newConfigs.Password)
+	assert.Equal(t, currentConfigs.OAuth2.ClientSecret, newConfigs.OAuth2.ClientSecret)
+	assert.Equal(t, currentConfigs.OAuth2.RefreshToken, newConfigs.OAuth2.RefreshToken)
+
+	clientSecret := kms.NewPlainSecret("plain secret")
+	refreshToken := kms.NewPlainSecret("plain token")
+	newConfigs = &dataprovider.SMTPConfigs{
+		Password: kms.NewPlainSecret("pwd"),
+		OAuth2: dataprovider.SMTPOAuth2{
+			ClientSecret: clientSecret,
+			RefreshToken: refreshToken,
+		},
+	}
+	updateSMTPSecrets(newConfigs, currentConfigs)
+	assert.Equal(t, clientSecret, newConfigs.OAuth2.ClientSecret)
+	assert.Equal(t, refreshToken, newConfigs.OAuth2.RefreshToken)
+}
+
+func TestOAuth2Redirect(t *testing.T) {
+	server := httpdServer{}
+	server.initializeRouter()
+
+	rr := httptest.NewRecorder()
+	req, err := http.NewRequest(http.MethodGet, webOAuth2RedirectPath+"?state=invalid", nil)
+	assert.NoError(t, err)
+	server.handleOAuth2TokenRedirect(rr, req)
+	assert.Equal(t, http.StatusBadRequest, rr.Code)
+	assert.Contains(t, rr.Body.String(), util.I18nOAuth2ErrorTitle)
+
+	ip := "127.1.1.4"
+	tokenString := createOAuth2Token(xid.New().String(), ip)
+	rr = httptest.NewRecorder()
+	req, err = http.NewRequest(http.MethodGet, webOAuth2RedirectPath+"?state="+tokenString, nil) //nolint:goconst
+	assert.NoError(t, err)
+	req.RemoteAddr = ip
+	server.handleOAuth2TokenRedirect(rr, req)
+	assert.Equal(t, http.StatusInternalServerError, rr.Code)
+	assert.Contains(t, rr.Body.String(), util.I18nOAuth2ErrorValidateState)
+}
+
+func TestOAuth2Token(t *testing.T) {
+	// invalid token
+	_, err := verifyOAuth2Token("token", "")
+	if assert.Error(t, err) {
+		assert.Contains(t, err.Error(), "unable to verify OAuth2 state")
+	}
+	// bad audience
+	claims := make(map[string]any)
+	now := time.Now().UTC()
+
+	claims[jwt.JwtIDKey] = xid.New().String()
+	claims[jwt.NotBeforeKey] = now.Add(-30 * time.Second)
+	claims[jwt.ExpirationKey] = now.Add(tokenDuration)
+	claims[jwt.AudienceKey] = []string{tokenAudienceAPI}
+
+	_, tokenString, err := csrfTokenAuth.Encode(claims)
+	assert.NoError(t, err)
+	_, err = verifyOAuth2Token(tokenString, "")
+	if assert.Error(t, err) {
+		assert.Contains(t, err.Error(), "invalid OAuth2 state")
+	}
+	// bad IP
+	tokenString = createOAuth2Token("state", "127.1.1.1")
+	_, err = verifyOAuth2Token(tokenString, "127.1.1.2")
+	if assert.Error(t, err) {
+		assert.Contains(t, err.Error(), "invalid OAuth2 state")
+	}
+	// ok
+	state := xid.New().String()
+	tokenString = createOAuth2Token(state, "127.1.1.3")
+	s, err := verifyOAuth2Token(tokenString, "127.1.1.3")
+	assert.NoError(t, err)
+	assert.Equal(t, state, s)
+	// no jti
+	claims = make(map[string]any)
+
+	claims[jwt.NotBeforeKey] = now.Add(-30 * time.Second)
+	claims[jwt.ExpirationKey] = now.Add(tokenDuration)
+	claims[jwt.AudienceKey] = []string{tokenAudienceOAuth2, "127.1.1.4"}
+	_, tokenString, err = csrfTokenAuth.Encode(claims)
+	assert.NoError(t, err)
+	_, err = verifyOAuth2Token(tokenString, "127.1.1.4")
+	if assert.Error(t, err) {
+		assert.Contains(t, err.Error(), "invalid OAuth2 state")
+	}
+	// encode error
+	csrfTokenAuth = jwtauth.New("HT256", util.GenerateRandomBytes(32), nil)
+	tokenString = createOAuth2Token(xid.New().String(), "")
+	assert.Empty(t, tokenString)
+
+	server := httpdServer{}
+	server.initializeRouter()
+	rr := httptest.NewRecorder()
+	testReq := make(map[string]any)
+	testReq["base_redirect_url"] = "http://localhost:8082"
+	asJSON, err := json.Marshal(testReq)
+	assert.NoError(t, err)
+	req, err := http.NewRequest(http.MethodPost, webOAuth2TokenPath, bytes.NewBuffer(asJSON))
+	assert.NoError(t, err)
+	handleSMTPOAuth2TokenRequestPost(rr, req)
+	assert.Equal(t, http.StatusInternalServerError, rr.Code)
+	assert.Contains(t, rr.Body.String(), "unable to create state token")
+
+	csrfTokenAuth = jwtauth.New(jwa.HS256.String(), util.GenerateRandomBytes(32), nil)
 }
 
 func TestCSRFToken(t *testing.T) {
@@ -1020,7 +1179,7 @@ func TestCSRFToken(t *testing.T) {
 
 func TestCreateShareCookieError(t *testing.T) {
 	username := "share_user"
-	pwd := "pwd"
+	pwd := util.GenerateUniqueID()
 	user := &dataprovider.User{
 		BaseUser: sdk.BaseUser{
 			Username: username,
@@ -1062,7 +1221,7 @@ func TestCreateShareCookieError(t *testing.T) {
 	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
 	server.handleClientShareLoginPost(rr, req)
 	assert.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
-	assert.Contains(t, rr.Body.String(), common.ErrInternalFailure.Error())
+	assert.Contains(t, rr.Body.String(), util.I18nError500Message)
 
 	err = dataprovider.DeleteUser(username, "", "", "")
 	assert.NoError(t, err)
@@ -1086,7 +1245,7 @@ func TestCreateTokenError(t *testing.T) {
 	user := dataprovider.User{
 		BaseUser: sdk.BaseUser{
 			Username: "u",
-			Password: "pwd",
+			Password: util.GenerateUniqueID(),
 		},
 	}
 	req, _ = http.NewRequest(http.MethodGet, userTokenPath, nil)
@@ -1124,19 +1283,19 @@ func TestCreateTokenError(t *testing.T) {
 	rr = httptest.NewRecorder()
 	server.handleWebAdminChangePwdPost(rr, req)
 	assert.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
-	assert.Contains(t, rr.Body.String(), "invalid URL escape")
+	assert.Contains(t, rr.Body.String(), util.I18nErrorInvalidForm)
 
 	req, _ = http.NewRequest(http.MethodGet, webAdminLoginPath+"?a=a%C3%A2%G3", nil)
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	_, err := getAdminFromPostFields(req)
 	assert.Error(t, err)
 
-	req, _ = http.NewRequest(http.MethodPost, webAdminEventActionPath+"?a=a%C3%AO%GG", nil)
+	req, _ = http.NewRequest(http.MethodPost, webAdminEventActionPath+"?a=a%C3%A2%GG", nil)
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	_, err = getEventActionFromPostFields(req)
 	assert.Error(t, err)
 
-	req, _ = http.NewRequest(http.MethodPost, webAdminEventRulePath+"?a=a%C3%AO%GG", nil)
+	req, _ = http.NewRequest(http.MethodPost, webAdminEventRulePath+"?a=a%C3%A3%GG", nil)
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	_, err = getEventRuleFromPostFields(req)
 	assert.Error(t, err)
@@ -1163,7 +1322,7 @@ func TestCreateTokenError(t *testing.T) {
 	rr = httptest.NewRecorder()
 	server.handleWebClientChangePwdPost(rr, req)
 	assert.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
-	assert.Contains(t, rr.Body.String(), "invalid URL escape")
+	assert.Contains(t, rr.Body.String(), util.I18nErrorInvalidForm)
 
 	req, _ = http.NewRequest(http.MethodPost, webClientProfilePath+"?a=a%C3%AO%GB", bytes.NewBuffer([]byte(form.Encode())))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
@@ -1182,63 +1341,63 @@ func TestCreateTokenError(t *testing.T) {
 	rr = httptest.NewRecorder()
 	server.handleWebAdminTwoFactorPost(rr, req)
 	assert.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
-	assert.Contains(t, rr.Body.String(), "invalid URL escape")
+	assert.Contains(t, rr.Body.String(), util.I18nErrorInvalidForm)
 
 	req, _ = http.NewRequest(http.MethodPost, webAdminTwoFactorRecoveryPath+"?a=a%C3%AO%GD", bytes.NewBuffer([]byte(form.Encode())))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	rr = httptest.NewRecorder()
 	server.handleWebAdminTwoFactorRecoveryPost(rr, req)
 	assert.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
-	assert.Contains(t, rr.Body.String(), "invalid URL escape")
+	assert.Contains(t, rr.Body.String(), util.I18nErrorInvalidForm)
 
 	req, _ = http.NewRequest(http.MethodPost, webClientTwoFactorPath+"?a=a%C3%AO%GC", bytes.NewBuffer([]byte(form.Encode())))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	rr = httptest.NewRecorder()
 	server.handleWebClientTwoFactorPost(rr, req)
 	assert.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
-	assert.Contains(t, rr.Body.String(), "invalid URL escape")
+	assert.Contains(t, rr.Body.String(), util.I18nErrorInvalidForm)
 
 	req, _ = http.NewRequest(http.MethodPost, webClientTwoFactorRecoveryPath+"?a=a%C3%AO%GD", bytes.NewBuffer([]byte(form.Encode())))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	rr = httptest.NewRecorder()
 	server.handleWebClientTwoFactorRecoveryPost(rr, req)
 	assert.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
-	assert.Contains(t, rr.Body.String(), "invalid URL escape")
+	assert.Contains(t, rr.Body.String(), util.I18nErrorInvalidForm)
 
 	req, _ = http.NewRequest(http.MethodPost, webAdminForgotPwdPath+"?a=a%C3%A1%GD", bytes.NewBuffer([]byte(form.Encode())))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	rr = httptest.NewRecorder()
 	server.handleWebAdminForgotPwdPost(rr, req)
 	assert.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
-	assert.Contains(t, rr.Body.String(), "invalid URL escape")
+	assert.Contains(t, rr.Body.String(), util.I18nErrorInvalidForm)
 
 	req, _ = http.NewRequest(http.MethodPost, webClientForgotPwdPath+"?a=a%C2%A1%GD", bytes.NewBuffer([]byte(form.Encode())))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	rr = httptest.NewRecorder()
 	server.handleWebClientForgotPwdPost(rr, req)
 	assert.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
-	assert.Contains(t, rr.Body.String(), "invalid URL escape")
+	assert.Contains(t, rr.Body.String(), util.I18nErrorInvalidForm)
 
 	req, _ = http.NewRequest(http.MethodPost, webAdminResetPwdPath+"?a=a%C3%AO%JD", bytes.NewBuffer([]byte(form.Encode())))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	rr = httptest.NewRecorder()
 	server.handleWebAdminPasswordResetPost(rr, req)
 	assert.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
-	assert.Contains(t, rr.Body.String(), "invalid URL escape")
+	assert.Contains(t, rr.Body.String(), util.I18nErrorInvalidForm)
 
 	req, _ = http.NewRequest(http.MethodPost, webAdminRolePath+"?a=a%C3%AO%JE", bytes.NewBuffer([]byte(form.Encode())))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	rr = httptest.NewRecorder()
 	server.handleWebAddRolePost(rr, req)
 	assert.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
-	assert.Contains(t, rr.Body.String(), "invalid URL escape")
+	assert.Contains(t, rr.Body.String(), util.I18nErrorInvalidForm)
 
 	req, _ = http.NewRequest(http.MethodPost, webClientResetPwdPath+"?a=a%C3%AO%JD", bytes.NewBuffer([]byte(form.Encode())))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	rr = httptest.NewRecorder()
 	server.handleWebClientPasswordResetPost(rr, req)
 	assert.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
-	assert.Contains(t, rr.Body.String(), "invalid URL escape")
+	assert.Contains(t, rr.Body.String(), util.I18nErrorInvalidForm)
 
 	req, _ = http.NewRequest(http.MethodPost, webChangeClientPwdPath+"?a=a%K3%AO%GA", bytes.NewBuffer([]byte(form.Encode())))
 	_, err = getShareFromPostFields(req)
@@ -1393,6 +1552,14 @@ func TestJWTTokenValidation(t *testing.T) {
 	rr = httptest.NewRecorder()
 	req, _ = http.NewRequest(http.MethodPost, webClientProfilePath, nil)
 	req.RequestURI = webClientProfilePath
+	ctx = jwtauth.NewContext(req.Context(), token, errTest)
+	fn.ServeHTTP(rr, req.WithContext(ctx))
+	assert.Equal(t, http.StatusBadRequest, rr.Code)
+
+	fn = server.checkAuthRequirements(r)
+	rr = httptest.NewRecorder()
+	req, _ = http.NewRequest(http.MethodPost, webGroupsPath, nil)
+	req.RequestURI = webGroupsPath
 	ctx = jwtauth.NewContext(req.Context(), token, errTest)
 	fn.ServeHTTP(rr, req.WithContext(ctx))
 	assert.Equal(t, http.StatusBadRequest, rr.Code)
@@ -1574,6 +1741,29 @@ func TestCookieExpiration(t *testing.T) {
 	cookie = rr.Header().Get("Set-Cookie")
 	assert.NotEmpty(t, cookie)
 
+	// test a disabled user
+	user.Status = 0
+	err = dataprovider.UpdateUser(&user, "", "", "")
+	assert.NoError(t, err)
+	user, err = dataprovider.UserExists(user.Username, "")
+	assert.NoError(t, err)
+
+	claims = make(map[string]any)
+	claims[claimUsernameKey] = user.Username
+	claims[claimPermissionsKey] = user.Filters.WebClient
+	claims[jwt.SubjectKey] = user.GetSignature()
+	claims[jwt.ExpirationKey] = time.Now().Add(1 * time.Minute)
+	claims[jwt.AudienceKey] = []string{tokenAudienceWebClient}
+	token, _, err = server.tokenAuth.Encode(claims)
+	assert.NoError(t, err)
+
+	rr = httptest.NewRecorder()
+	req, _ = http.NewRequest(http.MethodGet, webClientFilesPath, nil)
+	ctx = jwtauth.NewContext(req.Context(), token, nil)
+	server.checkCookieExpiration(rr, req.WithContext(ctx))
+	cookie = rr.Header().Get("Set-Cookie")
+	assert.Empty(t, cookie)
+
 	err = dataprovider.DeleteUser(user.Username, "", "", "")
 	assert.NoError(t, err)
 }
@@ -1606,7 +1796,7 @@ func TestChangePwdValidationErrors(t *testing.T) {
 func TestRenderUnexistingFolder(t *testing.T) {
 	rr := httptest.NewRecorder()
 	req, _ := http.NewRequest(http.MethodPost, folderPath, nil)
-	renderFolder(rr, req, "path not mapped", http.StatusOK)
+	renderFolder(rr, req, "path not mapped", &jwtTokenClaims{}, http.StatusOK)
 	assert.Equal(t, http.StatusNotFound, rr.Code)
 }
 
@@ -1838,11 +2028,36 @@ func TestJWTTokenCleanup(t *testing.T) {
 
 	req.Header.Set("Authorization", fmt.Sprintf("Bearer %v", token))
 
-	invalidatedJWTTokens.Store(token, time.Now().Add(-tokenDuration).UTC())
+	invalidatedJWTTokens.Add(token, time.Now().Add(-tokenDuration).UTC())
 	require.True(t, isTokenInvalidated(req))
 	startCleanupTicker(100 * time.Millisecond)
 	assert.Eventually(t, func() bool { return !isTokenInvalidated(req) }, 1*time.Second, 200*time.Millisecond)
 	stopCleanupTicker()
+}
+
+func TestDbTokenManager(t *testing.T) {
+	if !isSharedProviderSupported() {
+		t.Skip("this test it is not available with this provider")
+	}
+	mgr := newTokenManager(1)
+	dbTokenManager := mgr.(*dbTokenManager)
+	testToken := "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJhdWQiOlsiV2ViQWRtaW4iLCI6OjEiXSwiZXhwIjoxNjk4NjYwMDM4LCJqdGkiOiJja3ZuazVrYjF1aHUzZXRmZmhyZyIsIm5iZiI6MTY5ODY1ODgwOCwicGVybWlzc2lvbnMiOlsiKiJdLCJzdWIiOiIxNjk3ODIwNDM3NTMyIiwidXNlcm5hbWUiOiJhZG1pbiJ9.LXuFFksvnSuzHqHat6r70yR0jEulNRju7m7SaWrOfy8; csrftoken=mP0C7DqjwpAXsptO2gGCaYBkYw3oNMWB"
+	key := dbTokenManager.getKey(testToken)
+	require.Len(t, key, 64)
+	dbTokenManager.Add(testToken, time.Now().Add(-tokenDuration).UTC())
+	isInvalidated := dbTokenManager.Get(testToken)
+	assert.True(t, isInvalidated)
+	dbTokenManager.Cleanup()
+	isInvalidated = dbTokenManager.Get(testToken)
+	assert.False(t, isInvalidated)
+	dbTokenManager.Add(testToken, time.Now().Add(tokenDuration).UTC())
+	isInvalidated = dbTokenManager.Get(testToken)
+	assert.True(t, isInvalidated)
+	dbTokenManager.Cleanup()
+	isInvalidated = dbTokenManager.Get(testToken)
+	assert.True(t, isInvalidated)
+	err := dataprovider.DeleteSharedSession(key)
+	assert.NoError(t, err)
 }
 
 func TestAllowedProxyUnixDomainSocket(t *testing.T) {
@@ -1900,7 +2115,7 @@ func TestProxyHeaders(t *testing.T) {
 	rr := httptest.NewRecorder()
 	testServer.Config.Handler.ServeHTTP(rr, req)
 	assert.Equal(t, http.StatusUnauthorized, rr.Code)
-	assert.Contains(t, rr.Body.String(), "login from IP 127.0.0.1 not allowed")
+	assert.NotContains(t, rr.Body.String(), "login from IP 127.0.0.1 not allowed")
 
 	req.RemoteAddr = testIP
 	rr = httptest.NewRecorder()
@@ -1923,7 +2138,7 @@ func TestProxyHeaders(t *testing.T) {
 	rr = httptest.NewRecorder()
 	testServer.Config.Handler.ServeHTTP(rr, req)
 	assert.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
-	assert.Contains(t, rr.Body.String(), "login from IP 10.29.1.9 not allowed")
+	assert.Contains(t, rr.Body.String(), util.I18nErrorInvalidCredentials)
 
 	form.Set(csrfFormToken, createCSRFToken(validForwardedFor))
 	req, err = http.NewRequest(http.MethodPost, webAdminLoginPath, bytes.NewBuffer([]byte(form.Encode())))
@@ -1976,7 +2191,7 @@ func TestRecoverer(t *testing.T) {
 	}
 	server := newHttpdServer(b, "../static", "", CorsConfig{}, "../openapi")
 	server.initializeRouter()
-	server.router.Get(recoveryPath, func(w http.ResponseWriter, r *http.Request) {
+	server.router.Get(recoveryPath, func(_ http.ResponseWriter, _ *http.Request) {
 		panic("panic")
 	})
 	testServer := httptest.NewServer(server.router)
@@ -1990,7 +2205,7 @@ func TestRecoverer(t *testing.T) {
 
 	server.router = chi.NewRouter()
 	server.router.Use(middleware.Recoverer)
-	server.router.Get(recoveryPath, func(w http.ResponseWriter, r *http.Request) {
+	server.router.Get(recoveryPath, func(_ http.ResponseWriter, _ *http.Request) {
 		panic("panic")
 	})
 	testServer = httptest.NewServer(server.router)
@@ -2001,6 +2216,33 @@ func TestRecoverer(t *testing.T) {
 	rr = httptest.NewRecorder()
 	testServer.Config.Handler.ServeHTTP(rr, req)
 	assert.Equal(t, http.StatusInternalServerError, rr.Code, rr.Body.String())
+}
+
+func TestStreamJSONArray(t *testing.T) {
+	dataGetter := func(_, _ int) ([]byte, int, error) {
+		return nil, 0, nil
+	}
+	rr := httptest.NewRecorder()
+	streamJSONArray(rr, 10, dataGetter)
+	assert.Equal(t, `[]`, rr.Body.String())
+
+	data := []int{}
+	for i := 0; i < 10; i++ {
+		data = append(data, i)
+	}
+
+	dataGetter = func(_, offset int) ([]byte, int, error) {
+		if offset >= len(data) {
+			return nil, 0, nil
+		}
+		val := data[offset]
+		data, err := json.Marshal([]int{val})
+		return data, 1, err
+	}
+
+	rr = httptest.NewRecorder()
+	streamJSONArray(rr, 1, dataGetter)
+	assert.Equal(t, `[0,1,2,3,4,5,6,7,8,9]`, rr.Body.String())
 }
 
 func TestCompressorAbortHandler(t *testing.T) {
@@ -2015,6 +2257,15 @@ func TestCompressorAbortHandler(t *testing.T) {
 	}
 	share := &dataprovider.Share{}
 	renderCompressedFiles(&failingWriter{}, connection, "", nil, share)
+}
+
+func TestStreamDataAbortHandler(t *testing.T) {
+	defer func() {
+		rcv := recover()
+		assert.Equal(t, http.ErrAbortHandler, rcv)
+	}()
+
+	streamData(&failingWriter{}, []byte(`["a":"b"]`))
 }
 
 func TestZipErrors(t *testing.T) {
@@ -2040,12 +2291,14 @@ func TestZipErrors(t *testing.T) {
 		assert.Contains(t, err.Error(), "write error")
 	}
 
-	err = addZipEntry(wr, connection, "/"+filepath.Base(testDir), "/")
+	err = addZipEntry(wr, connection, "/"+filepath.Base(testDir), "/", nil, 0)
 	if assert.Error(t, err) {
 		assert.Contains(t, err.Error(), "write error")
 	}
+	err = addZipEntry(wr, connection, "/"+filepath.Base(testDir), "/", nil, 2000)
+	assert.ErrorIs(t, err, util.ErrRecursionTooDeep)
 
-	err = addZipEntry(wr, connection, "/"+filepath.Base(testDir), path.Join("/", filepath.Base(testDir), "dir"))
+	err = addZipEntry(wr, connection, "/"+filepath.Base(testDir), path.Join("/", filepath.Base(testDir), "dir"), nil, 0)
 	if assert.Error(t, err) {
 		assert.Contains(t, err.Error(), "is outside base dir")
 	}
@@ -2054,14 +2307,14 @@ func TestZipErrors(t *testing.T) {
 	err = os.WriteFile(testFilePath, util.GenerateRandomBytes(65535), os.ModePerm)
 	assert.NoError(t, err)
 	err = addZipEntry(wr, connection, path.Join("/", filepath.Base(testDir), filepath.Base(testFilePath)),
-		"/"+filepath.Base(testDir))
+		"/"+filepath.Base(testDir), nil, 0)
 	if assert.Error(t, err) {
 		assert.Contains(t, err.Error(), "write error")
 	}
 
 	connection.User.Permissions["/"] = []string{dataprovider.PermListItems}
 	err = addZipEntry(wr, connection, path.Join("/", filepath.Base(testDir), filepath.Base(testFilePath)),
-		"/"+filepath.Base(testDir))
+		"/"+filepath.Base(testDir), nil, 0)
 	assert.ErrorIs(t, err, os.ErrPermission)
 
 	// creating a virtual folder to a missing path stat is ok but readdir fails
@@ -2073,14 +2326,14 @@ func TestZipErrors(t *testing.T) {
 	})
 	connection.User = user
 	wr = zip.NewWriter(bytes.NewBuffer(make([]byte, 0)))
-	err = addZipEntry(wr, connection, user.VirtualFolders[0].VirtualPath, "/")
+	err = addZipEntry(wr, connection, user.VirtualFolders[0].VirtualPath, "/", nil, 0)
 	assert.Error(t, err)
 
 	user.Filters.FilePatterns = append(user.Filters.FilePatterns, sdk.PatternsFilter{
 		Path:           "/",
 		DeniedPatterns: []string{"*.zip"},
 	})
-	err = addZipEntry(wr, connection, "/"+filepath.Base(testDir), "/")
+	err = addZipEntry(wr, connection, "/"+filepath.Base(testDir), "/", nil, 0)
 	assert.ErrorIs(t, err, os.ErrPermission)
 
 	err = os.RemoveAll(testDir)
@@ -2321,7 +2574,6 @@ func TestHTTPDFile(t *testing.T) {
 	user.Permissions["/"] = []string{dataprovider.PermAny}
 	connection := &Connection{
 		BaseConnection: common.NewBaseConnection(xid.New().String(), common.ProtocolHTTP, "", "", user),
-		request:        nil,
 	}
 
 	fs, err := user.GetFilesystem("")
@@ -2374,7 +2626,7 @@ func TestChangeUserPwd(t *testing.T) {
 	}
 	err = doChangeUserPassword(req, "a", "b", "b")
 	if assert.Error(t, err) {
-		assert.Contains(t, err.Error(), "invalid token claims")
+		assert.Contains(t, err.Error(), errInvalidTokenClaims.Error())
 	}
 }
 
@@ -2401,70 +2653,70 @@ func TestWebUserInvalidClaims(t *testing.T) {
 	req.Header.Set("Cookie", fmt.Sprintf("jwt=%v", token["access_token"]))
 	server.handleClientGetFiles(rr, req)
 	assert.Equal(t, http.StatusForbidden, rr.Code)
-	assert.Contains(t, rr.Body.String(), "Invalid token claims")
+	assert.Contains(t, rr.Body.String(), util.I18nErrorInvalidToken)
 
 	rr = httptest.NewRecorder()
 	req, _ = http.NewRequest(http.MethodGet, webClientDirsPath, nil)
 	req.Header.Set("Cookie", fmt.Sprintf("jwt=%v", token["access_token"]))
 	server.handleClientGetDirContents(rr, req)
 	assert.Equal(t, http.StatusForbidden, rr.Code)
-	assert.Contains(t, rr.Body.String(), "invalid token claims")
+	assert.Contains(t, rr.Body.String(), util.I18nErrorDirList403)
 
 	rr = httptest.NewRecorder()
 	req, _ = http.NewRequest(http.MethodGet, webClientDownloadZipPath, nil)
 	req.Header.Set("Cookie", fmt.Sprintf("jwt=%v", token["access_token"]))
 	server.handleWebClientDownloadZip(rr, req)
 	assert.Equal(t, http.StatusForbidden, rr.Code)
-	assert.Contains(t, rr.Body.String(), "Invalid token claims")
+	assert.Contains(t, rr.Body.String(), util.I18nErrorInvalidToken)
 
 	rr = httptest.NewRecorder()
 	req, _ = http.NewRequest(http.MethodGet, webClientEditFilePath, nil)
 	req.Header.Set("Cookie", fmt.Sprintf("jwt=%v", token["access_token"]))
 	server.handleClientEditFile(rr, req)
 	assert.Equal(t, http.StatusForbidden, rr.Code)
-	assert.Contains(t, rr.Body.String(), "Invalid token claims")
+	assert.Contains(t, rr.Body.String(), util.I18nErrorInvalidToken)
 
 	rr = httptest.NewRecorder()
 	req, _ = http.NewRequest(http.MethodGet, webClientSharePath, nil)
 	req.Header.Set("Cookie", fmt.Sprintf("jwt=%v", token["access_token"]))
 	server.handleClientAddShareGet(rr, req)
 	assert.Equal(t, http.StatusForbidden, rr.Code)
-	assert.Contains(t, rr.Body.String(), "Invalid token claims")
+	assert.Contains(t, rr.Body.String(), util.I18nErrorInvalidToken)
 
 	rr = httptest.NewRecorder()
 	req, _ = http.NewRequest(http.MethodGet, webClientSharePath, nil)
 	req.Header.Set("Cookie", fmt.Sprintf("jwt=%v", token["access_token"]))
 	server.handleClientUpdateShareGet(rr, req)
 	assert.Equal(t, http.StatusForbidden, rr.Code)
-	assert.Contains(t, rr.Body.String(), "Invalid token claims")
+	assert.Contains(t, rr.Body.String(), util.I18nErrorInvalidToken)
 
 	rr = httptest.NewRecorder()
 	req, _ = http.NewRequest(http.MethodPost, webClientSharePath, nil)
 	req.Header.Set("Cookie", fmt.Sprintf("jwt=%v", token["access_token"]))
 	server.handleClientAddSharePost(rr, req)
 	assert.Equal(t, http.StatusForbidden, rr.Code)
-	assert.Contains(t, rr.Body.String(), "Invalid token claims")
+	assert.Contains(t, rr.Body.String(), util.I18nErrorInvalidToken)
 
 	rr = httptest.NewRecorder()
 	req, _ = http.NewRequest(http.MethodPost, webClientSharePath+"/id", nil)
 	req.Header.Set("Cookie", fmt.Sprintf("jwt=%v", token["access_token"]))
 	server.handleClientUpdateSharePost(rr, req)
 	assert.Equal(t, http.StatusForbidden, rr.Code)
-	assert.Contains(t, rr.Body.String(), "Invalid token claims")
+	assert.Contains(t, rr.Body.String(), util.I18nErrorInvalidToken)
 
 	rr = httptest.NewRecorder()
-	req, _ = http.NewRequest(http.MethodGet, webClientSharesPath, nil)
+	req, _ = http.NewRequest(http.MethodGet, webClientSharesPath+jsonAPISuffix, nil)
 	req.Header.Set("Cookie", fmt.Sprintf("jwt=%v", token["access_token"]))
-	server.handleClientGetShares(rr, req)
+	getAllShares(rr, req)
 	assert.Equal(t, http.StatusForbidden, rr.Code)
-	assert.Contains(t, rr.Body.String(), "Invalid token claims")
+	assert.Contains(t, rr.Body.String(), util.I18nErrorInvalidToken)
 
 	rr = httptest.NewRecorder()
 	req, _ = http.NewRequest(http.MethodGet, webClientViewPDFPath, nil)
 	req.Header.Set("Cookie", fmt.Sprintf("jwt=%v", token["access_token"]))
 	server.handleClientGetPDF(rr, req)
 	assert.Equal(t, http.StatusForbidden, rr.Code)
-	assert.Contains(t, rr.Body.String(), "Invalid token claims")
+	assert.Contains(t, rr.Body.String(), util.I18nErrorInvalidToken)
 }
 
 func TestInvalidClaims(t *testing.T) {
@@ -2622,52 +2874,6 @@ func TestUserCanResetPassword(t *testing.T) {
 	assert.False(t, isUserAllowedToResetPassword(req, &u))
 }
 
-func TestMetadataAPI(t *testing.T) {
-	username := "metadatauser"
-	assert.False(t, common.ActiveMetadataChecks.Remove(username))
-
-	user := dataprovider.User{
-		BaseUser: sdk.BaseUser{
-			Username: username,
-			Password: "metadata_pwd",
-			HomeDir:  filepath.Join(os.TempDir(), username),
-			Status:   1,
-		},
-	}
-	user.Permissions = make(map[string][]string)
-	user.Permissions["/"] = []string{dataprovider.PermAny}
-	err := dataprovider.AddUser(&user, "", "", "")
-	assert.NoError(t, err)
-
-	assert.True(t, common.ActiveMetadataChecks.Add(username, ""))
-
-	tokenAuth := jwtauth.New(jwa.HS256.String(), util.GenerateRandomBytes(32), nil)
-	claims := make(map[string]any)
-	claims["username"] = defaultAdminUsername
-	claims[jwt.ExpirationKey] = time.Now().UTC().Add(1 * time.Hour)
-	token, _, err := tokenAuth.Encode(claims)
-	assert.NoError(t, err)
-	req, err := http.NewRequest(http.MethodPost, path.Join(metadataBasePath, username, "check"), nil)
-	assert.NoError(t, err)
-	rctx := chi.NewRouteContext()
-	rctx.URLParams.Add("username", username)
-	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
-	req = req.WithContext(context.WithValue(req.Context(), jwtauth.TokenCtxKey, token))
-
-	rr := httptest.NewRecorder()
-	startMetadataCheck(rr, req)
-	assert.Equal(t, http.StatusConflict, rr.Code, rr.Body.String())
-
-	assert.True(t, common.ActiveMetadataChecks.Remove(username))
-	assert.Len(t, common.ActiveMetadataChecks.Get(""), 0)
-	err = dataprovider.DeleteUser(username, "", "", "")
-	assert.NoError(t, err)
-
-	user.FsConfig.Provider = sdk.AzureBlobFilesystemProvider
-	err = doMetadataCheck(user)
-	assert.Error(t, err)
-}
-
 func TestBrowsableSharePaths(t *testing.T) {
 	share := dataprovider.Share{
 		Paths:    []string{"/"},
@@ -2679,35 +2885,35 @@ func TestBrowsableSharePaths(t *testing.T) {
 	}
 	req, err := http.NewRequest(http.MethodGet, "/share", nil)
 	require.NoError(t, err)
-	name, err := getBrowsableSharedPath(share, req)
+	name, err := getBrowsableSharedPath(share.Paths[0], req)
 	assert.NoError(t, err)
 	assert.Equal(t, "/", name)
 	req, err = http.NewRequest(http.MethodGet, "/share?path=abc", nil)
 	require.NoError(t, err)
-	name, err = getBrowsableSharedPath(share, req)
+	name, err = getBrowsableSharedPath(share.Paths[0], req)
 	assert.NoError(t, err)
 	assert.Equal(t, "/abc", name)
 
 	share.Paths = []string{"/a/b/c"}
 	req, err = http.NewRequest(http.MethodGet, "/share?path=abc", nil)
 	require.NoError(t, err)
-	name, err = getBrowsableSharedPath(share, req)
+	name, err = getBrowsableSharedPath(share.Paths[0], req)
 	assert.NoError(t, err)
 	assert.Equal(t, "/a/b/c/abc", name)
 	req, err = http.NewRequest(http.MethodGet, "/share?path=%2Fabc/d", nil)
 	require.NoError(t, err)
-	name, err = getBrowsableSharedPath(share, req)
+	name, err = getBrowsableSharedPath(share.Paths[0], req)
 	assert.NoError(t, err)
 	assert.Equal(t, "/a/b/c/abc/d", name)
 
 	req, err = http.NewRequest(http.MethodGet, "/share?path=%2Fabc%2F..%2F..", nil)
 	require.NoError(t, err)
-	_, err = getBrowsableSharedPath(share, req)
+	_, err = getBrowsableSharedPath(share.Paths[0], req)
 	assert.Error(t, err)
 
 	req, err = http.NewRequest(http.MethodGet, "/share?path=%2Fabc%2F..", nil)
 	require.NoError(t, err)
-	name, err = getBrowsableSharedPath(share, req)
+	name, err = getBrowsableSharedPath(share.Paths[0], req)
 	assert.NoError(t, err)
 	assert.Equal(t, "/a/b/c", name)
 
@@ -2736,6 +2942,7 @@ func TestSecureMiddlewareIntegration(t *testing.T) {
 				STSIncludeSubdomains: true,
 				STSPreload:           true,
 				ContentTypeNosniff:   true,
+				CacheControl:         "private",
 			},
 		},
 		enableWebAdmin:  true,
@@ -2755,6 +2962,7 @@ func TestSecureMiddlewareIntegration(t *testing.T) {
 	r.Host = "127.0.0.1"
 	server.router.ServeHTTP(rr, r)
 	assert.Equal(t, http.StatusForbidden, rr.Code)
+	assert.Equal(t, "no-cache, no-store, max-age=0, must-revalidate, private", rr.Header().Get("Cache-Control"))
 
 	rr = httptest.NewRecorder()
 	r.Header.Set(forwardedHostHeader, "www.sftpgo.com")
@@ -2885,7 +3093,7 @@ func TestWebAdminSetupWithInstallCode(t *testing.T) {
 	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	server.router.ServeHTTP(rr, r)
 	assert.Equal(t, http.StatusOK, rr.Code)
-	assert.Contains(t, rr.Body.String(), "Installation code mismatch")
+	assert.Contains(t, rr.Body.String(), util.I18nErrorSetupInstallCode)
 
 	_, err = dataprovider.AdminExists(defaultAdminUsername)
 	assert.Error(t, err)
@@ -2896,6 +3104,7 @@ func TestWebAdminSetupWithInstallCode(t *testing.T) {
 	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	server.router.ServeHTTP(rr, r)
 	assert.Equal(t, http.StatusFound, rr.Code)
+	assert.Equal(t, webAdminMFAPath, rr.Header().Get("Location"))
 
 	_, err = dataprovider.AdminExists(defaultAdminUsername)
 	assert.NoError(t, err)
@@ -2909,7 +3118,7 @@ func TestWebAdminSetupWithInstallCode(t *testing.T) {
 	err = dataprovider.Initialize(providerConf, configDir, true)
 	assert.NoError(t, err)
 
-	SetInstallationCodeResolver(func(defaultInstallationCode string) string {
+	SetInstallationCodeResolver(func(_ string) string {
 		return "5678"
 	})
 
@@ -2941,7 +3150,7 @@ func TestWebAdminSetupWithInstallCode(t *testing.T) {
 	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	server.router.ServeHTTP(rr, r)
 	assert.Equal(t, http.StatusOK, rr.Code)
-	assert.Contains(t, rr.Body.String(), "Installation code mismatch")
+	assert.Contains(t, rr.Body.String(), util.I18nErrorSetupInstallCode)
 
 	_, err = dataprovider.AdminExists(defaultAdminUsername)
 	assert.Error(t, err)
@@ -2952,6 +3161,7 @@ func TestWebAdminSetupWithInstallCode(t *testing.T) {
 	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	server.router.ServeHTTP(rr, r)
 	assert.Equal(t, http.StatusFound, rr.Code)
+	assert.Equal(t, webAdminMFAPath, rr.Header().Get("Location"))
 
 	_, err = dataprovider.AdminExists(defaultAdminUsername)
 	assert.NoError(t, err)
@@ -2983,7 +3193,7 @@ func TestDbResetCodeManager(t *testing.T) {
 		assert.ErrorIs(t, err, util.ErrNotFound)
 	}
 	_, err = mgr.Get(resetCode.Code)
-	assert.ErrorIs(t, err, sql.ErrNoRows)
+	assert.ErrorIs(t, err, util.ErrNotFound)
 	// add an expired reset code
 	resetCode = newResetCode("user", false)
 	resetCode.ExpiresAt = time.Now().Add(-24 * time.Hour)
@@ -2995,7 +3205,7 @@ func TestDbResetCodeManager(t *testing.T) {
 	}
 	mgr.Cleanup()
 	_, err = mgr.Get(resetCode.Code)
-	assert.ErrorIs(t, err, sql.ErrNoRows)
+	assert.ErrorIs(t, err, util.ErrNotFound)
 
 	dbMgr, ok := mgr.(*dbResetCodeManager)
 	if assert.True(t, ok) {
@@ -3202,6 +3412,173 @@ func TestHTTPSRedirect(t *testing.T) {
 
 	err = os.RemoveAll(acmeWebRoot)
 	assert.NoError(t, err)
+}
+
+func TestGetLogEventString(t *testing.T) {
+	assert.Equal(t, "Login failed", getLogEventString(notifier.LogEventTypeLoginFailed))
+	assert.Equal(t, "Login with non-existent user", getLogEventString(notifier.LogEventTypeLoginNoUser))
+	assert.Equal(t, "No login tried", getLogEventString(notifier.LogEventTypeNoLoginTried))
+	assert.Equal(t, "Algorithm negotiation failed", getLogEventString(notifier.LogEventTypeNotNegotiated))
+	assert.Equal(t, "Login succeeded", getLogEventString(notifier.LogEventTypeLoginOK))
+	assert.Empty(t, getLogEventString(0))
+}
+
+func TestUserQuotaUsage(t *testing.T) {
+	usage := userQuotaUsage{
+		QuotaSize: 100,
+	}
+	require.True(t, usage.HasQuotaInfo())
+	require.NotEmpty(t, usage.GetQuotaSize())
+	providerConf := dataprovider.GetProviderConfig()
+	quotaTracking := dataprovider.GetQuotaTracking()
+	providerConf.TrackQuota = 0
+	err := dataprovider.Close()
+	assert.NoError(t, err)
+	err = dataprovider.Initialize(providerConf, configDir, true)
+	assert.NoError(t, err)
+	err = dataprovider.Close()
+	assert.NoError(t, err)
+	assert.False(t, usage.HasQuotaInfo())
+	providerConf.TrackQuota = quotaTracking
+	err = dataprovider.Initialize(providerConf, configDir, true)
+	assert.NoError(t, err)
+	usage.QuotaSize = 0
+	assert.False(t, usage.HasQuotaInfo())
+	assert.Empty(t, usage.GetQuotaSize())
+	assert.Equal(t, 0, usage.GetQuotaSizePercentage())
+	assert.False(t, usage.IsQuotaSizeLow())
+	assert.False(t, usage.IsDiskQuotaLow())
+	assert.False(t, usage.IsQuotaLow())
+	usage.UsedQuotaSize = 9
+	assert.NotEmpty(t, usage.GetQuotaSize())
+	usage.QuotaSize = 10
+	assert.True(t, usage.IsQuotaSizeLow())
+	assert.True(t, usage.IsDiskQuotaLow())
+	assert.True(t, usage.IsQuotaLow())
+	usage.DownloadDataTransfer = 1
+	assert.True(t, usage.HasQuotaInfo())
+	assert.True(t, usage.HasTranferQuota())
+	assert.Empty(t, usage.GetQuotaFiles())
+	assert.Equal(t, 0, usage.GetQuotaFilesPercentage())
+	usage.QuotaFiles = 1
+	assert.NotEmpty(t, usage.GetQuotaFiles())
+	usage.QuotaFiles = 0
+	usage.UsedQuotaFiles = 9
+	assert.NotEmpty(t, usage.GetQuotaFiles())
+	usage.QuotaFiles = 10
+	usage.DownloadDataTransfer = 0
+	assert.True(t, usage.IsQuotaFilesLow())
+	assert.True(t, usage.IsDiskQuotaLow())
+	assert.False(t, usage.IsTotalTransferQuotaLow())
+	assert.False(t, usage.IsUploadTransferQuotaLow())
+	assert.False(t, usage.IsDownloadTransferQuotaLow())
+	assert.Equal(t, 0, usage.GetTotalTransferQuotaPercentage())
+	assert.Equal(t, 0, usage.GetUploadTransferQuotaPercentage())
+	assert.Equal(t, 0, usage.GetDownloadTransferQuotaPercentage())
+	assert.Empty(t, usage.GetTotalTransferQuota())
+	assert.Empty(t, usage.GetUploadTransferQuota())
+	assert.Empty(t, usage.GetDownloadTransferQuota())
+	usage.TotalDataTransfer = 3
+	usage.UsedUploadDataTransfer = 1 * 1048576
+	assert.NotEmpty(t, usage.GetTotalTransferQuota())
+	usage.TotalDataTransfer = 0
+	assert.NotEmpty(t, usage.GetTotalTransferQuota())
+	assert.NotEmpty(t, usage.GetUploadTransferQuota())
+	usage.UploadDataTransfer = 2
+	assert.NotEmpty(t, usage.GetUploadTransferQuota())
+	usage.UsedDownloadDataTransfer = 1 * 1048576
+	assert.NotEmpty(t, usage.GetDownloadTransferQuota())
+	usage.DownloadDataTransfer = 2
+	assert.NotEmpty(t, usage.GetDownloadTransferQuota())
+	assert.False(t, usage.IsTransferQuotaLow())
+	usage.UsedDownloadDataTransfer = 8 * 1048576
+	usage.TotalDataTransfer = 10
+	assert.True(t, usage.IsTotalTransferQuotaLow())
+	assert.True(t, usage.IsTransferQuotaLow())
+	usage.TotalDataTransfer = 0
+	usage.UploadDataTransfer = 0
+	usage.DownloadDataTransfer = 0
+	assert.False(t, usage.IsTransferQuotaLow())
+	usage.UploadDataTransfer = 10
+	usage.UsedUploadDataTransfer = 9 * 1048576
+	assert.True(t, usage.IsUploadTransferQuotaLow())
+	assert.True(t, usage.IsTransferQuotaLow())
+	usage.DownloadDataTransfer = 10
+	usage.UsedDownloadDataTransfer = 9 * 1048576
+	assert.True(t, usage.IsDownloadTransferQuotaLow())
+	assert.True(t, usage.IsTransferQuotaLow())
+}
+
+func TestShareRedirectURL(t *testing.T) {
+	shareID := util.GenerateUniqueID()
+	base := path.Join(webClientPubSharesPath, shareID)
+	next := path.Join(webClientPubSharesPath, shareID, "browse")
+	ok, res := checkShareRedirectURL(next, base)
+	assert.True(t, ok)
+	assert.Equal(t, next, res)
+	next = path.Join(webClientPubSharesPath, shareID, "browse") + "?a=b"
+	ok, res = checkShareRedirectURL(next, base)
+	assert.True(t, ok)
+	assert.Equal(t, next, res)
+	next = path.Join(webClientPubSharesPath, shareID)
+	ok, res = checkShareRedirectURL(next, base)
+	assert.True(t, ok)
+	assert.Equal(t, path.Join(base, "download"), res)
+	next = path.Join(webClientEditFilePath, shareID)
+	ok, res = checkShareRedirectURL(next, base)
+	assert.False(t, ok)
+	assert.Empty(t, res)
+	next = path.Join(webClientPubSharesPath, shareID) + "?compress=false&a=b"
+	ok, res = checkShareRedirectURL(next, base)
+	assert.True(t, ok)
+	assert.Equal(t, path.Join(base, "download?compress=false&a=b"), res)
+	next = path.Join(webClientPubSharesPath, shareID) + "?compress=true&b=c"
+	ok, res = checkShareRedirectURL(next, base)
+	assert.True(t, ok)
+	assert.Equal(t, path.Join(base, "download?compress=true&b=c"), res)
+	ok, res = checkShareRedirectURL("http://foo\x7f.com/ab", "http://foo\x7f.com/")
+	assert.False(t, ok)
+	assert.Empty(t, res)
+	ok, res = checkShareRedirectURL("http://foo.com/?foo\nbar", "http://foo.com")
+	assert.False(t, ok)
+	assert.Empty(t, res)
+}
+
+func TestI18NMessages(t *testing.T) {
+	msg := i18nListDirMsg(http.StatusForbidden)
+	require.Equal(t, util.I18nErrorDirList403, msg)
+	msg = i18nListDirMsg(http.StatusInternalServerError)
+	require.Equal(t, util.I18nErrorDirListGeneric, msg)
+	msg = i18nFsMsg(http.StatusForbidden)
+	require.Equal(t, util.I18nError403Message, msg)
+	msg = i18nFsMsg(http.StatusInternalServerError)
+	require.Equal(t, util.I18nErrorFsGeneric, msg)
+}
+
+func TestI18NErrors(t *testing.T) {
+	err := util.NewValidationError("error text")
+	errI18n := util.NewI18nError(err, util.I18nError500Message)
+	assert.ErrorIs(t, errI18n, util.ErrValidation)
+	assert.Equal(t, err.Error(), errI18n.Error())
+	assert.Equal(t, util.I18nError500Message, getI18NErrorString(errI18n, ""))
+	assert.Equal(t, util.I18nError500Message, errI18n.Message)
+	assert.Equal(t, "{}", errI18n.Args())
+	var e1 *util.ValidationError
+	assert.ErrorAs(t, errI18n, &e1)
+	var e2 *util.I18nError
+	assert.ErrorAs(t, errI18n, &e2)
+	err2 := util.NewI18nError(fs.ErrNotExist, util.I18nError500Message)
+	assert.ErrorIs(t, err2, &util.I18nError{})
+	assert.ErrorIs(t, err2, fs.ErrNotExist)
+	assert.NotErrorIs(t, err2, fs.ErrExist)
+	assert.Equal(t, util.I18nError403Message, getI18NErrorString(fs.ErrClosed, util.I18nError403Message))
+	errorString := getI18NErrorString(nil, util.I18nError500Message)
+	assert.Equal(t, util.I18nError500Message, errorString)
+	errI18nWrap := util.NewI18nError(errI18n, util.I18nError404Message)
+	assert.Equal(t, util.I18nError500Message, errI18nWrap.Message)
+	errI18n = util.NewI18nError(err, util.I18nError500Message, util.I18nErrorArgs(map[string]any{"a": "b"}))
+	assert.Equal(t, util.I18nError500Message, errI18n.Message)
+	assert.Equal(t, `{"a":"b"}`, errI18n.Args())
 }
 
 func isSharedProviderSupported() bool {

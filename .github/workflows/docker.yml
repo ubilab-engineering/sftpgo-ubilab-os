@@ -1,13 +1,14 @@
 name: Docker
 
 on:
+  # can I start the workflow by adding a comment ?
   #schedule:
   #  - cron: '0 4 * * *' # everyday at 4:00 AM UTC
   push:
-    branches:
-      - main
-    tags:
-      - v*
+#    branches:
+#      - 2.6.x
+#    tags:
+#      - v*
   pull_request:
 
 jobs:
@@ -25,16 +26,16 @@ jobs:
           - true
           # - false
         # include:
-        #   # - os: ubuntu-latest
+        #   # - os: ubuntu-22.04
         #   #   docker_pkg: distroless
         #   #   optional_deps: false
-        #   - os: ubuntu-latest
+        #   - os: ubuntu-22.04
         #     docker_pkg: debian-plugins
         #     optional_deps: true
       max-parallel: 1
     steps:
       - name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Gather image information
         id: info
@@ -142,36 +143,35 @@ jobs:
           OPTIONAL_DEPS: ${{ matrix.optional_deps }}
 
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@v2
+        uses: docker/setup-qemu-action@v3
 
       - name: Set up builder
-        uses: docker/setup-buildx-action@v2
+        uses: docker/setup-buildx-action@v3
         id: builder
 
       # - name: Login to Docker Hub
-      #   uses: docker/login-action@v2
+      #   uses: docker/login-action@v3
       #   with:
       #     username: ${{ secrets.DOCKERHUB_USERNAME }}
       #     password: ${{ secrets.DOCKERHUB_TOKEN }}
       #   if: ${{ github.event_name != 'pull_request' }}
 
       - name: Login to GitHub Container Registry
-        uses: docker/login-action@v2
+        uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.repository_owner }}
           password: ${{ secrets.GITHUB_TOKEN }}
-        # if: ${{ github.event_name != 'pull_request' }}
+        if: ${{ github.event_name != 'pull_request' }}
 
       - name: Build and push
-        uses: docker/build-push-action@v4
+        uses: docker/build-push-action@v6
         with:
           context: .
           builder: ${{ steps.builder.outputs.name }}
           file: ./${{ steps.info.outputs.dockerfile }}
-          platforms: linux/amd64
-          push: true
-          # push: ${{ github.event_name != 'pull_request' }}
+          platforms: linux/amd64 #,linux/arm64,linux/ppc64le,linux/arm/v7
+          push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.info.outputs.tags }}
           build-args: |
             COMMIT_SHA=${{ steps.info.outputs.sha }}
@@ -180,7 +180,7 @@ jobs:
             FEATURES=${{ steps.info.outputs.features }}
           labels: |
             org.opencontainers.image.title=SFTPGo
-            org.opencontainers.image.description=Fully featured and highly configurable SFTP server with optional HTTP, FTP/S and WebDAV support
+            org.opencontainers.image.description=Full-featured and highly configurable file transfer server: SFTP, HTTP/S,FTP/S, WebDAV
             org.opencontainers.image.url=https://github.com/ubilab-engineering/sftpgo-ubilab-os
             org.opencontainers.image.documentation=https://github.com/ubilab-engineering/sftpgo-ubilab-os/blob/${{ github.sha }}/docker/README.md
             org.opencontainers.image.source=https://github.com/ubilab-engineering/sftpgo-ubilab-os

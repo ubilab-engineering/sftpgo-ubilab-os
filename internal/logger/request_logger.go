@@ -1,4 +1,4 @@
-// Copyright (C) 2019-2023 Nicola Murino
+// Copyright (C) 2019 Nicola Murino
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published
@@ -73,7 +73,15 @@ func (l *StructuredLogger) NewLogEntry(r *http.Request) middleware.LogEntry {
 // Write logs a new entry at the end of the HTTP request
 func (l *StructuredLoggerEntry) Write(status, bytes int, _ http.Header, elapsed time.Duration, _ any) {
 	metric.HTTPRequestServed(status)
-	l.Logger.Info().
+	var ev *zerolog.Event
+	if status >= http.StatusInternalServerError {
+		ev = l.Logger.Error()
+	} else if status >= http.StatusBadRequest {
+		ev = l.Logger.Warn()
+	} else {
+		ev = l.Logger.Debug()
+	}
+	ev.
 		Timestamp().
 		Str("sender", "httpd").
 		Fields(l.fields).
